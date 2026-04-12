@@ -1,18 +1,28 @@
 [project]
 name = "skillful-agent"
 version = "0.1.0"
-description = "Natural language to PowerShell command agent"
+description = "General-purpose AI agent with progressive skill disclosure"
 requires-python = ">=3.11"
 dependencies = [
     "litellm>=1.50",
     "google-adk>=1.0.0,<2.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
     "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
 ]
 
 [project.scripts]
 skillful-agent = "skillful_agent.main:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/skillful_agent"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
+]

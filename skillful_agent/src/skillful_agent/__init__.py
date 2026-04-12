@@ -1,3 +1,3 @@
-from .cl_agent import CommandLineAgent
+from skillful_agent.agent import SkillfulAgent
 
-__all__ = ["CommandLineAgent"]
+__all__ = ["SkillfulAgent"]

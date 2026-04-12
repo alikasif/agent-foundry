@@ -158,27 +158,34 @@ This document contains critical information about working with this codebase. Fo
   - Test thoroughly
 
 ## Agents & Orchestration
-This repository defines a set of workflow agents under `.claude/agents/`. Use this file as a concise index for available agents and how they are typically invoked by the `software-team-orchestrator`.
+This repository defines a set of workflow agents under `.claude/agents/`. Use this file as a concise index for available agents and how they are invoked.
+
+**Orchestration flow:**
+```
+software-team-orchestrator
+  Phase 1 (mandatory): product-requirements-agent → writes <project_dir>/shared/prd.md → PRD_COMPLETE → user approval
+  Phase 2 (optional):  design-architecture-agent  → writes <project_dir>/shared/designs.md → DESIGN_COMPLETE
+  Phase 3 (mandatory): planning-subagent           → writes <project_dir>/shared/plan.md + task_list.json → user approval
+  Phase 4 (mandatory): ralph-execution-engine      → dispatches specialists → RALPH_COMPLETE
+```
 
 Core agents
 
-- `software-team-orchestrator`: Lead orchestrator that coordinates research, requirements clarification, planning, scaffolding, specialist agents, reviewers, and completion phases.
-- `product-requirements-agent`: Gathers functional and non-functional requirements by asking clarifying questions, produces a repository-level PRD at `shared/product_requirements.md`, and flags open questions for the Lead Agent. Invoked by `software-team-orchestrator` as Phase 1.5; the orchestrator pauses for explicit PRD approval before proceeding to planning.
-- `design-architecture-agent`: Produces flow designs, component diagrams, data model sketches, and architecture tradeoffs. Runs after `product-requirements-agent` and before `planning-subagent` to provide a concrete design input for planning.
-- `planning-subagent`: Researches the codebase, identifies modules, maps dependencies, and produces structured findings for planning.
-- `project-scaffolder`: Creates initial project scaffolds and writes `shared/project_structure.json`.
-- `python-backend-coder`: Implements backend services and outputs API contracts to `shared/api/`.
-- `python-test-runner`: Writes and runs tests for assigned modules (uses anyio for async tests).
-- `docs-writer`: Produces documentation, READMEs, and API docs.
-- `backend-code-reviewer`: Performs code reviews for backend changes.
-- `arch-reviewer`: Reviews architectural decisions when multiple code agents are active.
-- `git-remote-pusher`: Handles remote git pushes for feature branches and milestones.
-- `ralph-execution-engine`: Optional execution engine for orchestrating many specialist agents.
+- `software-team-orchestrator`: Lead orchestrator. Runs 4 phases (requirements → optional design → planning → execution). All `shared/` files go inside `<project_dir>/shared/`.
+- `product-requirements-agent`: Asks clarifying questions, writes `<project_dir>/shared/prd.md`, prints `PRD_COMPLETE`. Invoked by orchestrator Phase 1.
+- `design-architecture-agent`: **Optional.** Writes `<project_dir>/shared/designs.md`, prints `DESIGN_COMPLETE`. Invoked by orchestrator Phase 2 only for complex/multi-service scope.
+- `planning-subagent`: Researches codebase + PRD, **writes** `<project_dir>/shared/plan.md` and `<project_dir>/shared/task_list.json`. Invoked by orchestrator Phase 3.
+- `ralph-execution-engine`: Execution loop. Reads `<project_dir>/shared/task_list.json`, dispatches specialists in parallel, resolves dependencies, writes `<project_dir>/shared/execution_summary.md`, prints `RALPH_COMPLETE`.
+- `project-scaffolder`: Dispatched by ralph for `project_structure` tasks. Creates directories and stub configs. Local commits only — no git push.
+- `python-backend-coder`: Dispatched by ralph for `python_coder` tasks. Implements Python source files. Local commits only.
+- `python-test-runner`: Dispatched by ralph for `python_test` tasks. Writes and runs pytest tests (anyio for async).
+- `docs-writer`: Dispatched by ralph for `documentation` tasks. Produces READMEs, API docs, user guides.
+- `backend-code-reviewer`: Dispatched by ralph for `backend_reviewer` tasks. Reviews python_coder output. Writes results to `<project_dir>/shared/reviews/<task_id>_review.md`.
+- `arch-reviewer`: Dispatched by ralph for `architecture_reviewer` tasks. Reviews overall design. Writes results to `<project_dir>/shared/reviews/<task_id>_arch_review.md`.
 
 Notes
 
+- **`git-remote-pusher` is excluded from all operations.** Never invoke it. Never mention it. Local commits are the only git operations allowed.
+- All coordination files (`prd.md`, `designs.md`, `plan.md`, `task_list.json`, `learnings.md`, `execution_summary.md`, `reviews/`) live under `<project_dir>/shared/` — always project-local, never in a global directory.
 - Agent definitions are stored in `.claude/agents/` as markdown files with YAML frontmatter.
-- Per-agent persistent memory is stored under `.claude/agent-memory/<agent-name>/`.
-- The `product-requirements-agent` writes the PRD to `shared/product_requirements.md` and should commit using a conventional commit message: `docs: add product requirements PRD` on a feature branch created for the request.
-- The `design-architecture-agent` writes flow and architecture artifacts to `shared/designs.md` or feature-specific files under `shared/designs/` and lists open architecture decisions.
 - If you add or change agents, update `.claude/agents/<agent>.md` and this section in `CLAUDE.md`.
