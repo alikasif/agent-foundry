@@ -11,6 +11,8 @@ Use this skill when a user asks to set a reminder or schedule a task for a futur
 
 ## Workflow
 
+> **Note:** The `task-reminder` skill uses standalone scripts — do NOT call `save_reminder` or `list_reminders` as built-in tools. Instead, invoke the scripts via shell as described below.
+
 1. Extract the following information from the user's request:
    - **Task name**: A short description of what to remember
    - **Date**: The date of the reminder (YYYY-MM-DD format)
@@ -20,22 +22,44 @@ Use this skill when a user asks to set a reminder or schedule a task for a futur
 
 3. Validate the date and time formats. If invalid, inform the user and ask for corrections.
 
-4. Call the `save_reminder` tool with parameters:
-   - `task_name` (str) — the name/description of the task
-   - `reminder_date` (str) — date in YYYY-MM-DD format
-   - `reminder_time` (str) — time in HH:MM format
+4. Run the save script to store the reminder. The `<skill_dir>` path is shown in the
+   `<skill_content>` block returned when this skill was activated (look for
+   `Skill directory: <path>`).
+
+   **On Windows** — use `run_powershell`:
+   ```
+   uv run python "<skill_dir>/scripts/save_reminder.py" "<task_name>" "<reminder_date>" "<reminder_time>"
+   ```
+
+   **On Linux/macOS** — use `execute_bash_command`:
+   ```
+   uv run python "<skill_dir>/scripts/save_reminder.py" "<task_name>" "<reminder_date>" "<reminder_time>"
+   ```
+
+   Replace `<task_name>`, `<reminder_date>`, and `<reminder_time>` with the actual values.
+   Quote all arguments to handle spaces in task names.
 
 5. Confirm to the user that the reminder was saved successfully, showing the task name, date, and time.
 
-6. If the user asks to view their reminders, call the `list_reminders` tool and display the results in a readable format.
+6. If the user asks to view their reminders, run the list script and display the results:
+
+   **On Windows** — use `run_powershell`:
+   ```
+   uv run python "<skill_dir>/scripts/list_reminders.py"
+   ```
+
+   **On Linux/macOS** — use `execute_bash_command`:
+   ```
+   uv run python "<skill_dir>/scripts/list_reminders.py"
+   ```
 
 ## Examples
 
 - **User**: "Remind me to submit expense report next Friday at 2pm"
-  - Save: `task_name="Submit expense report"`, `reminder_date="2026-04-17"`, `reminder_time="14:00"`
+  - Run: `uv run python "<skill_dir>/scripts/save_reminder.py" "Submit expense report" "2026-04-17" "14:00"`
 
 - **User**: "Set a reminder for client meeting on April 20th at 10:30 AM"
-  - Save: `task_name="Client meeting"`, `reminder_date="2026-04-20"`, `reminder_time="10:30"`
+  - Run: `uv run python "<skill_dir>/scripts/save_reminder.py" "Client meeting" "2026-04-20" "10:30"`
 
 - **User**: "Show me my reminders"
-  - Use `list_reminders` to retrieve and display all scheduled reminders.
+  - Run: `uv run python "<skill_dir>/scripts/list_reminders.py"` and display the output to the user.
