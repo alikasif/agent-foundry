@@ -33,8 +33,6 @@ You have access to the following tools:
   commands whenever you need the current date or time.
 - execute_bash_command: Run a bash/shell command (Linux/macOS only).
 - run_powershell: Run a PowerShell command (Windows only).
-- save_reminder: Save a reminder with task name, date, and time.
-- list_reminders: List all saved reminders.
 
 Only use execute_bash_command or run_powershell when the user explicitly requests
 a shell command. Never use them just to get the current date — use get_current_date.

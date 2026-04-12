@@ -18,9 +18,7 @@ from skillful_agent.tools import (
     activate_skill,
     execute_bash_command,
     get_current_date,
-    list_reminders,
     run_powershell,
-    save_reminder,
 )
 
 
@@ -116,8 +114,6 @@ class SkillfulAgent:
                 get_current_date,
                 execute_bash_command,
                 run_powershell,
-                save_reminder,
-                list_reminders,
                 activate_skill,
             ],
         )

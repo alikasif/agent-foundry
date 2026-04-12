@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 from datetime import datetime
-from pathlib import Path
 
 from google.adk.tools import ToolContext
 
 from skillful_agent.skill_manager import SkillManager
-
-# Absolute path to the reminders file — resolved relative to this module so it
-# is always correct regardless of the process working directory.
-_REMINDERS_PATH = Path(__file__).resolve().parent.parent.parent / "reminders.json"
 
 
 def get_current_date() -> str:
@@ -78,53 +72,6 @@ def run_powershell(code: str) -> str:
     if process.returncode != 0:
         return f"Error: {error}"
     return output
-
-
-def save_reminder(
-    task_name: str,
-    reminder_date: str,
-    reminder_time: str,
-) -> str:
-    """Save a reminder entry to the reminders store.
-
-    Args:
-        task_name: Description of the task to remember.
-        reminder_date: Date in YYYY-MM-DD format.
-        reminder_time: Time in HH:MM format (24-hour).
-    """
-    reminders: list[dict[str, str]] = []
-    if _REMINDERS_PATH.exists():
-        try:
-            reminders = json.loads(_REMINDERS_PATH.read_text())
-        except json.JSONDecodeError:
-            pass
-
-    reminders.append({"task": task_name, "date": reminder_date, "time": reminder_time})
-    _REMINDERS_PATH.write_text(json.dumps(reminders, indent=4))
-
-    return f"Reminder saved: '{task_name}' on {reminder_date} at {reminder_time}"
-
-
-def list_reminders() -> str:
-    """Read and return all saved reminders."""
-    if not _REMINDERS_PATH.exists():
-        return "No reminders found."
-
-    try:
-        reminders: list[dict[str, str]] = json.loads(_REMINDERS_PATH.read_text())
-    except json.JSONDecodeError:
-        return "No reminders found."
-
-    if not reminders:
-        return "No reminders found."
-
-    lines = ["Your reminders:"]
-    for i, r in enumerate(reminders, 1):
-        lines.append(
-            f"{i}. {r.get('task', 'Unknown')} — "
-            f"{r.get('date', '?')} at {r.get('time', '?')}"
-        )
-    return "\n".join(lines)
 
 
 def activate_skill(skill_name: str, tool_context: ToolContext) -> str:
