@@ -49,7 +49,9 @@ def _make_isolated_root(tmp_path: Path) -> Path:
     return real_root
 
 
-def _run(script: Path, args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    script: Path, args: list[str], cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a script via the uv-managed Python interpreter.
 
     Args:
@@ -83,7 +85,9 @@ def test_save_reminder_success(tmp_path: Path) -> None:
             _SAVE_SCRIPT,
             ["Test reminder", "2026-04-20", "09:00"],
         )
-        assert result.returncode == 0, f"Expected exit 0, got {result.returncode}. stderr: {result.stderr}"
+        assert result.returncode == 0, (
+            f"Expected exit 0, got {result.returncode}. stderr: {result.stderr}"
+        )
         assert "Reminder saved" in result.stdout, (
             f"Expected 'Reminder saved' in stdout, got: {result.stdout!r}"
         )

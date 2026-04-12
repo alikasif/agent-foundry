@@ -89,15 +89,38 @@ After each push cycle (success or no commits found), wait the polling interval a
 | Remote branch missing | Attempt `git push --set-upstream origin {branch}` once |
 | `shared/plan.md` missing | Wait and retry every 60 seconds, log waiting status |
 
-## Project-Specific Configuration (from CLAUDE.md)
+## Git Workflow
 
-This project uses:
-- `uv run` for Python tooling
-- Feature branches (never push directly to `main`)
-- Conventional commit style: `type(scope): short description`
-- Branch naming: `fix/`, `feat/`, `chore/` prefixes
+- Always use feature branches; do not commit directly to `main`
+  - Name branches descriptively: `fix/auth-timeout`, `feat/api-pagination`, `chore/ruff-fixes`
+  - Keep one logical change per branch to simplify review and rollback
+- Create pull requests for all changes
+  - Open a draft PR early for visibility; convert to ready when complete
+  - Ensure tests pass locally before marking ready for review
+  - Use PRs to trigger CI/CD and enable async reviews
+- Link issues
+  - Before starting, reference an existing issue or create one
+  - Use commit/PR messages like `Fixes #123` for auto-linking and closure
+- Commit practices
+  - Make atomic commits (one logical change per commit)
+  - Prefer conventional commit style: `type(scope): short description`
+    - Examples: `feat(eval): group OBS logs per test`, `fix(cli): handle missing API key`
+  - Squash only when merging to `main`; keep granular history on the feature branch
+- Practical workflow
+  1. Create or reference an issue
+  2. `git checkout -b feat/issue-123-description`
+  3. Commit in small, logical increments
+  4. `git push` and open a draft PR early
+  5. Convert to ready PR when functionally complete and tests pass
+  6. Merge after reviews and checks pass
 
-When reading branch names from `shared/plan.md`, verify they follow the project's branch naming conventions. Log a warning (but do not block) if they do not.
+## Pull Requests
+
+- Create a detailed message of what changed. Focus on the high-level description of the problem it tries to solve, and how it is solved. Don't go into the specifics of the code unless it adds clarity.
+
+## Project-Specific Configuration
+
+When reading branch names from `shared/plan.md`, verify they follow the project's branch naming conventions (`fix/`, `feat/`, `chore/` prefixes). Log a warning (but do not block) if they do not.
 
 ## Self-Verification Checklist Before Each Push
 

@@ -10,7 +10,12 @@ import skillful_agent.tools as tools_module
 
 def test_four_tools_exported() -> None:
     """tools module must expose exactly the four agent-native callables."""
-    expected = {"get_current_date", "execute_bash_command", "run_powershell", "activate_skill"}
+    expected = {
+        "get_current_date",
+        "execute_bash_command",
+        "run_powershell",
+        "activate_skill",
+    }
     actual = {
         name
         for name in dir(tools_module)

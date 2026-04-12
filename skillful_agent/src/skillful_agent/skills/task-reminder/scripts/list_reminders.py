@@ -26,8 +26,7 @@ def find_project_root(start: Path) -> Path:
         parent = current.parent
         if parent == current:
             raise FileNotFoundError(
-                "Could not find pyproject.toml in any parent directory of "
-                f"{start}"
+                f"Could not find pyproject.toml in any parent directory of {start}"
             )
         current = parent
 

@@ -210,3 +210,5 @@ __marimo__/
 settings.json
 settings.local.json
 reminders.json
+shared/
+claude_waorkspace/
