@@ -41,7 +41,10 @@ Use this skill when a user asks to set a reminder or schedule a task for a futur
 
 5. Confirm to the user that the reminder was saved successfully, showing the task name, date, and time.
 
-6. If the user asks to view their reminders, run the list script and display the results:
+6. If the user asks to view their reminders, run the list script and paste the exact
+   stdout output (the full text returned by the tool call) directly into your reply.
+   Do NOT summarise, paraphrase, or reformat the output — show every line exactly as
+   printed by the script.
 
    **On Windows** — use `run_powershell`:
    ```
@@ -62,4 +65,5 @@ Use this skill when a user asks to set a reminder or schedule a task for a futur
   - Run: `uv run python "<skill_dir>/scripts/save_reminder.py" "Client meeting" "2026-04-20" "10:30"`
 
 - **User**: "Show me my reminders"
-  - Run: `uv run python "<skill_dir>/scripts/list_reminders.py"` and display the output to the user.
+  - Run: `uv run python "<skill_dir>/scripts/list_reminders.py"` and paste the exact
+    stdout into your reply verbatim.

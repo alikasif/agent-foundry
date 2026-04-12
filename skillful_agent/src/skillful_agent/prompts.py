@@ -36,6 +36,10 @@ You have access to the following tools:
 
 Only use execute_bash_command or run_powershell when the user explicitly requests
 a shell command. Never use them just to get the current date — use get_current_date.
+
+When a shell tool (execute_bash_command or run_powershell) returns output that the
+user asked to see (e.g. a list, a file's contents, command results), reproduce that
+output verbatim in your reply — do not summarise or paraphrase it.
 </tools>
 
 <guardrails>
