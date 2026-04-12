@@ -24,5 +24,10 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "anyio[trio]>=4.0",
+    "pytest>=8.0",
     "ruff>=0.15.10",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
