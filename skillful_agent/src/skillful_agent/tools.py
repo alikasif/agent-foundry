@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import re
 import subprocess
 from datetime import datetime
 
+from google.adk.agents import Agent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.adk.tools import ToolContext
+from google.genai import types
 
 from skillful_agent.skill_manager import SkillManager
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_date() -> str:
@@ -74,21 +84,99 @@ def run_powershell(code: str) -> str:
     return output
 
 
-def activate_skill(skill_name: str, tool_context: ToolContext) -> str:
-    """Load a skill's full instructions into context (agentskills.io Tier 2).
+async def _run_agent_skill(
+    skill_name: str,
+    body: str,
+    task_description: str,
+) -> str:
+    """Spawn an ephemeral ADK sub-agent to execute an agent-mode skill.
 
-    Call this when a user query matches a skill listed in the skill catalog.
-    Returns the skill's complete instructions and available resources.
-    The skill remains active for the rest of the session — no need to activate again.
+    The sub-agent receives the skill body as its instruction and
+    ``task_description`` as the user message.  It has access to
+    execute_bash_command, run_powershell, and get_current_date — but NOT
+    activate_skill, preventing recursive delegation.
+
+    Args:
+        skill_name: Human-readable name used for session/agent labels.
+        body: Full SKILL.md body used as the sub-agent instruction.
+        task_description: The user's task prompt forwarded to the sub-agent.
+
+    Returns:
+        The sub-agent's final response text, or a descriptive error string.
+    """
+    try:
+        safe_name = re.sub(r"[^a-zA-Z0-9]", "_", skill_name)
+        model = LiteLlm(
+            model=os.environ.get(
+                "SKILLFUL_MODEL", "openrouter/anthropic/claude-3-5-haiku"
+            ),
+            api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+        )
+        sub_agent = Agent(
+            name=f"skill_agent_{safe_name}",
+            model=model,
+            instruction=body,
+            tools=[execute_bash_command, run_powershell, get_current_date],
+        )
+        session_service = InMemorySessionService()
+        app_name = f"skill_runner_{safe_name}"
+        session = await session_service.create_session(
+            app_name=app_name,
+            user_id="skill_runner",
+            session_id=f"session_{safe_name}",
+        )
+        runner = Runner(
+            agent=sub_agent,
+            app_name=app_name,
+            session_service=session_service,
+        )
+        user_content = types.Content(
+            role="user",
+            parts=[types.Part(text=task_description)],
+        )
+        final_text: str | None = None
+        async for event in runner.run_async(
+            user_id=session.user_id,
+            session_id=session.id,
+            new_message=user_content,
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                final_text = "".join(
+                    p.text
+                    for p in event.content.parts
+                    if hasattr(p, "text") and isinstance(p.text, str)
+                )
+        if final_text is None:
+            return f"Skill '{skill_name}' sub-agent returned no response."
+        return final_text
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Agent-mode skill '%s' failed: %s", skill_name, exc)
+        return f"Error running skill '{skill_name}' as agent: {exc}"
+
+
+async def activate_skill(
+    skill_name: str,
+    task_description: str,
+    tool_context: ToolContext,
+) -> str:
+    """Load or execute a skill by name (agentskills.io Tier 2).
+
+    For ``inline`` skills: loads the full SKILL.md body into context as a
+    ``<skill_content>`` XML block and marks the skill active for the session.
+    Call once per session — subsequent calls return an "already active" notice.
+
+    For ``agent`` skills: spawns an ephemeral sub-agent pre-loaded with the
+    skill's instructions and the three base tools (execute_bash_command,
+    run_powershell, get_current_date).  ``task_description`` is forwarded as
+    the user prompt.  The skill is NOT marked active — it can be called
+    multiple times for different tasks.
 
     Args:
         skill_name: Exact name of the skill as listed in the catalog.
+        task_description: The task to delegate.  Ignored for inline skills;
+            used as the user prompt for agent-mode skills.
+        tool_context: ADK tool context providing session state.
     """
-    active: list[str] = tool_context.state.get("active_skills", [])
-
-    if skill_name in active:
-        return f"Skill '{skill_name}' is already active in this session."
-
     skill_manager: SkillManager = tool_context.state["_skill_manager"]
     body = skill_manager.load_skill_body(skill_name)
 
@@ -98,7 +186,22 @@ def activate_skill(skill_name: str, tool_context: ToolContext) -> str:
             f"Skill '{skill_name}' not found. Available skills: {available or 'none'}"
         )
 
-    entry = next(e for e in skill_manager.discover_skills() if e.name == skill_name)
+    entry = next(
+        (e for e in skill_manager.discover_skills() if e.name == skill_name),
+        None,
+    )
+    if entry is None:
+        # Should not happen given body is not None, but guard defensively
+        return f"Skill '{skill_name}' not found."
+
+    if entry.mode == "agent":
+        return await _run_agent_skill(skill_name, body, task_description)
+
+    # --- inline mode ---
+    active: list[str] = tool_context.state.get("active_skills", [])
+    if skill_name in active:
+        return f"Skill '{skill_name}' is already active in this session."
+
     resources = skill_manager.list_skill_resources(skill_name)
 
     # Mark as active for deduplication

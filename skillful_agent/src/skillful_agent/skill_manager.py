@@ -19,6 +19,7 @@ class SkillCatalogEntry(BaseModel):
     description: str
     location: Path  # absolute path to SKILL.md
     skill_dir: Path  # parent directory of SKILL.md
+    mode: str = "inline"  # dispatch mode: 'inline' or 'agent'
 
 
 class SkillManager:
@@ -172,12 +173,22 @@ class SkillManager:
                     stacklevel=2,
                 )
 
+            raw_mode = str(frontmatter.get("mode", "inline")).strip().lower()
+            if raw_mode not in {"inline", "agent"}:
+                logger.warning(
+                    "Skill '%s' has unrecognized mode '%s'; defaulting to 'inline'",
+                    name,
+                    raw_mode,
+                )
+                raw_mode = "inline"
+
             entries.append(
                 SkillCatalogEntry(
                     name=name,
                     description=description,
                     location=skill_md.resolve(),
                     skill_dir=child.resolve(),
+                    mode=raw_mode,
                 )
             )
         return entries
