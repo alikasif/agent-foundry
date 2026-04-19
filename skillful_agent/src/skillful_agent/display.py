@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -24,7 +24,7 @@ class EventStreamProvider(Protocol):
 
     def event_stream(
         self, text: str, user_id: str, session_id: str
-    ) -> AsyncGenerator[Event, None]: ...
+    ) -> AsyncIterator[Event]: ...
 
 
 # ---------------------------------------------------------------------------

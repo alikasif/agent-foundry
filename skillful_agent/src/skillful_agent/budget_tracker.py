@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 
 class BudgetTracker:
@@ -24,7 +25,7 @@ class BudgetTracker:
 
     def is_active(self) -> bool:
         """Return True if budget tracking is enabled."""
-        return self._load().get("enabled", False)
+        return bool(self._load().get("enabled", False))
 
     def set_budget(self, max_tokens: int) -> None:
         """Enable budget tracking with the given limit, preserving used_tokens."""
@@ -41,7 +42,7 @@ class BudgetTracker:
         state = self._load()
         if not state.get("enabled"):
             return
-        state["used_tokens"] = state.get("used_tokens", 0) + tokens
+        state["used_tokens"] = cast(int, state.get("used_tokens", 0)) + tokens
         self._save(state)
 
     def budget_status_text(self) -> str | None:
@@ -53,8 +54,8 @@ class BudgetTracker:
         if not state.get("enabled"):
             return None
 
-        max_tokens: int = state.get("max_tokens", 0)
-        used_tokens: int = state.get("used_tokens", 0)
+        max_tokens: int = cast(int, state.get("max_tokens", 0))
+        used_tokens: int = cast(int, state.get("used_tokens", 0))
         remaining = max(0, max_tokens - used_tokens)
         pct_used = (used_tokens / max_tokens * 100) if max_tokens else 0
         pct_remaining = 100 - pct_used

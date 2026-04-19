@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import warnings
+from typing import cast
 
 from dotenv import load_dotenv
 from rich.console import Console
@@ -125,10 +126,10 @@ def _cmd_context(
 
     budget_state = agent._budget_tracker.current_state()
     if budget_state.get("enabled"):
-        max_t = budget_state.get("max_tokens", 0)
-        used_t = budget_state.get("used_tokens", 0)
-        remaining = max(0, int(max_t) - int(used_t))
-        pct = (remaining / int(max_t) * 100) if max_t else 0
+        max_t: int = cast(int, budget_state.get("max_tokens", 0))
+        used_t: int = cast(int, budget_state.get("used_tokens", 0))
+        remaining = max(0, max_t - used_t)
+        pct = (remaining / max_t * 100) if max_t else 0
         table.add_row(
             "Token budget",
             f"{used_t:,} / {max_t:,} used | [cyan]{remaining:,} remaining ({pct:.1f}%)[/]",
@@ -169,7 +170,13 @@ def _handle_command(
             console.print("[yellow]Usage:[/] /skill NAME")
     elif cmd == "context":
         _cmd_context(
-            agent, user_id, session_id, turn_count, last_tokens, cumulative_tokens, console
+            agent,
+            user_id,
+            session_id,
+            turn_count,
+            last_tokens,
+            cumulative_tokens,
+            console,
         )
     elif cmd == "clear":
         return _cmd_clear(agent, user_id, console)
