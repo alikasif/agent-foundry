@@ -137,7 +137,7 @@ Re-read `<project_dir>/shared/task_list.json`:
 - You MUST read `shared/learnings.md` at the start of execution (if it exists). Use past learnings to anticipate issues when dispatching tasks.
 - You MUST append to `shared/learnings.md` if you encounter dispatch failures, deadlocks, or task dependency issues.
 - You MUST verify that subagents recorded learnings for any failures or retries — if not, record them yourself.
-
+- You must always update the status of tasks in `shared/task_list.json` to reflect the current state — do not rely on subagents to do this consistently. Do not start next tasks until the file reflects the correct status of prior tasks.
 ---
 
 ## Learnings Format

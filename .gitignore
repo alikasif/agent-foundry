@@ -212,3 +212,6 @@ settings.local.json
 reminders.json
 shared/
 claude_waorkspace/
+budget_state.json
+.claude/skills/token-budget/scripts/budget_state.json
+.claude/skills/token-budget/scripts/budget_state.json
