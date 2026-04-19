@@ -301,6 +301,8 @@ Agent: Your reminders:
 
 ## Adding a New Skill
 
+For full skill-authoring documentation including the `mode` field and agent-mode dispatch, see [docs/skill-authoring.md](skill-authoring.md).
+
 1. Create a directory under `src/skillful_agent/skills/` (use hyphens, e.g. `code-review`).
 2. Add a `SKILL.md` with YAML frontmatter and markdown instructions:
 
