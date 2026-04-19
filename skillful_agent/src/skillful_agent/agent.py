@@ -12,6 +12,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+from skillful_agent.budget_tracker import BudgetTracker
 from skillful_agent.prompts import format_system_prompt
 from skillful_agent.skill_manager import SkillManager
 from skillful_agent.tools import (
@@ -32,6 +33,9 @@ class SkillfulAgent:
 
     def __init__(self) -> None:
         self.skill_manager = SkillManager()
+        self._budget_tracker = BudgetTracker(
+            self.skill_manager._project_root / "budget_state.json"
+        )
         self._session_service = InMemorySessionService()
         self._agent = self._build_agent()
         self._runner: Runner | None = None
@@ -73,6 +77,9 @@ class SkillfulAgent:
             session_id: Active session ID from create_session().
         """
         runner = self._get_runner()
+        status = self._budget_tracker.budget_status_text()
+        if status:
+            text = f"{status}\n\n{text}"
         content = types.Content(role="user", parts=[types.Part(text=text)])
         async for event in runner.run_async(
             user_id=user_id,

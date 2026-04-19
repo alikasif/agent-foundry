@@ -39,14 +39,14 @@ def _print_banner(console: Console, model: str, skills: list[str]) -> None:
 
 
 def _print_exit_summary(
-    console: Console, turn_count: int, last_tokens: int | None
+    console: Console, turn_count: int, last_tokens: int | None, cumulative_tokens: int
 ) -> None:
     """Print a brief session summary on exit."""
     token_str = f"{last_tokens:,}" if last_tokens is not None else "unavailable"
     console.print(Rule(style="dim"))
     console.print(
         f"[dim]Session ended \u2014 {turn_count} turn(s) | "
-        f"tokens last turn: {token_str}[/dim]"
+        f"tokens last turn: {token_str} | total session: {cumulative_tokens:,}[/dim]"
     )
 
 
@@ -97,6 +97,7 @@ def _cmd_context(
     session_id: str,
     turn_count: int,
     last_tokens: int | None,
+    cumulative_tokens: int,
     console: Console,
 ) -> None:
     """Show session context: model, session ID, turns, active skills, tokens."""
@@ -120,6 +121,21 @@ def _cmd_context(
     )
     token_str = f"{last_tokens:,}" if last_tokens is not None else "[dim]unavailable[/]"
     table.add_row("Tokens (last turn)", token_str)
+    table.add_row("Tokens (session total)", f"{cumulative_tokens:,}")
+
+    budget_state = agent._budget_tracker.current_state()
+    if budget_state.get("enabled"):
+        max_t = budget_state.get("max_tokens", 0)
+        used_t = budget_state.get("used_tokens", 0)
+        remaining = max(0, int(max_t) - int(used_t))
+        pct = (remaining / int(max_t) * 100) if max_t else 0
+        table.add_row(
+            "Token budget",
+            f"{used_t:,} / {max_t:,} used | [cyan]{remaining:,} remaining ({pct:.1f}%)[/]",
+        )
+    else:
+        table.add_row("Token budget", "[dim]not set[/]")
+
     console.print(Panel(table, title="[bold]Context[/]", border_style="dim"))
 
 
@@ -138,6 +154,7 @@ def _handle_command(
     session_id: str,
     turn_count: int,
     last_tokens: int | None,
+    cumulative_tokens: int,
     console: Console,
 ) -> str | None:
     """Dispatch a slash command. Returns new session_id only for /clear."""
@@ -151,7 +168,9 @@ def _handle_command(
         else:
             console.print("[yellow]Usage:[/] /skill NAME")
     elif cmd == "context":
-        _cmd_context(agent, user_id, session_id, turn_count, last_tokens, console)
+        _cmd_context(
+            agent, user_id, session_id, turn_count, last_tokens, cumulative_tokens, console
+        )
     elif cmd == "clear":
         return _cmd_clear(agent, user_id, console)
     else:
@@ -184,6 +203,7 @@ def main() -> None:
 
     turn_count = 0
     last_tokens: int | None = None
+    cumulative_tokens: int = 0
 
     while True:
         try:
@@ -209,12 +229,14 @@ def main() -> None:
                 session_id,
                 turn_count,
                 last_tokens,
+                cumulative_tokens,
                 console,
             )
             if new_sid is not None:
                 session_id = new_sid
                 turn_count = 0
                 last_tokens = None
+                cumulative_tokens = 0
             continue
 
         try:
@@ -223,10 +245,12 @@ def main() -> None:
             )
             turn_count += 1
             last_tokens = result.total_tokens
+            cumulative_tokens += result.total_tokens or 0
+            agent._budget_tracker.record_usage(result.total_tokens)
         except Exception as exc:  # noqa: BLE001
             console.print(f"[red]Error:[/] {exc}")
 
-    _print_exit_summary(console, turn_count, last_tokens)
+    _print_exit_summary(console, turn_count, last_tokens, cumulative_tokens)
 
 
 if __name__ == "__main__":

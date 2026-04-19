@@ -129,6 +129,7 @@ uv run pytest
 - Fix linting issues third
 - All tests must pass
 - Do NOT commit if any check fails
+- Your code will be reviewed by Codex
 
 ### 7. Commit
 - Only commit after ALL verification steps pass
