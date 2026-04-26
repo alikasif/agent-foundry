@@ -42,7 +42,19 @@ Available slash commands:
   /repo           — Show repository metadata
   /save <path>    — Export transcript to Markdown at <path>
   /cost           — Show cumulative token usage and estimated cost
+
+Shortcuts:
+  1-6             — Send a suggested question (shown on startup)
 """
+
+_SUGGESTED_QUESTIONS: list[str] = [
+    "What does this repo do and what problem does it solve?",
+    "Walk me through the folder structure and main components.",
+    "How do I set this up and run it locally?",
+    "What changed recently? Summarize the last 10 commits.",
+    "Who are the main contributors and what areas do they own?",
+    "What are the top open issues? Are there any recurring themes?",
+]
 
 
 @click.command()
@@ -118,6 +130,7 @@ def main(repo: str, shallow: bool, resume_session: bool, model: str | None) -> N
     console.print(f"  Session    : {state.session_file.name}")
     console.print(f"  Model      : {model}")
     console.rule()
+    _print_suggestions()
 
     asyncio.run(_repl(repo_info, state, model))
 
@@ -145,6 +158,15 @@ async def _repl(
             user_input = raw.strip()
             if not user_input:
                 continue
+
+            # --- Numeric shortcut: pick a suggested question ---
+            if user_input.isdigit():
+                idx = int(user_input) - 1
+                if 0 <= idx < len(_SUGGESTED_QUESTIONS):
+                    user_input = _SUGGESTED_QUESTIONS[idx]
+                else:
+                    console.print(f"[yellow]Enter a number between 1 and {len(_SUGGESTED_QUESTIONS)}.[/yellow]")
+                    continue
 
             # --- Slash commands (handled locally, never sent to model) ---
             if user_input.lower() == "exit":
@@ -200,6 +222,14 @@ async def _inner_repl(
         user_input = raw.strip()
         if not user_input:
             continue
+
+        if user_input.isdigit():
+            idx = int(user_input) - 1
+            if 0 <= idx < len(_SUGGESTED_QUESTIONS):
+                user_input = _SUGGESTED_QUESTIONS[idx]
+            else:
+                console.print(f"[yellow]Enter a number between 1 and {len(_SUGGESTED_QUESTIONS)}.[/yellow]")
+                continue
 
         if user_input.lower() == "exit":
             console.print("[dim]Closing session. Goodbye.[/dim]")
@@ -329,6 +359,11 @@ async def _handle_slash(
         console.print(f"[yellow]Unknown command: {cmd}. Type /help for help.[/yellow]")
 
     return "ok"
+
+
+def _print_suggestions() -> None:
+    lines = "\n".join(f"  [{i + 1}] {q}" for i, q in enumerate(_SUGGESTED_QUESTIONS))
+    console.print(Panel(lines, title="[bold yellow]Suggested Questions[/bold yellow]", border_style="yellow"))
 
 
 def _print_repo_info(repo_info: RepoInfo) -> None:
