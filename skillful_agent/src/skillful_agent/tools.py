@@ -108,7 +108,7 @@ async def _run_agent_skill(
         safe_name = re.sub(r"[^a-zA-Z0-9]", "_", skill_name)
         model = LiteLlm(
             model=os.environ.get(
-                "SKILLFUL_MODEL", "openrouter/anthropic/claude-3-5-haiku"
+                "SKILLFUL_MODEL", ""
             ),
             api_key=os.environ.get("OPENROUTER_API_KEY", ""),
         )
