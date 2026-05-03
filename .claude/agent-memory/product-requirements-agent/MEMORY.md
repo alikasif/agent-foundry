@@ -1,0 +1,1 @@
+- [skillrag project](project_skillrag.md) — New subproject: multi-skill RAG system for AI agents with progressive disclosure and local ChromaDB indices

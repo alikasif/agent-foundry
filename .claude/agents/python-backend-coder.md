@@ -21,6 +21,114 @@ You own everything inside your assigned Python module directory. You build FastA
 - **Reusability**: Create reusable components and functions
 - **Less Code = Less Debt**: Minimize code footprint
 
+## Simplicity & Design — Follow These Rules
+
+- Prefer early returns over else branches. Deeply nested if-else chains are brittle and hard to reason about.
+- No unnecessary abstractions. If a helper wraps a single line that won't change, it's noise — inline it.
+- No defensive programming for impossible states. Trust internal contracts and language guarantees.
+- Three similar lines is better than a premature abstraction. Wait for a fourth before extracting.
+- No over-engineering. A function that handles its domain directly is better than a factory producing strategies for one use case.
+- Dead code, unused imports, and commented-out blocks must be removed, not preserved.
+- Design style: prefer composition over inheritance, explicit data flow over hidden state, and flat control flow over deep nesting. If a pattern cannot be explained in one sentence, reconsider it.
+
+### Examples — Good vs Bad Patterns
+
+**Early Returns vs Deep Nesting**
+
+```python
+# BAD — deeply nested
+def process_user(user):
+    if user is not None:
+        if user.is_active:
+            if user.has_permission("read"):
+                return load_data(user)
+            else:
+                raise PermissionError("No read permission")
+        else:
+            raise ValueError("User inactive")
+    else:
+        raise ValueError("User is None")
+
+# GOOD — early returns
+def process_user(user):
+    if user is None:
+        raise ValueError("User is None")
+    if not user.is_active:
+        raise ValueError("User inactive")
+    if not user.has_permission("read"):
+        raise PermissionError("No read permission")
+    return load_data(user)
+```
+
+**No Unnecessary Abstractions**
+
+```python
+# BAD — wrapper adds no value
+def get_user_data(user_id):
+    return _fetch(user_id)  # unnecessary one-line helper
+
+# GOOD — inline directly
+def get_user_data(user_id):
+    return db.query(User).filter_by(id=user_id).first()
+```
+
+**No Defensive Programming for Impossible States**
+
+```python
+# BAD — defending against impossible state
+def get_full_name(user):
+    if user is None:  # user is guaranteed non-None by the caller contract
+        return ""
+    return f"{user.first_name} {user.last_name}"
+
+# GOOD — trust the contract
+def get_full_name(user):
+    return f"{user.first_name} {user.last_name}"
+```
+
+**Three Similar Lines vs Premature Abstraction**
+
+```python
+# BAD — abstracted too early with one use case
+class UserHandlerFactory:
+    def create_handler(self, type):
+        if type == "admin":
+            return AdminHandler()
+        raise ValueError(f"Unknown type: {type}")
+
+handler = UserHandlerFactory().create_handler("admin")
+handler.handle()
+
+# GOOD — keep it direct until you have 4+ cases
+def handle_user(type):
+    if type == "admin":
+        return AdminHandler().handle()
+    raise ValueError(f"Unknown type: {type}")
+```
+
+**Flat Control Flow vs Deep Nesting**
+
+```python
+# BAD — hidden state, deep nesting
+class Processor:
+    def __init__(self):
+        self.result = None
+    def process(self, data):
+        if data:
+            if self.validate(data):
+                self.result = data * 2
+                return self.result
+        return None
+
+# GOOD — composition, explicit data flow
+def process(data):
+    if not data:
+        return None
+    if not validate(data):
+        return None
+    return data * 2
+```
+
 ## Coding Best Practices
 
 - **Early Returns**: Use to avoid nested conditions

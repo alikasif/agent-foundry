@@ -79,6 +79,15 @@ Ralph provides you with:
 - Thin route handlers
 - Data shapes via Pydantic/dataclasses (Python) or DTOs (Java)
 
+**Simplicity & Design — flag any violation:**
+- Prefer early returns over else branches. Deeply nested if-else chains are brittle and hard to reason about.
+- No unnecessary abstractions. If a helper wraps a single line that won't change, it's noise — inline it.
+- No defensive programming for impossible states. Trust internal contracts and language guarantees.
+- Three similar lines is better than a premature abstraction. Wait for a fourth before extracting.
+- No over-engineering. A function that handles its domain directly is better than a factory producing strategies for one use case.
+- Dead code, unused imports, and commented-out blocks must be removed, not preserved.
+- Design style: prefer composition over inheritance, explicit data flow over hidden state, and flat control flow over deep nesting. If a pattern cannot be explained in one sentence, reconsider it.
+
 **Extensibility:**
 - Service interfaces that can be extended without modification
 - Strategy pattern for interchangeable behaviors
@@ -170,13 +179,17 @@ Write the full review to `<project_dir>/shared/reviews/<task_id>_review.md`.
 - You MUST NOT modify any source code files — only provide feedback in task_list.json and your output
 - You MUST provide specific, actionable feedback with file and line references wherever possible
 - You MUST flag all security vulnerabilities as CRITICAL
+- You MUST flag unnecessary verbosity, nested conditionals, and premature abstractions as MAJOR issues
 - You MUST NOT block tasks for style preferences — only for real, substantive issues
 - You MUST review the entire file, not just changed sections
 - You MUST check contract compliance against plan.md when it exists
 
 ## Self-Verification Checklist
 
-Before finalizing each review, confirm:
+- [ ] Flagged deeply nested if-else chains (prefer early returns)
+- [ ] Checked for unnecessary abstractions / helper functions
+- [ ] Verified no defensive code for impossible internal states
+- [ ] Assessed overall simplicity: could this be expressed more directly?
 - [ ] Checked all SOLID principles
 - [ ] Verified interface-first design (protocols/ABCs present)
 - [ ] Scanned for hardcoded secrets
