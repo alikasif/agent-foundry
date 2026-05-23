@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import re
+import re  # noqa: F401
+
+from codeact_agent.agent import CodeActAgent
+from codeact_agent.sandbox import PythonSandbox
 
 
 def extract_code_blocks(text: str) -> list[str]:
@@ -18,7 +21,8 @@ def extract_code_blocks(text: str) -> list[str]:
 
 
 class AgentLoop:
-    """Orchestrates the multi-turn conversation: send to LLM, extract code, execute, observe, repeat."""
+    """Orchestrates the multi-turn conversation: send to LLM, extract code,
+    execute, observe, repeat."""
 
     def __init__(
         self,
