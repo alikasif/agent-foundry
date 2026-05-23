@@ -216,3 +216,4 @@ budget_state.json
 .claude/skills/token-budget/scripts/budget_state.json
 .claude/skills/token-budget/scripts/budget_state.json
 tmp/*
+ignored/*
