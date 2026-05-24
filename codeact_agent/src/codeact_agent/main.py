@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 
@@ -255,7 +256,13 @@ def main(model: str, api_key: str | None, base_url: str) -> None:
     action space. Type a task in natural language and the agent
     will write and execute Python code to accomplish it.
     """
+    # Load .env before checking api_key so Click's envvar and
+    # fallback both work.
     load_dotenv()
+
+    # After load_dotenv, re-read in case .env overrode the env var.
+    if not api_key:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
 
     if not api_key:
         console.print(
