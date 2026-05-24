@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents import Agent, Runner, set_default_openai_client
+from agents import Agent, Runner, RunConfig, set_default_openai_client
 from agents.models.multi_provider import MultiProvider
 from openai import AsyncOpenAI
 
@@ -75,6 +75,6 @@ class CodeActAgent:
         result = await Runner.run(
             self._agent,
             input=history,
-            run_config={"model_provider": self._model_provider},
+            run_config=RunConfig(model_provider=self._model_provider),
         )
         return str(result.final_output)
