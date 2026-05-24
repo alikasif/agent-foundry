@@ -49,7 +49,7 @@ def _print_banner(model: str, base_url: str) -> None:
     for cmd, desc in SLASH_COMMANDS.items():
         if cmd == "quit":
             continue
-        console.print(f"    [bold]/{cmd}[/dim]  {desc}[/dim]")
+        console.print(f"    [bold]/{cmd}[/bold]  {desc}")
     console.print()
 
 
