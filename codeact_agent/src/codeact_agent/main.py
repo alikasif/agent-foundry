@@ -16,6 +16,11 @@ from rich.text import Text
 
 from codeact_agent import AgentLoop, CodeActAgent, PythonSandbox
 
+# Load .env at import time so Click's envvar resolution picks up
+# OPENROUTER_API_KEY, OPENAI_API_BASE, and CODEACT_MODEL from the
+# .env file before it parses CLI options.
+load_dotenv()
+
 console = Console()
 
 SLASH_COMMANDS = {
@@ -256,11 +261,6 @@ def main(model: str, api_key: str | None, base_url: str) -> None:
     action space. Type a task in natural language and the agent
     will write and execute Python code to accomplish it.
     """
-    # Load .env before checking api_key so Click's envvar and
-    # fallback both work.
-    load_dotenv()
-
-    # After load_dotenv, re-read in case .env overrode the env var.
     if not api_key:
         api_key = os.environ.get("OPENROUTER_API_KEY")
 
