@@ -32,10 +32,10 @@ SLASH_COMMANDS = {
 }
 
 BANNER = r"""
-  ╔══════════════════════════════════════════╗
-  ║         CodeAct Agent v0.1.0             ║
-  ║   Python Code as Unified Action Space    ║
-  ╚══════════════════════════════════════════╝
+  +==========================================+
+  |         CodeAct Agent v0.1.0             |
+  |   Python Code as Unified Action Space    |
+  +==========================================+
 """
 
 

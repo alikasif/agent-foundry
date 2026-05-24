@@ -41,6 +41,7 @@ class CodeActAgent:
 
         Args:
             model: The model identifier (e.g.,
+                'z-ai/glm-4.5-air:free' or
                 'openrouter/anthropic/claude-sonnet-4').
             api_key: The API key for the LLM provider.
             base_url: The base URL for the OpenAI-compatible API.
