@@ -272,6 +272,10 @@ def main(model: str, api_key: str | None, base_url: str) -> None:
         )
         sys.exit(1)
 
+    # The OpenAI Agents SDK reads OPENAI_API_KEY internally for tracing
+    # and provider setup. Mirror the router key so everything works.
+    os.environ.setdefault("OPENAI_API_KEY", api_key)
+
     _repl(model=model, api_key=api_key, base_url=base_url)
 
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from agents import Agent, Runner
+from agents import Agent, Runner, set_default_openai_client
+from agents.models.multi_provider import MultiProvider
 from openai import AsyncOpenAI
 
 CODEACT_SYSTEM_PROMPT = (
@@ -45,7 +46,17 @@ class CodeActAgent:
             base_url: The base URL for the OpenAI-compatible API.
         """
         self.model = model
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        set_default_openai_client(client)
+
+        # The SDK's default MultiProvider rejects model names with unknown
+        # prefixes (e.g. "openrouter/", "z-ai/").  Configure one with
+        # unknown_prefix_mode="model_id" so the full string is passed
+        # through to the OpenAI client unchanged.
+        self._model_provider = MultiProvider(
+            unknown_prefix_mode="model_id",
+        )
+
         self._agent = Agent(
             name="CodeActAgent",
             instructions=CODEACT_SYSTEM_PROMPT,
@@ -64,6 +75,6 @@ class CodeActAgent:
         result = await Runner.run(
             self._agent,
             input=history,
-            client=self._client,
+            run_config={"model_provider": self._model_provider},
         )
         return str(result.final_output)
