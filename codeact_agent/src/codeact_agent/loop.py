@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from codeact_agent.agent import CodeActAgent
@@ -67,7 +68,9 @@ class AgentLoop:
         self._max_turns = max_turns
 
     async def run_turn(
-        self, history: list[dict[str, str]]
+        self,
+        history: list[dict[str, str]],
+        logger: logging.Logger | None = None,
     ) -> tuple[str, list[dict[str, str]]]:
         """Run one self-debug cycle.
 
@@ -78,21 +81,60 @@ class AgentLoop:
 
         Args:
             history: Current conversation history.
+            logger: Optional logger for flow visibility.
 
         Returns:
             A tuple of (final_response_text, updated_history).
         """
+        if logger is None:
+            logger = logging.getLogger("codeact")
+
         current_history = list(history)
-        for _turn in range(self._max_turns):
+        for turn_idx in range(self._max_turns):
+            logger.debug(
+                f"[LLM call] turn={turn_idx + 1}, "
+                f"history_len={len(current_history)}"
+            )
             response = await self._agent.run(current_history)
             code_blocks = extract_code_blocks(response)
+
             if not code_blocks:
+                logger.debug(
+                    f"[LLM response] no code blocks — final answer returned."
+                )
                 return response, current_history
-            for code in code_blocks:
+
+            logger.debug(
+                f"[LLM response] {len(code_blocks)} code block(s) found."
+            )
+
+            for block_idx, code in enumerate(code_blocks, start=1):
+                logger.debug(
+                    f"[sandbox] executing block {block_idx}/"
+                    f"{len(code_blocks)} ..."
+                )
                 result = await self._sandbox.execute(code)
+
+                if result.exception:
+                    logger.debug(
+                        f"[sandbox] exception in block {block_idx}: "
+                        f"{result.exception.splitlines()[-1]}"
+                    )
+                elif result.stdout:
+                    preview = result.stdout[:80].replace("\n", "↵")
+                    logger.debug(
+                        f"[sandbox] stdout preview: {preview}..."
+                    )
+
                 observation = _format_observation(result)
                 current_history = list(current_history)
-                current_history.append({"role": "user", "content": observation})
+                current_history.append(
+                    {"role": "user", "content": observation}
+                )
+
+        logger.warning(
+            f"[loop] max_turns={self._max_turns} reached — returning last response."
+        )
         return response, current_history
 
     def reset(self) -> None:
