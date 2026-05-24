@@ -15,6 +15,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 
 from codeact_agent import AgentLoop, CodeActAgent, PythonSandbox
+from codeact_agent.prompts import BANNER, SLASH_COMMANDS
 
 # Load .env at import time so Click's envvar resolution picks up
 # OPENROUTER_API_KEY, OPENAI_API_BASE, and CODEACT_MODEL from the
@@ -22,21 +23,6 @@ from codeact_agent import AgentLoop, CodeActAgent, PythonSandbox
 load_dotenv()
 
 console = Console()
-
-SLASH_COMMANDS = {
-    "help": "Show available slash commands",
-    "reset": "Clear conversation history and Python namespace",
-    "history": "Show turn count and model info",
-    "exit": "Exit the session",
-    "quit": "Exit the session",
-}
-
-BANNER = r"""
-  +==========================================+
-  |         CodeAct Agent v0.1.0             |
-  |   Python Code as Unified Action Space    |
-  +==========================================+
-"""
 
 
 def _print_banner(model: str, base_url: str) -> None:
