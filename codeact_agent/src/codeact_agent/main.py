@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import sys
+from typing import Any
 
 import anyio
 import click
@@ -180,9 +181,45 @@ async def _run_turn(
     # Track whether FINAL() was called so we can surface it distinctly.
     final_triggered: list[object] = []
 
+    # Live-output state. The status spinner shows while waiting for the first
+    # token of each LLM call (free-tier models can take many seconds). Flags
+    # are reset per-LLM-call (in on_llm_start) so every self-debug iteration
+    # renders its own thinking header and reasoning→answer separator.
+    status_holder: dict[str, Any] = {"status": None}
+    flags = {"reasoning": False, "answer": False}
+
+    def _stop_status() -> None:
+        """Stop the waiting spinner before printing (printing under it garbles)."""
+        status = status_holder["status"]
+        if status is not None:
+            status.stop()
+            status_holder["status"] = None
+
+    def on_llm_start() -> None:
+        """Show a waiting spinner and reset per-call display flags."""
+        flags["reasoning"] = False
+        flags["answer"] = False
+        status = console.status("[dim]Thinking…[/dim]", spinner="dots")
+        status.start()
+        status_holder["status"] = status
+
+    def on_reasoning_token(delta: str) -> None:
+        """Stream the model's reasoning, dim and distinct from the answer."""
+        _stop_status()
+        if not flags["reasoning"]:
+            flags["reasoning"] = True
+            console.print("💭 thinking…", style="dim italic")
+        console.print(delta, end="", markup=False, style="grey50")
+
     def on_stream_token(delta: str) -> None:
-        """Print each token delta immediately — no newline between tokens."""
-        console.print(delta, end="")
+        """Stream the final answer token-by-token."""
+        _stop_status()
+        if not flags["answer"]:
+            flags["answer"] = True
+            if flags["reasoning"]:
+                # Separate the reasoning block from the answer.
+                console.print()
+        console.print(delta, end="", markup=False)
 
     def on_turn(
         turn_idx: int,
@@ -190,6 +227,8 @@ async def _run_turn(
         code_blocks: list[tuple[str, str]],
         results: list[object],
     ) -> None:
+        # Ensure no spinner is left running (e.g. a turn with no tokens).
+        _stop_status()
         # Add a newline after streaming completes so structured panels
         # start on a fresh line
         console.print()
@@ -203,7 +242,8 @@ async def _run_turn(
         # Show execution results; detect FINAL()
         from codeact_agent.sandbox import SandboxResult as SandboxRes
 
-        for result in results:
+        for (lang, _code), result in zip(code_blocks, results):
+            console.print(f"▸ executing {lang} block…", style="dim")
             if isinstance(result, SandboxRes) and result.final_value is not None:
                 final_triggered.append(result.final_value)
             _display_result(result, turn=turn_idx)
@@ -213,6 +253,8 @@ async def _run_turn(
         logger=logger,
         on_turn=on_turn,
         on_stream_token=on_stream_token,
+        on_reasoning_token=on_reasoning_token,
+        on_llm_start=on_llm_start,
         user_query=user_query,
     )
 

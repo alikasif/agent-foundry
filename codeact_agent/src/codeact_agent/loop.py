@@ -26,7 +26,10 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from openai.types.responses import ResponseTextDeltaEvent
+from openai.types.responses import (
+    ResponseReasoningTextDeltaEvent,
+    ResponseTextDeltaEvent,
+)
 
 from codeact_agent.agent import CodeActAgent
 from codeact_agent.languages import LanguageRegistry
@@ -164,6 +167,8 @@ class AgentLoop:
             | None
         ) = None,
         on_stream_token: Callable[[str], None] | None = None,
+        on_reasoning_token: Callable[[str], None] | None = None,
+        on_llm_start: Callable[[], None] | None = None,
         user_query: str | None = None,
     ) -> tuple[str, list[dict[str, str]]]:
         """Run one self-debug cycle.
@@ -181,7 +186,15 @@ class AgentLoop:
                 code execution.  Receives ``(turn_index, response_text,
                 code_blocks, execution_results)``.
             on_stream_token: Optional callback for streaming token-by-token
-                output.  When provided, LLM responses are streamed.
+                output of the final answer text.  When provided, LLM
+                responses are streamed.
+            on_reasoning_token: Optional callback invoked with each reasoning
+                ``.delta`` the model emits before its answer text.  Reasoning
+                is display-only and is NOT included in the response used for
+                code extraction.
+            on_llm_start: Optional callback invoked once immediately before
+                each LLM call begins, so the UI can show a "waiting"
+                indicator before the first token arrives.
             user_query: The user's latest query text, used to seed the
                 ``context`` variable in the Python namespace.  Extracted
                 from the last user message in *history* if not given.
@@ -208,17 +221,27 @@ class AgentLoop:
 
             # --- LLM call (streaming or batch) ---
             if on_stream_token is not None:
+                if on_llm_start is not None:
+                    on_llm_start()
                 stream_result = self._agent.run_streamed(current_history)
                 response_parts: list[str] = []
                 async for event in stream_result.stream_events():
-                    if event.type == "raw_response_event" and isinstance(
-                        event.data, ResponseTextDeltaEvent
-                    ):
-                        delta = event.data.delta
-                        response_parts.append(delta)
-                        on_stream_token(delta)
+                    if event.type != "raw_response_event":
+                        continue
+                    data = event.data
+                    if isinstance(data, ResponseReasoningTextDeltaEvent):
+                        if on_reasoning_token is not None:
+                            on_reasoning_token(data.delta)
+                        continue
+                    if isinstance(data, ResponseTextDeltaEvent):
+                        # Only text deltas form the response used for code
+                        # extraction; reasoning is display-only.
+                        response_parts.append(data.delta)
+                        on_stream_token(data.delta)
                 response = "".join(response_parts)
             else:
+                if on_llm_start is not None:
+                    on_llm_start()
                 response = await self._agent.run(current_history)
 
             code_blocks = extract_code_blocks(response)

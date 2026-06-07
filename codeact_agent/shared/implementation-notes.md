@@ -138,3 +138,39 @@ cleanup after FINAL, it must do so before calling FINAL().
 
 4. The `LanguageRegistry` dispatch table is clean.  Phase B's `llm_query` is
    a Python-namespace callable, NOT a new language â€” no registry changes needed.
+
+## Live streaming fix (reasoning + answer + waiting spinner)
+
+### Diagnosis
+The REPL appeared to freeze after a query because (1) the configured
+free-tier model has multi-second first-token latency and the screen was blank
+during that wait (default --log-level WARNING hides logs), and (2) the
+streaming loop in loop.py only handled ResponseTextDeltaEvent and
+silently discarded ResponseReasoningTextDeltaEvent — so the model's actual
+thinking was never shown.
+
+### Changes
+- AgentLoop.run_turn gained two optional callbacks: on_reasoning_token
+  (each reasoning .delta) and on_llm_start (fired once immediately
+  before every LLM call, streaming and non-streaming). Reasoning deltas are
+  display-only — only text deltas are accumulated into the response used
+  for extract_code_blocks.
+- main.py shows a console.status spinner (Thinking…) started in
+  on_llm_start and stopped by the first reasoning/text token. Reasoning
+  streams dim/italic under a ?? thinking… header; the answer streams
+  normally on a fresh line. A dim ? executing {lang} block… line precedes
+  each result panel.
+
+### Decisions / tradeoffs
+- Display flags (reasoning/answer) are reset inside on_llm_start,
+  not once per _run_turn, so each self-debug iteration renders its own
+  thinking header and reasoning?answer separator.
+- A single idempotent _stop_status() is called as the first action of both
+  token callbacks; printing under an active Rich Status (a Live display)
+  garbles output, so the spinner must be stopped before any print.
+- The execution indicator is a plain dim line, not a console.status,
+  because on_turn fires AFTER dispatch returns — a spinner there could not
+  span the actual blocking execution. Adding a pre-dispatch callback to
+  loop.py would be interface creep, so it was avoided.
+- Token text is printed with markup=False so model output containing [
+  is not parsed as Rich markup.

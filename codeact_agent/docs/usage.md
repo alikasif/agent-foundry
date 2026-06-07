@@ -44,6 +44,22 @@ Options:
 | `--base-url` | `https://openrouter.ai/api/v1` | API base URL |
 | `--log-level` | `WARNING` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 
+## Live output
+
+The REPL streams output as the agent works, so the screen is never blank:
+
+- **Waiting spinner** — as soon as you submit a query, a `Thinking…` spinner
+  appears and stays until the first token arrives. Free-tier models (such as
+  the default in your `.env`) can have multi-second first-token latency; the
+  spinner makes that wait visible instead of looking frozen.
+- **Reasoning** — the model's intermediate thinking streams under a dim
+  `💭 thinking…` header, rendered in a dim/grey style. Reasoning is
+  display-only; it never affects code extraction or the final answer.
+- **Answer** — once the answer begins, it streams normally on its own line,
+  separated from the reasoning.
+- **Code execution** — each code block prints a dim `▸ executing {lang} block…`
+  line before its result panel.
+
 ## Slash commands
 
 | Command | Action |
