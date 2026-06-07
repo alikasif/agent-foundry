@@ -14,10 +14,11 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.syntax import Syntax
-from rich.text import Text
 
-from codeact_agent import AgentLoop, CodeActAgent, PythonSandbox
+from codeact_agent import AgentLoop, CodeActAgent
+from codeact_agent.languages.default import build_default_registry
 from codeact_agent.prompts import BANNER, SLASH_COMMANDS
+from codeact_agent.sandbox import PythonSandbox
 
 # Load .env at import time so Click's envvar resolution picks up
 # OPENROUTER_API_KEY, OPENAI_API_BASE, and CODEACT_MODEL from the
@@ -116,12 +117,15 @@ def _print_session_summary(turn_count: int, model: str) -> None:
 
 
 def _display_code(code: str, turn: int | None = None) -> None:
-    """Display Python code with syntax highlighting.
+    """Display code with syntax highlighting.
 
     Args:
-        code: Python source code to display.
+        code: Source code to display.
         turn: Optional turn number for the panel title.
     """
+    # Determine language from code block or default to python
+    # For simplicity, we'll assume python for display since most code will be python
+    # A more sophisticated approach would detect language from context
     title = f"Code (turn {turn})" if turn is not None else "Code"
     syntax = Syntax(code, "python", theme="monokai", line_numbers=True)
     console.print(Panel(syntax, title=title, border_style="blue"))
@@ -134,7 +138,7 @@ def _display_result(result: object, turn: int | None = None) -> None:
         result: A SandboxResult with stdout, stderr, and exception fields.
         turn: Optional turn number for the panel title.
     """
-    from codeact_agent import SandboxResult
+    from codeact_agent.sandbox import SandboxResult
 
     if not isinstance(result, SandboxResult):
         return
@@ -153,26 +157,12 @@ def _display_result(result: object, turn: int | None = None) -> None:
         )
 
 
-def _extract_code_for_display(response: str) -> list[str]:
-    """Extract Python code blocks from response for display.
-
-    Args:
-        response: The agent's response text.
-
-    Returns:
-        List of Python code block contents.
-    """
-    import re
-
-    pattern = r"```python\s*\n(.*?)```"
-    return [m.strip() for m in re.findall(pattern, response, re.DOTALL)]
-
-
 async def _run_turn(
     agent_loop: AgentLoop,
     history: list[dict[str, str]],
     model: str,
     logger: logging.Logger,
+    user_query: str = "",
 ) -> tuple[str, list[dict[str, str]], int]:
     """Run a single agent turn and display results.
 
@@ -181,20 +171,62 @@ async def _run_turn(
         history: Current conversation history.
         model: The model identifier (for display).
         logger: Logger instance for flow visibility.
+        user_query: The user's latest query, forwarded to the sandbox
+            as the ``context`` variable.
 
     Returns:
         A tuple of (response_text, updated_history, turns_used).
     """
+    # Track whether FINAL() was called so we can surface it distinctly.
+    final_triggered: list[object] = []
+
+    def on_stream_token(delta: str) -> None:
+        """Print each token delta immediately — no newline between tokens."""
+        console.print(delta, end="")
+
+    def on_turn(
+        turn_idx: int,
+        response: str,
+        code_blocks: list[tuple[str, str]],
+        results: list[object],
+    ) -> None:
+        # Add a newline after streaming completes so structured panels
+        # start on a fresh line
+        console.print()
+        # Show code blocks with syntax highlighting
+        _highlighted_langs = ("python", "bash", "javascript", "sql", "awk")
+        for lang, code in code_blocks:
+            title = f"Code ({lang}) (turn {turn_idx})"
+            hl_lang = lang if lang in _highlighted_langs else "python"
+            syntax = Syntax(code, hl_lang, theme="monokai", line_numbers=True)
+            console.print(Panel(syntax, title=title, border_style="blue"))
+        # Show execution results; detect FINAL()
+        from codeact_agent.sandbox import SandboxResult as SandboxRes
+
+        for result in results:
+            if isinstance(result, SandboxRes) and result.final_value is not None:
+                final_triggered.append(result.final_value)
+            _display_result(result, turn=turn_idx)
+
     response, updated_history = await agent_loop.run_turn(
-        history, logger=logger
+        history,
+        logger=logger,
+        on_turn=on_turn,
+        on_stream_token=on_stream_token,
+        user_query=user_query,
     )
+
+    # Surface FINAL() output in a distinct panel if triggered.
+    if final_triggered:
+        console.print(
+            Panel(
+                str(final_triggered[-1]),
+                title="FINAL answer",
+                border_style="bold green",
+            )
+        )
+
     turns_used = (len(updated_history) - len(history)) // 2
-    code_blocks = _extract_code_for_display(response)
-    if code_blocks:
-        for idx, code in enumerate(code_blocks, start=1):
-            _display_code(code, turn=idx)
-    else:
-        console.print(Text(response, style="dim"))
     return response, updated_history, turns_used
 
 
@@ -215,8 +247,11 @@ def _repl(
     _print_banner(model, base_url)
 
     agent = CodeActAgent(model=model, api_key=api_key, base_url=base_url)
+    # Create a shared sandbox and registry; pass both into the loop so the
+    # sandbox namespace persists across turns and /reset clears it correctly.
     sandbox = PythonSandbox()
-    agent_loop = AgentLoop(agent=agent, sandbox=sandbox)
+    registry = build_default_registry(sandbox)
+    agent_loop = AgentLoop(agent=agent, sandbox=sandbox, registry=registry)
 
     history: list[dict[str, str]] = []
     turn_count = 0
@@ -242,6 +277,7 @@ def _repl(
                 continue
             if cmd == "reset":
                 history = []
+                # reset() clears the live Python namespace via sandbox.reset()
                 agent_loop.reset()
                 turn_count = 0
                 logger.info("Session reset — history and namespace cleared.")
@@ -258,7 +294,7 @@ def _repl(
 
         try:
             response, history, turns = anyio.run(
-                _run_turn, agent_loop, history, model, logger
+                _run_turn, agent_loop, history, model, logger, user_input
             )
             turn_count += turns if turns > 0 else 1
             logger.info(
@@ -316,9 +352,9 @@ def main(
 ) -> None:
     """CodeAct Agent -- interactive CLI REPL.
 
-    An agent that uses executable Python code as its unified
+    An agent that uses executable code as its unified
     action space. Type a task in natural language and the agent
-    will write and execute Python code to accomplish it.
+    will write and execute code to accomplish it.
     """
     logger = _setup_logging(log_level)
 
@@ -338,8 +374,7 @@ def main(
     os.environ.setdefault("OPENAI_API_KEY", api_key)
 
     logger.debug(
-        f"Starting session — model={model}, base_url={base_url}, "
-        f"log_level={log_level}"
+        f"Starting session — model={model}, base_url={base_url}, log_level={log_level}"
     )
 
     _repl(model=model, api_key=api_key, base_url=base_url, logger=logger)
