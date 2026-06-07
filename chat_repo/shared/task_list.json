@@ -1,0 +1,297 @@
+[
+  {
+    "id": "T001",
+    "title": "Scaffold project structure",
+    "description": "Create the full directory tree and stub files for chat_repo. Scaffold: chat_repo/pyproject.toml (package name 'chat-repo', entry point 'chat-repo = chat_repo.cli:main', dependencies: claude-agent-sdk, click, httpx, rich, anyio; dev deps: pytest, pytest-anyio, pyrefly, ruff, line-length=88); src/chat_repo/__init__.py; src/chat_repo/cli.py (stub); src/chat_repo/repo.py (stub); src/chat_repo/agent.py (stub); src/chat_repo/session.py (stub); src/chat_repo/prompts/ directory with empty system.md; src/chat_repo/tools/__init__.py; src/chat_repo/tools/git.py (stub); src/chat_repo/tools/github.py (stub); tests/__init__.py; tests/conftest.py (empty); tests/test_repo.py (stub); tests/test_git_tools.py (stub); tests/test_github_tools.py (stub); tests/test_integration.py (stub). Run 'uv sync' after writing pyproject.toml. All files under D:\\GitHub\\agent-foundry\\chat_repo\\.",
+    "assigned_to": "project_structure",
+    "status": "pending",
+    "blocked_by": [],
+    "output_files": [
+      "chat_repo/pyproject.toml",
+      "chat_repo/src/chat_repo/__init__.py",
+      "chat_repo/src/chat_repo/cli.py",
+      "chat_repo/src/chat_repo/repo.py",
+      "chat_repo/src/chat_repo/agent.py",
+      "chat_repo/src/chat_repo/session.py",
+      "chat_repo/src/chat_repo/prompts/system.md",
+      "chat_repo/src/chat_repo/tools/__init__.py",
+      "chat_repo/src/chat_repo/tools/git.py",
+      "chat_repo/src/chat_repo/tools/github.py",
+      "chat_repo/tests/__init__.py",
+      "chat_repo/tests/conftest.py",
+      "chat_repo/tests/test_repo.py",
+      "chat_repo/tests/test_git_tools.py",
+      "chat_repo/tests/test_github_tools.py",
+      "chat_repo/tests/test_integration.py"
+    ],
+    "acceptance_criteria": [
+      "Directory tree matches PRD §Module Structure exactly",
+      "'uv sync' completes without errors",
+      "All stub Python files are valid Python (importable, no syntax errors)",
+      "pyproject.toml defines the 'chat-repo' entry point script"
+    ]
+  },
+  {
+    "id": "T002",
+    "title": "Implement repo.py — repo resolution and cloning",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\src\\chat_repo\\repo.py. Define the RepoInfo dataclass (owner, name, clone_url, local_path: Path, is_local: bool, is_shallow: bool). Implement resolve_repo(source: str, full: bool = False) -> RepoInfo. Handle three input forms: (1) GitHub URL https://github.com/owner/name — parse owner/name; (2) short form owner/name matching regex r'^[\\w.-]+/[\\w.-]+$'; (3) local path (relative, absolute, or '.') — resolve to absolute Path, read git remote get-url origin to derive owner/name (fall back to directory name if no remote). Clone destination: ~/.chat-repo/repos/<owner>/<name>. Shallow clone (--depth 1) by default; full clone when full=True. Idempotent: if destination exists, run git fetch --all. All subprocess calls use cwd appropriately. Implement path_is_safe(path: str | Path, root: Path) -> bool that resolves symlinks and returns True only if path is within root (use Path.resolve().is_relative_to(root.resolve())). All functions have full type hints. Run 'uv run ruff format .' and 'uv run ruff check .' and 'uv run pyrefly check' after implementation.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": ["T001"],
+    "output_files": [
+      "chat_repo/src/chat_repo/repo.py"
+    ],
+    "acceptance_criteria": [
+      "resolve_repo('https://github.com/owner/name') returns RepoInfo with owner='owner', name='name'",
+      "resolve_repo('owner/name') returns correct RepoInfo",
+      "resolve_repo('.') or local path returns RepoInfo with is_local=True",
+      "path_is_safe('../etc/passwd', repo_root) returns False",
+      "path_is_safe(repo_root / 'src/foo.py', repo_root) returns True",
+      "Idempotent: calling resolve_repo twice on same GitHub repo runs git fetch instead of re-cloning",
+      "All type hints present; pyrefly check passes with zero errors",
+      "ruff format --check and ruff check pass with zero warnings"
+    ]
+  },
+  {
+    "id": "T003",
+    "title": "Implement tools/git.py — git @tool functions",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\src\\chat_repo\\tools\\git.py. Import 'tool' and 'create_sdk_mcp_server' from claude_agent_sdk. Define four factory functions that accept repo_root: Path and return async @tool-decorated functions: (1) make_git_log(repo_root) returning git_log tool: @tool('git_log', 'Return last N commits with SHA, author, date, message', {'n': int, 'branch': str | None}), runs 'git log --format=%H|%an|%ae|%ad|%s -n {n} [{branch}]' via subprocess.run(cwd=repo_root); (2) make_git_show(repo_root) returning git_show tool: @tool('git_show', 'Return full diff and metadata for a commit SHA', {'sha': str}), runs 'git show {sha}'; (3) make_git_blame(repo_root) returning git_blame tool: @tool('git_blame', 'Return blame output for a file or line range', {'path': str, 'start_line': int | None, 'end_line': int | None}), runs 'git blame [-L start,end] {path}'; (4) make_contributors(repo_root) returning contributors tool: @tool('contributors', 'Return top N contributors by commit count', {'n': int}), runs 'git shortlog -sne --all'. All subprocess errors caught and returned as {'content': [{'type': 'text', 'text': 'Error: ...'}], 'is_error': True}. Define build_git_server(repo_root: Path) -> object that calls create_sdk_mcp_server(name='git', version='1.0.0', tools=[git_log, git_show, git_blame, contributors]). All tool functions are async and return dict[str, Any]. Full type hints. Run ruff and pyrefly after implementation.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": ["T001"],
+    "output_files": [
+      "chat_repo/src/chat_repo/tools/git.py"
+    ],
+    "acceptance_criteria": [
+      "build_git_server(repo_root) returns a valid SDK MCP server object",
+      "git_log tool returns formatted commit lines as a string",
+      "git_show tool returns diff text for a given SHA",
+      "git_blame tool returns per-line SHA/author/date attribution",
+      "contributors tool returns sorted contributor counts",
+      "Subprocess errors are returned as error-flagged tool results, not raised exceptions",
+      "All tool functions are async with return type dict[str, Any]",
+      "pyrefly check passes with zero errors",
+      "ruff format --check and ruff check pass with zero warnings"
+    ]
+  },
+  {
+    "id": "T004",
+    "title": "Implement tools/github.py — GitHub REST API @tool functions",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\src\\chat_repo\\tools\\github.py. Import 'tool' and 'create_sdk_mcp_server' from claude_agent_sdk, import httpx. Define factory functions that close over owner: str, name: str and return async @tool-decorated functions: (1) make_repo_meta(owner, name) → repo_meta tool: @tool('repo_meta', 'Return GitHub repository metadata', {}), GET /repos/{owner}/{name}; (2) make_list_prs(owner, name) → list_prs: @tool('list_prs', 'List latest N pull requests', {'state': str, 'n': int}), GET /repos/{owner}/{name}/pulls?state={state}&per_page={n}; (3) make_get_pr(owner, name) → get_pr: @tool('get_pr', 'Get full PR details', {'number': int}), GET /repos/{owner}/{name}/pulls/{number}; (4) make_list_issues(owner, name) → list_issues: @tool('list_issues', 'List issues', {'state': str, 'label': str | None, 'n': int}); (5) make_list_releases(owner, name) → list_releases: @tool('list_releases', 'List latest N releases', {'n': int}), GET /repos/{owner}/{name}/releases?per_page={n}. All functions check os.environ.get('GITHUB_TOKEN') first — if absent return {'content': [{'type': 'text', 'text': 'GitHub tools unavailable: set GITHUB_TOKEN environment variable.'}]}. Use httpx.Client with headers {'User-Agent': 'chat-repo/0.1', 'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'}. Catch httpx.HTTPStatusError and return {'content': [{'type': 'text', 'text': f'GitHub API error {status}: {message}'}], 'is_error': True}. Define build_github_server(owner: str, name: str) -> object via create_sdk_mcp_server(name='github', version='1.0.0', tools=[...]). Full type hints. Run ruff and pyrefly.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": ["T001"],
+    "output_files": [
+      "chat_repo/src/chat_repo/tools/github.py"
+    ],
+    "acceptance_criteria": [
+      "build_github_server(owner, name) returns a valid SDK MCP server object",
+      "All five tools return formatted string content in the expected tool result shape",
+      "Missing GITHUB_TOKEN returns the exact graceful message (no exception raised)",
+      "HTTP 4xx/5xx returns error string with status code (no exception raised)",
+      "httpx.Client is used with correct User-Agent and Authorization headers",
+      "All tool functions are async with return type dict[str, Any]",
+      "pyrefly check passes with zero errors",
+      "ruff format --check and ruff check pass with zero warnings"
+    ]
+  },
+  {
+    "id": "T005",
+    "title": "Implement session.py — JSONL transcript management",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\src\\chat_repo\\session.py. Define SessionState dataclass: owner: str, name: str, repo_root: Path, is_shallow: bool, session_file: Path, transcript: list[dict[str, Any]], sdk_session_id: str | None, cumulative_tokens_in: int, cumulative_tokens_out: int, cumulative_cost_usd: float. Implement: (1) new_session(owner, name, repo_root, is_shallow) -> SessionState — creates session directory ~/.chat-repo/sessions/<owner>__<name>/ and a new timestamped JSONL file; (2) load_latest_session(owner, name, repo_root) -> SessionState — finds newest JSONL by mtime, reads all lines, reconstructs transcript list, extracts sdk_session_id from the last assistant turn that has it; (3) append_turn(state, role, content, **meta) -> None — builds turn dict with 'role', 'content', 'ts' (ISO 8601), plus any extra meta keys; appends to state.transcript; writes JSON line to session_file; (4) export_markdown(state, dest) -> None — renders transcript to Markdown: user turns as '**You:**', assistant turns as '**Assistant:**' with code blocks detected via ``` fences. All functions fully type-hinted. Run ruff and pyrefly.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": ["T001"],
+    "output_files": [
+      "chat_repo/src/chat_repo/session.py"
+    ],
+    "acceptance_criteria": [
+      "new_session creates ~/.chat-repo/sessions/<owner>__<name>/<timestamp>.jsonl",
+      "load_latest_session correctly picks the newest file by mtime",
+      "append_turn writes valid JSON lines (one per turn, parseable with json.loads)",
+      "sdk_session_id is correctly extracted from the last assistant turn on load",
+      "export_markdown produces a valid Markdown file at the given path",
+      "pyrefly check passes with zero errors",
+      "ruff format --check and ruff check pass with zero warnings"
+    ]
+  },
+  {
+    "id": "T006",
+    "title": "Implement agent.py — ClaudeSDKClient setup and tool wiring",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\src\\chat_repo\\agent.py and write src/chat_repo/prompts/system.md. System prompt (system.md) must instruct the model to: (1) always cite path:line for code references; (2) always cite commit SHAs for git history answers; (3) prefer reading actual source code over guessing; (4) clearly state 'GITHUB_TOKEN is not set' when GitHub tools are unavailable; (5) note when the repo is shallow-cloned that git history may be incomplete. In agent.py: import ClaudeSDKClient, ClaudeAgentOptions from claude_agent_sdk; import RepoInfo from repo; import build_git_server from tools.git; import build_github_server from tools.github. Implement build_options(repo_info: RepoInfo, sdk_session_id: str | None, model: str) -> ClaudeAgentOptions. Set: cwd=str(repo_info.local_path), system_prompt={'type': 'file', 'path': str(prompts/system.md path)}, allowed_tools=['Read', 'Grep', 'Glob', 'mcp__git__git_log', 'mcp__git__git_show', 'mcp__git__git_blame', 'mcp__git__contributors', 'mcp__github__repo_meta', 'mcp__github__list_prs', 'mcp__github__get_pr', 'mcp__github__list_issues', 'mcp__github__list_releases'], disallowed_tools=['Write', 'Edit', 'Bash', 'WebSearch', 'WebFetch'], can_use_tool=path_guard (lambda that checks path args against repo root using path_is_safe from repo.py), mcp_servers={'git': build_git_server(repo_info.local_path), 'github': build_github_server(repo_info.owner, repo_info.name)}, model=model, resume=sdk_session_id (if not None), include_partial_messages=True. Export build_options and a convenience context manager build_client(options) -> AsyncContextManager[ClaudeSDKClient]. Full type hints. Run ruff and pyrefly.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": ["T003", "T004"],
+    "output_files": [
+      "chat_repo/src/chat_repo/agent.py",
+      "chat_repo/src/chat_repo/prompts/system.md"
+    ],
+    "acceptance_criteria": [
+      "build_options returns ClaudeAgentOptions with cwd set to repo local_path",
+      "allowed_tools list contains all 11 expected tools",
+      "disallowed_tools blocks Write, Edit, Bash",
+      "can_use_tool callback rejects paths outside repo root",
+      "mcp_servers keys are 'git' and 'github'",
+      "resume= is set when sdk_session_id is not None, omitted otherwise",
+      "system.md exists and contains cite path:line and SHA citation instructions",
+      "pyrefly check passes with zero errors",
+      "ruff format --check and ruff check pass with zero warnings"
+    ]
+  },
+  {
+    "id": "T007",
+    "title": "Implement cli.py — REPL, slash commands, streaming, and entry point",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\src\\chat_repo\\cli.py. Use click for the CLI: @click.command(), @click.argument('repo'), @click.option('--full', is_flag=True), @click.option('--resume', 'resume_session', is_flag=True), @click.option('--model', default='claude-sonnet-4-5'). In the main function: (1) Check os.environ.get('ANTHROPIC_API_KEY') — if absent print error and sys.exit(1); (2) Call resolve_repo(repo, full=full) from repo.py; (3) Create or load session via session.py based on --resume flag; (4) Print startup banner using rich: repo name, clone path, session ID, model; (5) Run async REPL via asyncio.run(repl(...)). Implement async def repl(repo_info, state, model): build ClaudeAgentOptions; open 'async with ClaudeSDKClient(options) as client'; loop reading user input via asyncio.get_event_loop().run_in_executor(None, input, prompt_str); handle slash commands locally (never send to model): /help, /exit, /clear, /repo, /save <path>, /cost; for non-slash input: append user turn, call await client.query(text), then iterate 'async for msg in client.receive_response()' inside try/except KeyboardInterrupt — on interrupt cancel current receive, print cancellation notice, continue REPL; use Rich Live to stream TextBlock content token-by-token; on ResultMessage: store session_id to state.sdk_session_id, accumulate tokens and cost; append assistant turn to session after full response. /clear resets the client by breaking out of the async with block and re-entering it. /repo prints repo metadata read from git (owner, name, url, clone path, shallow/full, latest SHA, file count via Glob). /cost prints cumulative tokens and estimated cost. Full type hints. Run ruff and pyrefly.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": ["T002", "T005", "T006"],
+    "output_files": [
+      "chat_repo/src/chat_repo/cli.py"
+    ],
+    "acceptance_criteria": [
+      "Missing ANTHROPIC_API_KEY causes exit code 1 with a clear message before REPL opens",
+      "Startup banner displays repo name, clone path, session ID, and model",
+      "All six slash commands are handled locally without calling the model",
+      "Ctrl-C cancels the in-flight response and resumes the REPL (session not closed)",
+      "TextBlock content streams token-by-token via Rich Live",
+      "ResultMessage.session_id is stored to state.sdk_session_id after each turn",
+      "JSONL file grows by one line per turn after each question and answer",
+      "'chat-repo .' resolves correctly and opens a REPL",
+      "pyrefly check passes with zero errors",
+      "ruff format --check and ruff check pass with zero warnings"
+    ]
+  },
+  {
+    "id": "T008",
+    "title": "Write tests/conftest.py and tests/test_repo.py",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\tests\\conftest.py with shared pytest fixtures: (1) tmp_git_repo(tmp_path) — uses subprocess to create a real git repo in tmp_path with 'git init', 'git config user.email/name', creates two Python files, makes two commits, so git_log and git_blame have real data to work with; returns the Path to the repo; (2) repo_info(tmp_git_repo) — returns a RepoInfo(owner='test', name='repo', clone_url='', local_path=tmp_git_repo, is_local=True, is_shallow=False). Implement D:\\GitHub\\agent-foundry\\chat_repo\\tests\\test_repo.py: (1) test URL parsing: 'https://github.com/owner/name' → owner='owner', name='name'; (2) test short form: 'owner/name' → correct RepoInfo; (3) test local path: '.' from a real git dir → is_local=True; (4) test path_is_safe: traversal paths return False, valid subpaths return True, symlinks outside root return False; (5) test shallow vs full flag propagation. All tests use pytest with anyio where async. Run 'uv run pytest tests/test_repo.py -v' and confirm all pass. Run ruff and pyrefly on test files.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": ["T002"],
+    "output_files": [
+      "chat_repo/tests/conftest.py",
+      "chat_repo/tests/test_repo.py"
+    ],
+    "acceptance_criteria": [
+      "All tests in test_repo.py pass with 'uv run pytest tests/test_repo.py -v'",
+      "URL form, short form, and local path forms are each tested",
+      "path_is_safe traversal attack (../etc/passwd) is tested and fails as expected",
+      "tmp_git_repo fixture creates a real git repo with at least two commits",
+      "pyrefly check passes on test files",
+      "ruff format --check and ruff check pass on test files"
+    ]
+  },
+  {
+    "id": "T009",
+    "title": "Write tests/test_git_tools.py",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\tests\\test_git_tools.py. Use the tmp_git_repo fixture from conftest.py. Test: (1) git_log tool returns a string containing the commit SHA and author name from the fixture commits; (2) git_show tool returns diff text for the second commit SHA; (3) git_blame tool returns per-line attribution for one of the test files; (4) contributors tool returns the test author's name and commit count; (5) error case: git_log called with a bad branch name returns an error string (no exception raised); (6) git_show with nonexistent SHA returns error string. Since tools are async (return dict), call them with anyio.from_thread or use @pytest.mark.anyio. Test the tool functions via build_git_server approach or by calling the underlying async functions directly. Run 'uv run pytest tests/test_git_tools.py -v'. Run ruff and pyrefly.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": ["T003"],
+    "output_files": [
+      "chat_repo/tests/test_git_tools.py"
+    ],
+    "acceptance_criteria": [
+      "All tests pass with 'uv run pytest tests/test_git_tools.py -v'",
+      "git_log, git_show, git_blame, contributors are each tested against real tmpdir fixture",
+      "Error paths (bad SHA, bad branch) return strings, not raised exceptions",
+      "Tests are async-compatible (anyio or pytest-anyio markers used correctly)",
+      "pyrefly check passes on test file",
+      "ruff format --check and ruff check pass on test file"
+    ]
+  },
+  {
+    "id": "T010",
+    "title": "Write tests/test_github_tools.py",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\tests\\test_github_tools.py. Do NOT make real network calls — use pytest monkeypatch or unittest.mock to patch httpx.Client or responses library. Test: (1) repo_meta returns formatted string when GITHUB_TOKEN is set and httpx returns 200 JSON; (2) list_prs returns formatted PR list; (3) get_pr returns full PR metadata string; (4) list_issues returns issue list; (5) list_releases returns release list; (6) missing GITHUB_TOKEN returns exact graceful string 'GitHub tools unavailable: set GITHUB_TOKEN environment variable.' for each tool; (7) HTTP 404 response returns error string with status code; (8) HTTP 403 rate limit response returns error string. Mock httpx.Client to return pre-built response objects with json() and status_code. All tests use monkeypatch to set/unset GITHUB_TOKEN in os.environ. Run 'uv run pytest tests/test_github_tools.py -v'. Run ruff and pyrefly.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": ["T004"],
+    "output_files": [
+      "chat_repo/tests/test_github_tools.py"
+    ],
+    "acceptance_criteria": [
+      "All tests pass with 'uv run pytest tests/test_github_tools.py -v'",
+      "All five GitHub tools are tested with mocked httpx responses",
+      "Missing GITHUB_TOKEN returns exact graceful string for each tool (VC-4)",
+      "HTTP 404 and 403 return error strings, not raised exceptions",
+      "No real network calls are made (httpx is fully mocked)",
+      "pyrefly check passes on test file",
+      "ruff format --check and ruff check pass on test file"
+    ]
+  },
+  {
+    "id": "T011",
+    "title": "Write tests/test_integration.py — smoke and degradation tests",
+    "description": "Implement D:\\GitHub\\agent-foundry\\chat_repo\\tests\\test_integration.py. Mark all tests with @pytest.mark.integration so they can be excluded from fast CI runs (add 'integration' marker to pyproject.toml under [tool.pytest.ini_options]). Tests (no live Claude API calls required — use subprocess or function-level checks): (1) test_github_token_absent — unset GITHUB_TOKEN, call each GitHub tool directly, verify each returns the graceful message string (VC-4); (2) test_path_traversal_blocked — call path_is_safe('../../../etc/passwd', tmp_git_repo) and assert it returns False (security sandbox test); (3) test_slash_command_dispatch — test that each slash command string is correctly identified as a slash command by the cli dispatch logic without invoking the model (parse-only test); (4) test_session_jsonl_roundtrip — create a session, append two turns, load the session back from disk, verify transcript length and sdk_session_id round-trip; (5) test_repo_local_dot_resolution — verify resolve_repo('.') from the agent-foundry directory resolves to a RepoInfo with is_local=True and a valid local_path. Add a comment noting that VC-1 (smoke test against anthropics/anthropic-sdk-python) and VC-2 (chat-repo . on agent-foundry) require live credentials and should be run manually per PRD §Verification Criteria. Run 'uv run pytest tests/test_integration.py -v'. Run ruff and pyrefly.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": ["T007"],
+    "output_files": [
+      "chat_repo/tests/test_integration.py"
+    ],
+    "acceptance_criteria": [
+      "All tests in test_integration.py pass with 'uv run pytest tests/test_integration.py -v'",
+      "GITHUB_TOKEN absence returns graceful string for all GitHub tools (VC-4)",
+      "Path traversal sandbox test passes (VC-2 security requirement)",
+      "Session JSONL round-trip test confirms append_turn + load_latest_session fidelity",
+      "Tests are marked @pytest.mark.integration and excluded from default pytest run",
+      "pyrefly check passes on test file",
+      "ruff format --check and ruff check pass on test file"
+    ]
+  },
+  {
+    "id": "T012",
+    "title": "Code review — all implementation modules",
+    "description": "Review all Python implementation files in D:\\GitHub\\agent-foundry\\chat_repo\\src\\chat_repo\\: cli.py, repo.py, agent.py, session.py, tools/git.py, tools/github.py. Check: (1) all functions and methods have complete type hints; (2) no line exceeds 88 characters; (3) all public functions have docstrings; (4) 'uv run pyrefly check' passes with zero errors on the full project; (5) 'uv run ruff format --check .' and 'uv run ruff check .' pass with zero warnings; (6) 'uv run pytest' (excluding integration markers) passes; (7) no credentials are written to disk or logged; (8) subprocess calls in git.py all specify cwd and do not use shell=True; (9) httpx calls in github.py do not leak token to logs or error messages; (10) GITHUB_TOKEN absence is handled before any httpx call in every GitHub tool. Write findings to D:\\GitHub\\agent-foundry\\chat_repo\\shared\\reviews\\T012_review.md.",
+    "assigned_to": "backend_reviewer",
+    "status": "pending",
+    "blocked_by": ["T002", "T003", "T004", "T005", "T006", "T007"],
+    "output_files": [
+      "chat_repo/shared/reviews/T012_review.md"
+    ],
+    "acceptance_criteria": [
+      "pyrefly check passes with zero errors on full project (VC-5)",
+      "ruff format --check and ruff check pass with zero warnings (VC-6)",
+      "uv run pytest (non-integration) passes with all tests green (VC-3)",
+      "All public functions have docstrings",
+      "No credentials appear in any log, error string, or disk write",
+      "Review report written to shared/reviews/T012_review.md"
+    ]
+  },
+  {
+    "id": "T013",
+    "title": "Architecture review",
+    "description": "Review the overall architecture of chat-repo against the PRD and designs.md. Check: (1) module boundaries match PRD §Module Structure and designs.md Component Diagram; (2) custom @tool functions correctly use the @tool decorator + create_sdk_mcp_server pattern (not re-wrapped built-ins); (3) sandbox mechanism (cwd + can_use_tool path guard) is correctly implemented in agent.py; (4) --resume flow stores and reads sdk_session_id from JSONL as designed; (5) Ctrl-C cancellation does not close the ClaudeSDKClient context; (6) no Write/Edit/Bash tools are registered or allowed; (7) all FRs from PRD are addressed in the implementation. Write findings to D:\\GitHub\\agent-foundry\\chat_repo\\shared\\reviews\\T013_arch_review.md.",
+    "assigned_to": "architecture_reviewer",
+    "status": "pending",
+    "blocked_by": ["T002", "T003", "T004", "T005", "T006", "T007"],
+    "output_files": [
+      "chat_repo/shared/reviews/T013_arch_review.md"
+    ],
+    "acceptance_criteria": [
+      "All 37 functional requirements (FR-001 to FR-037) are verified as addressed",
+      "Tool registration pattern (in-process MCP server) is confirmed correct",
+      "Sandbox implementation is verified: cwd + can_use_tool both present in agent.py",
+      "No destructive tools (Write, Edit, Bash) are accessible to the model",
+      "Architecture review report written to shared/reviews/T013_arch_review.md"
+    ]
+  },
+  {
+    "id": "T014",
+    "title": "Write README and module docstrings",
+    "description": "Write D:\\GitHub\\agent-foundry\\chat_repo\\README.md covering: installation (uv add / pipx install from source), usage examples (chat-repo owner/name, chat-repo https://github.com/owner/name, chat-repo ., chat-repo owner/name --full, chat-repo owner/name --resume), all slash commands with descriptions, environment variables (ANTHROPIC_API_KEY required, GITHUB_TOKEN optional), session file locations, known limitations (shallow clone, no write tools). Also ensure every public function in cli.py, repo.py, agent.py, session.py, tools/git.py, tools/github.py has a docstring if not already present (add them if missing). Do not invent functionality — document only what is implemented.",
+    "assigned_to": "documentation",
+    "status": "pending",
+    "blocked_by": ["T002", "T003", "T004", "T005", "T006", "T007"],
+    "output_files": [
+      "chat_repo/README.md"
+    ],
+    "acceptance_criteria": [
+      "README.md covers installation, all usage forms, all slash commands, and both env vars",
+      "Session file location and --resume behavior are documented",
+      "All public functions in all source modules have docstrings",
+      "README does not describe any unimplemented features"
+    ]
+  }
+]

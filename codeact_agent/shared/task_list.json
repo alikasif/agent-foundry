@@ -1,0 +1,260 @@
+[
+  {
+    "id": "T001",
+    "title": "Scaffold project structure",
+    "description": "Create the full project directory structure for codeact_agent. Create pyproject.toml (name=codeact-agent, version=0.1.0, requires-python>=3.11, runtime deps: openai-agents, pydantic>=2.0, click>=8.0, rich>=13.0, python-dotenv>=1.0.0; dev deps via dependency group: pytest>=8.0, anyio[trio]>=4.0, ruff>=0.15.10; console script: codeact-agent = codeact_agent.main:main; build system: hatchling). Create .env.example with OPENROUTER_API_KEY and CODEACT_MODEL placeholders. Create src/codeact_agent/__init__.py (exports CodeActAgent, PythonSandbox, AgentLoop). Create empty stub files: src/codeact_agent/agent.py, src/codeact_agent/sandbox.py, src/codeact_agent/loop.py, src/codeact_agent/main.py. Create tests/__init__.py and empty test stubs: tests/test_agent.py, tests/test_sandbox.py, tests/test_loop.py, tests/test_main.py. Initialize uv.lock via 'uv lock'.",
+    "assigned_to": "project_structure",
+    "status": "done",
+    "blocked_by": [],
+    "output_files": [
+      "codeact_agent/pyproject.toml",
+      "codeact_agent/.env.example",
+      "codeact_agent/uv.lock",
+      "codeact_agent/src/codeact_agent/__init__.py",
+      "codeact_agent/src/codeact_agent/agent.py",
+      "codeact_agent/src/codeact_agent/sandbox.py",
+      "codeact_agent/src/codeact_agent/loop.py",
+      "codeact_agent/src/codeact_agent/main.py",
+      "codeact_agent/tests/__init__.py",
+      "codeact_agent/tests/test_agent.py",
+      "codeact_agent/tests/test_sandbox.py",
+      "codeact_agent/tests/test_loop.py",
+      "codeact_agent/tests/test_main.py"
+    ],
+    "acceptance_criteria": [
+      "pyproject.toml is valid and parseable",
+      ".env.example contains OPENROUTER_API_KEY and CODEACT_MODEL",
+      "src/codeact_agent/__init__.py exists with package exports",
+      "All stub files exist and are syntactically valid Python",
+      "uv.lock is generated",
+      "Tests directory has __init__.py"
+    ]
+  },
+  {
+    "id": "T002",
+    "title": "Implement CodeActAgent class",
+    "description": "Implement src/codeact_agent/agent.py with the CodeActAgent class. The class must have: __init__(self, model: str, api_key: str, base_url: str) which creates an async OpenAI client (OpenAI(api_key=api_key, base_url=base_url)) and an agents.Agent instance with a detailed CodeAct system prompt. The system prompt must instruct the agent to: use Python as its action space, respond with markdown fenced code blocks, leverage persistent namespace, use stdout/stderr feedback for debugging, and respond with text (no code) when done. The async run(self, history: list[dict[str, str]]) -> str method must use agents.Runner.run() to send the conversation history and return the response text. All public methods must have type hints and docstrings.",
+    "assigned_to": "python_coder",
+    "status": "done",
+    "blocked_by": ["T001"],
+    "output_files": [
+      "codeact_agent/src/codeact_agent/agent.py"
+    ],
+    "acceptance_criteria": [
+      "CodeActAgent class is defined with correct __init__ signature",
+      "System prompt contains required phrases: 'Python', 'code block', 'stdout', 'stderr', 'persist'",
+      "run() method is async and returns str",
+      "All public methods have type hints and docstrings",
+      "Module passes ruff check and ruff format"
+    ]
+  },
+  {
+    "id": "T003",
+    "title": "Implement PythonSandbox execution engine",
+    "description": "Implement src/codeact_agent/sandbox.py with two components: (1) SandboxResult - a Pydantic model with fields: stdout (str), stderr (str), exception (str | None), return_value (object | None). (2) PythonSandbox class with __init__ (initializes empty dict namespace), async execute(self, code: str) -> SandboxResult (executes code via exec() in the namespace dict, capturing stdout/stderr via io.StringIO redirect of sys.stdout/sys.stderr, capturing exceptions via traceback.format_exc(), and restoring streams in a finally block), reset(self) (clears the namespace dict), and namespace property (read access to namespace). All public methods must have type hints and docstrings.",
+    "assigned_to": "python_coder",
+    "status": "done",
+    "blocked_by": ["T001"],
+    "output_files": [
+      "codeact_agent/src/codeact_agent/sandbox.py"
+    ],
+    "acceptance_criteria": [
+      "SandboxResult Pydantic model has correct fields with type hints",
+      "PythonSandbox.execute() captures stdout from print() statements",
+      "PythonSandbox.execute() captures stderr writes",
+      "PythonSandbox.execute() captures full traceback on exception",
+      "Namespace persists across multiple execute() calls",
+      "reset() clears the namespace",
+      "Stdout/stderr are fully restored after execute() even on exception",
+      "All public methods have type hints and docstrings",
+      "Module passes ruff check and ruff format"
+    ]
+  },
+  {
+    "id": "T004",
+    "title": "Implement AgentLoop",
+    "description": "Implement src/codeact_agent/loop.py with: (1) Module-level helper extract_code_blocks(text: str) -> list[str] using regex pattern r'```python\\s*\\n(.*?)```' with re.DOTALL flag to extract Python code blocks from markdown. (2) AgentLoop class with __init__(self, agent: CodeActAgent, sandbox: PythonSandbox, max_turns: int = 20), async run_turn(self, history: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]], and reset(self). The run_turn method implements the self-debug loop: call agent.run(history), extract code blocks, for each block execute via sandbox, format observation (stdout/stderr/exception) as user-role XML-tagged message, append to history, loop until no code blocks or max_turns reached. Returns (final_response, updated_history). All public methods must have type hints and docstrings.",
+    "assigned_to": "python_coder",
+    "status": "done",
+    "blocked_by": ["T001", "T002", "T003"],
+    "output_files": [
+      "codeact_agent/src/codeact_agent/loop.py"
+    ],
+    "acceptance_criteria": [
+      "extract_code_blocks() correctly extracts single and multiple code blocks from markdown text",
+      "extract_code_blocks() returns empty list when no code blocks present",
+      "AgentLoop.run_turn() handles single-turn execution (code -> observation -> response)",
+      "AgentLoop.run_turn() handles multi-turn self-debug on exceptions",
+      "AgentLoop.run_turn() stops at max_turns and returns last response",
+      "AgentLoop.run_turn() appends observations as user-role messages to history",
+      "reset() delegates to sandbox.reset()",
+      "All public methods have type hints and docstrings",
+      "Module passes ruff check and ruff format"
+    ]
+  },
+  {
+    "id": "T005",
+    "title": "Implement CLI REPL (main.py)",
+    "description": "Implement src/codeact_agent/main.py as the CLI entry point. Use click.command() with options --model (envvar CODEACT_MODEL, default 'openrouter/anthropic/claude-sonnet-4'), --api-key (envvar OPENROUTER_API_KEY), --base-url (envvar OPENAI_API_BASE, default 'https://openrouter.ai/api/v1'). The main() function: (1) Load .env via python_dotenv.load_dotenv(). (2) Validate that api_key is set, print error and exit if not. (3) Print startup banner with model, provider, Python version, available slash commands. (4) Initialize CodeActAgent, PythonSandbox, AgentLoop. (5) Run REPL loop: read input with prompt 'codeact> ', check slash commands (/help prints commands, /reset clears history and sandbox, /history shows turn count and model, /exit /quit prints session summary and exits), otherwise run agent_loop.run_turn(history) via anyio.run() bridge, display results with Rich (reasoning text with dim style, code blocks with Syntax(code, 'python', theme='monokai'), stdout in green Panel, stderr/exception in red Panel). (6) On exit print session summary (turns, model). All functions must have type hints and docstrings.",
+    "assigned_to": "python_coder",
+    "status": "done",
+    "blocked_by": ["T001", "T002", "T003", "T004"],
+    "output_files": [
+      "codeact_agent/src/codeact_agent/main.py"
+    ],
+    "acceptance_criteria": [
+      "CLI starts with 'codeact-agent' or 'uv run codeact-agent' and displays startup banner",
+      "Banner shows model name, provider, Python version, slash commands",
+      "Slash commands work: /help lists commands, /reset clears state, /history shows info, /exit quits",
+      "Agent responses display with syntax-highlighted code blocks via Rich",
+      "Execution results display in colored Panels (stdout green, stderr red)",
+      "Missing API key produces clear error message on startup",
+      "All functions have type hints and docstrings",
+      "Module passes ruff check and ruff format"
+    ]
+  },
+  {
+    "id": "T006",
+    "title": "Test PythonSandbox",
+    "description": "Write tests/test_sandbox.py with pytest tests covering: basic code execution (x = 42), stdout capture (print('hello')), stderr capture (sys.stderr.write('err')), exception capture (1/0 produces traceback), namespace persistence across exec calls, reset() clears namespace, import persistence (import math then use math.pi), and multi-line code execution. Use anyio for async test execution. All test functions must have docstrings explaining what is being tested.",
+    "assigned_to": "python_test",
+    "status": "done",
+    "blocked_by": ["T003"],
+    "output_files": [
+      "codeact_agent/tests/test_sandbox.py"
+    ],
+    "test_results": "22 passed, 100% coverage on sandbox.py",
+    "acceptance_criteria": [
+      "All tests pass with 'uv run pytest tests/test_sandbox.py -v'",
+      "Test covers stdout capture",
+      "Test covers stderr capture",
+      "Test covers exception capture with traceback",
+      "Test covers namespace persistence across calls",
+      "Test covers reset() clearing namespace",
+      "Test covers import persistence",
+      "Tests are async using anyio",
+      "Tests pass ruff check"
+    ]
+  },
+  {
+    "id": "T007",
+    "title": "Test CodeActAgent",
+    "description": "Write tests/test_agent.py with pytest tests covering: CodeActAgent initialization (correct model, client config), system prompt content verification (contains key phrases like 'Python', 'code block', 'stdout', 'persist'), and run() method with mocked OpenAI client to verify it calls agents.Runner correctly and returns response text. Use pytest fixtures and unittest.mock for mocking. Use anyio for async test execution. All test functions must have docstrings.",
+    "assigned_to": "python_test",
+    "status": "done",
+    "blocked_by": ["T002"],
+    "output_files": [
+      "codeact_agent/tests/test_agent.py"
+    ],
+    "test_results": "25 passed, 100% pass rate",
+    "acceptance_criteria": [
+      "All tests pass with 'uv run pytest tests/test_agent.py -v'",
+      "System prompt content is verified",
+      "run() method interactions are verified with mocks",
+      "Tests are async using anyio",
+      "Tests pass ruff check"
+    ]
+  },
+  {
+    "id": "T008",
+    "title": "Test AgentLoop",
+    "description": "Write tests/test_loop.py with pytest tests covering: extract_code_blocks() with various markdown inputs (single block, multiple blocks, no blocks, non-python blocks), single-turn execution flow, multi-turn self-debug flow (exception in turn 1, corrected code in turn 2), no-code response handling, max_turns guard (loop terminates at max_turns), and history accumulation (observations appended as user-role messages). Mock the OpenAI client to control agent responses. Use anyio for async test execution. All test functions must have docstrings.",
+    "assigned_to": "python_test",
+    "status": "done",
+    "blocked_by": ["T004"],
+    "output_files": [
+      "codeact_agent/tests/test_loop.py"
+    ],
+    "test_results": "43 passed, 100% pass rate",
+    "acceptance_criteria": [
+      "All tests pass with 'uv run pytest tests/test_loop.py -v'",
+      "Code extraction regex is thoroughly tested",
+      "Self-debug multi-turn flow is tested",
+      "Max turns guard is verified",
+      "History accumulation is verified",
+      "Tests are async using anyio",
+      "Tests pass ruff check"
+    ]
+  },
+  {
+    "id": "T009",
+    "title": "Test CLI (main.py)",
+    "description": "Write tests/test_main.py with pytest tests covering: slash command parsing (/help, /reset, /history, /exit, /quit), banner display (contains model, provider info), session lifecycle using click.testing.CliRunner for CLI invocation, Rich output verification (syntax panels, colored output), and missing API key error handling. Use anyio for async test execution where needed. All test functions must have docstrings.",
+    "assigned_to": "python_test",
+    "status": "done",
+    "blocked_by": ["T005"],
+    "output_files": [
+      "codeact_agent/tests/test_main.py"
+    ],
+    "test_results": "51 passed, 91% coverage on main.py, 92% overall",
+    "acceptance_criteria": [
+      "All tests pass with 'uv run pytest tests/test_main.py -v'",
+      "All five slash commands are tested",
+      "Banner content is verified",
+      "CliRunner integration test passes",
+      "Error handling for missing API key is tested",
+      "Tests pass ruff check"
+    ]
+  },
+  {
+    "id": "T010",
+    "title": "Review sandbox implementation",
+    "description": "Review the PythonSandbox implementation (T003) and its tests (T006) for correctness, safety, and adherence to the PRD. Write review results to codeact_agent/shared/reviews/T010_sandbox_review.md. Check: correct exception handling, proper stream restoration, Pydantic model correctness, test coverage completeness, type hints, docstrings, and ruff compliance.",
+    "assigned_to": "backend_reviewer",
+    "status": "done",
+    "blocked_by": ["T003", "T006"],
+    "output_files": [
+      "codeact_agent/shared/reviews/T010_sandbox_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file is written with pass/fail assessment for each checked item",
+      "Stream restoration in finally block is verified",
+      "Test coverage is adequate",
+      "All public APIs have type hints and docstrings",
+      "Ruff compliance is confirmed"
+    ],
+    "reviewer": "backend_reviewer",
+    "review_comments": "APPROVED. All checklist items pass: exception handling correct, stream restoration verified, Pydantic model correct, 22 tests covering all behaviors, full type hints and docstrings, ruff check and format pass."
+  },
+  {
+    "id": "T011",
+    "title": "Review loop implementation",
+    "description": "Review the AgentLoop implementation (T004) and its tests (T008) for correctness and adherence to the PRD. Write review results to codeact_agent/shared/reviews/T011_loop_review.md. Check: loop logic correctness, history management, max_turns guard, code extraction edge cases, observation formatting, reset delegation, test coverage, type hints, docstrings, and ruff compliance.",
+    "assigned_to": "backend_reviewer",
+    "status": "done",
+    "blocked_by": ["T004", "T008"],
+    "output_files": [
+      "codeact_agent/shared/reviews/T011_loop_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file is written with pass/fail assessment for each checked item",
+      "Loop termination logic is verified correct",
+      "Code extraction edge cases are covered",
+      "Test coverage is adequate",
+      "All public APIs have type hints and docstrings",
+      "Ruff compliance is confirmed"
+    ],
+    "reviewer": "backend_reviewer",
+    "review_comments": "APPROVED. All checklist items pass: loop logic correct, history management correct with immutability guarantees, max_turns guard verified, code extraction regex thoroughly tested (9 edge case tests), XML observation format matches spec, reset delegates correctly to sandbox, 43 tests with mock and integration coverage, full type hints and docstrings, ruff compliant."
+  },
+  {
+    "id": "T012",
+    "title": "Review full integration",
+    "description": "Review the complete implementation (agent.py, sandbox.py, loop.py, main.py) and all tests for end-to-end correctness and PRD compliance. Write review results to codeact_agent/shared/reviews/T012_full_review.md. Check: system prompt quality, Rich formatting integration, all slash commands work, async/sync bridge, error handling for missing API keys, session summary on exit, overall code quality, ruff check passes, all tests pass, and pyproject.toml configuration is correct.",
+    "assigned_to": "backend_reviewer",
+    "status": "done",
+    "blocked_by": ["T005", "T009", "T010", "T011"],
+    "output_files": [
+      "codeact_agent/shared/reviews/T012_full_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file is written with pass/fail assessment for each checked item",
+      "All PRD success criteria are addressed",
+      "All tests pass",
+      "Ruff check and format pass",
+      "Console script entry point is correctly configured"
+    ],
+    "reviewer": "backend_reviewer",
+    "review_comments": "APPROVED. All 11 checklist items pass: system prompt follows CodeAct paper principles, Rich formatting with syntax highlighting and colored panels, all 5 slash commands work correctly, anyio.run async/sync bridge, missing API key error handling with clear message, session summary on exit, clean architecture with full type hints and docstrings, ruff check and format pass (zero errors), 141 tests pass (0 failures), pyproject.toml correct and builds cleanly. All 10 PRD success criteria verified."
+  }
+]

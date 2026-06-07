@@ -20,7 +20,6 @@ from codeact_agent.main import (
     SLASH_COMMANDS,
     _display_code,
     _display_result,
-    _extract_code_for_display,
     _print_banner,
     _print_help,
     _print_history,
@@ -341,34 +340,6 @@ class TestDisplayResult:
 # ---------------------------------------------------------------------------
 # Code extraction
 # ---------------------------------------------------------------------------
-
-
-class TestExtractCodeForDisplay:
-    """Tests for the _extract_code_for_display helper."""
-
-    def test_single_code_block(self) -> None:
-        """Must extract a single Python code block."""
-        text = "Here is code:\n```python\nprint('hi')\n```"
-        result = _extract_code_for_display(text)
-        assert len(result) == 1
-        assert "print('hi')" in result[0]
-
-    def test_multiple_code_blocks(self) -> None:
-        """Must extract multiple Python code blocks."""
-        text = "```python\na = 1\n```\nSome text\n```python\nb = 2\n```"
-        result = _extract_code_for_display(text)
-        assert len(result) == 2
-
-    def test_no_code_blocks(self) -> None:
-        """Must return empty list when no code blocks present."""
-        result = _extract_code_for_display("Just plain text")
-        assert result == []
-
-    def test_non_python_block_ignored(self) -> None:
-        """Must ignore non-python fenced blocks."""
-        text = "```javascript\nconsole.log('hi')\n```"
-        result = _extract_code_for_display(text)
-        assert result == []
 
 
 # ---------------------------------------------------------------------------

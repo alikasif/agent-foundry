@@ -57,10 +57,16 @@ async def test_namespace_persistence(sandbox: PythonSandbox) -> None:
 
 @pytest.mark.anyio
 async def test_reset_clears_namespace(sandbox: PythonSandbox) -> None:
-    """reset() clears all variables from the namespace."""
+    """reset() clears user variables; built-ins FINAL/context are re-injected.
+
+    Phase A: reset() now re-injects FINAL and context into the namespace,
+    so the namespace is not empty -- but user-defined names are gone.
+    """
     await sandbox.execute("x = 42")
     sandbox.reset()
-    assert len(sandbox.namespace) == 0
+    assert "x" not in sandbox.namespace
+    assert "FINAL" in sandbox.namespace
+    assert "context" in sandbox.namespace
 
 
 @pytest.mark.anyio

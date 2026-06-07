@@ -1,4 +1,8 @@
-"""Tests for the AgentLoop self-debug loop and extract_code_blocks utility."""
+"""Tests for the AgentLoop self-debug loop and extract_code_blocks utility.
+
+Phase A: extract_code_blocks now returns list[tuple[str, str]] (language, code)
+rather than list[str].  Tests updated accordingly.
+"""
 
 from __future__ import annotations
 
@@ -16,21 +20,29 @@ from codeact_agent.sandbox import PythonSandbox
 
 
 class TestExtractCodeBlocks:
-    """Tests for the extract_code_blocks() utility function."""
+    """Tests for the extract_code_blocks() utility function.
 
-    def test_single_code_block(self) -> None:
+    Phase A: the function returns list[tuple[str, str]] (language, code).
+    """
+
+    def test_single_python_code_block(self) -> None:
         """Extract a single Python code block from markdown text."""
         text = "Here is the code:\n```python\nprint('hello')\n```"
         result = extract_code_blocks(text)
-        assert result == ["print('hello')"]
+        assert len(result) == 1
+        lang, code = result[0]
+        assert lang == "python"
+        assert code == "print('hello')"
 
-    def test_multiple_code_blocks(self) -> None:
+    def test_multiple_python_code_blocks(self) -> None:
         """Extract multiple Python code blocks from markdown text."""
         text = "Step 1:\n```python\nx = 1\n```\nStep 2:\n```python\ny = 2\n```"
         result = extract_code_blocks(text)
         assert len(result) == 2
-        assert "x = 1" in result[0]
-        assert "y = 2" in result[1]
+        assert result[0][0] == "python"
+        assert "x = 1" in result[0][1]
+        assert result[1][0] == "python"
+        assert "y = 2" in result[1][1]
 
     def test_no_code_blocks(self) -> None:
         """Return an empty list when no code blocks are present."""
@@ -38,22 +50,28 @@ class TestExtractCodeBlocks:
         result = extract_code_blocks(text)
         assert result == []
 
-    def test_non_python_code_blocks_ignored(self) -> None:
-        """Non-python fenced blocks should be ignored."""
+    def test_non_python_code_block_extracted_with_lang(self) -> None:
+        """Non-python fenced blocks are extracted with their language tag."""
         text = "```javascript\nconsole.log('hi')\n```"
         result = extract_code_blocks(text)
-        assert result == []
+        assert len(result) == 1
+        lang, code = result[0]
+        assert lang == "javascript"
+        assert "console.log" in code
 
-    def test_mixed_python_and_non_python_blocks(self) -> None:
-        """Only Python blocks are extracted; others are ignored."""
+    def test_mixed_language_blocks(self) -> None:
+        """Mixed-language blocks are all extracted with correct tags."""
         text = (
             "```javascript\nconsole.log('hi')\n```\n"
             "```python\nx = 1\n```\n"
             "```bash\necho hello\n```"
         )
         result = extract_code_blocks(text)
-        assert len(result) == 1
-        assert "x = 1" in result[0]
+        assert len(result) == 3
+        langs = [r[0] for r in result]
+        assert "javascript" in langs
+        assert "python" in langs
+        assert "bash" in langs
 
     def test_empty_string(self) -> None:
         """Return empty list for empty input text."""
@@ -65,22 +83,47 @@ class TestExtractCodeBlocks:
         text = "```python\nimport os\nimport sys\nprint(os.getcwd())\n```"
         result = extract_code_blocks(text)
         assert len(result) == 1
-        assert "import os" in result[0]
-        assert "import sys" in result[0]
-        assert "print(os.getcwd())" in result[0]
+        lang, code = result[0]
+        assert lang == "python"
+        assert "import os" in code
+        assert "import sys" in code
+        assert "print(os.getcwd())" in code
 
     def test_code_block_with_leading_whitespace_in_content(self) -> None:
         """Leading/trailing whitespace in code content is stripped."""
         text = "```python\n   x = 42   \n```"
         result = extract_code_blocks(text)
-        assert result == ["x = 42"]
+        assert len(result) == 1
+        assert result[0] == ("python", "x = 42")
 
     def test_code_block_with_blank_line_inside(self) -> None:
         """Code blocks with blank lines are handled correctly."""
         text = "```python\nx = 1\n\nprint(x)\n```"
         result = extract_code_blocks(text)
         assert len(result) == 1
-        assert "\n" in result[0]
+        lang, code = result[0]
+        assert lang == "python"
+        assert "\n" in code
+
+    def test_bash_alias_normalised(self) -> None:
+        """sh/shell/zsh aliases are normalised to 'bash'."""
+        for alias in ("sh", "shell", "zsh"):
+            text = f"```{alias}\necho hi\n```"
+            result = extract_code_blocks(text)
+            assert result[0][0] == "bash", f"Expected 'bash' for alias '{alias}'"
+
+    def test_python_py_alias_normalised(self) -> None:
+        """'py' alias is normalised to 'python'."""
+        text = "```py\nx = 1\n```"
+        result = extract_code_blocks(text)
+        assert result[0][0] == "python"
+
+    def test_no_lang_tag_defaults_to_text(self) -> None:
+        """Code blocks with no language tag default to 'text'."""
+        text = "```\nhello world\n```"
+        result = extract_code_blocks(text)
+        assert len(result) == 1
+        assert result[0][0] == "text"
 
 
 # ---------------------------------------------------------------------------
@@ -125,23 +168,43 @@ def agent_loop_real_sandbox(
 
 
 def _make_success_result(stdout: str = "", stderr: str = "") -> MagicMock:
-    """Create a mocked successful SandboxResult."""
+    """Create a mocked successful SandboxResult.
+
+    ``final_value`` is explicitly None so the FINAL() branch is not triggered.
+    """
     result = MagicMock(
         stdout=stdout,
         stderr=stderr,
         exception=None,
         return_value=None,
+        final_value=None,
     )
     return result
 
 
 def _make_error_result(exception: str, stdout: str = "", stderr: str = "") -> MagicMock:
-    """Create a mocked failing SandboxResult."""
+    """Create a mocked failing SandboxResult.
+
+    ``final_value`` is explicitly None so the FINAL() branch is not triggered.
+    """
     result = MagicMock(
         stdout=stdout,
         stderr=stderr,
         exception=exception,
         return_value=None,
+        final_value=None,
+    )
+    return result
+
+
+def _make_final_result(value: object, stdout: str = "") -> MagicMock:
+    """Create a mocked SandboxResult where FINAL() was called."""
+    result = MagicMock(
+        stdout=stdout,
+        stderr="",
+        exception=None,
+        return_value=None,
+        final_value=value,
     )
     return result
 
@@ -539,9 +602,16 @@ class TestRealSandboxIntegration:
         mock_agent: AsyncMock,
         real_sandbox: PythonSandbox,
     ) -> None:
-        """AgentLoop.reset() clears the real sandbox namespace."""
+        """AgentLoop.reset() clears user-defined names from the namespace.
+
+        Phase A: reset() re-injects FINAL and context, so the namespace is
+        not empty after reset -- but user-defined variables must be gone.
+        """
         loop = AgentLoop(agent=mock_agent, sandbox=real_sandbox, max_turns=5)
         await real_sandbox.execute("x = 42")
         assert "x" in real_sandbox.namespace
         loop.reset()
-        assert len(real_sandbox.namespace) == 0
+        # User variable is gone; built-ins FINAL and context are re-injected.
+        assert "x" not in real_sandbox.namespace
+        assert "FINAL" in real_sandbox.namespace
+        assert "context" in real_sandbox.namespace
