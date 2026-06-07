@@ -13,6 +13,17 @@ This document contains critical information about working with this codebase. Fo
 ## IMPORTANT
 For any coding tasks always use the subagents as described below. NEVER start without the sub agents.
 
+## Spec Implementation Standard
+
+When implementing any spec (PRD, design doc, or task), always maintain a running `implementation-notes.md` file alongside your output. This file must capture:
+
+- Decisions you had to make that **weren't covered** in the spec
+- Things you had to **change** from the spec and why
+- **Tradeoffs** you made
+- Anything else the reviewer or author should know
+
+Store this file at `<project_dir>/shared/implementation-notes.md`. This applies to all coding agents dispatched by ralph.
+
 ## Agents & Orchestration
 This repository defines a set of workflow agents under `.claude/agents/`. Use this file as a concise index for available agents and how they are invoked.
 
