@@ -1,3 +1,95 @@
+# Implementation Notes â€” Phase A (CodeAct Core) + Phase B (Recursive Subagents)
+
+---
+
+## Phase B â€” Recursive Subagents (`llm_query`)
+
+### DI approach: `SubagentRunner` injected into `PythonSandbox`
+
+**Decision**: The child-spawning logic lives in `subagents.py` (`SubagentRunner`).
+`sandbox.py` accepts an optional `child_runner: SubagentRunner | None` parameter
+and injects `llm_query`/`llm_query_many` into the namespace.  `loop.py` and
+`main.py` construct the runner and pass it at sandbox creation.
+
+**Why not in `sandbox.py` directly?** `sandbox.py` would need to import `agent.py`
+and `loop.py` at module level, creating a circular import
+(`sandbox` -> `loop` -> `sandbox`).  Instead:
+
+- `sandbox.py` uses `TYPE_CHECKING` for the annotation and the runtime import
+  is deferred to `SubagentRunner._run_child_async` (inside a method body).
+- `subagents.py` imports `agent`/`loop` only inside `_run_child_async` (lazy),
+  not at module top-level.
+
+**Why not a callable/closure injected at loop construction?** A class
+(`SubagentRunner`) is cleaner for self-propagating depth: it can construct a
+child runner with `depth + 1` naturally.  A closure would need `nonlocal` state
+to propagate depth, which is harder to test.
+
+### Async-from-sync via worker threads
+
+**Decision**: `llm_query` calls `concurrent.futures.ThreadPoolExecutor` which
+runs `asyncio.run(child_coro)` in a worker thread.  The calling thread
+(inside `exec()` on the main event loop) blocks on `future.result()`.
+
+**Why threads, not `asyncio.run_coroutine_threadsafe`?** The `exec()` call runs
+synchronously on the main event loop thread.  `asyncio.run()` from within a
+running loop raises `RuntimeError`.  A worker thread has no running loop, so
+`asyncio.run()` is valid there.  `run_coroutine_threadsafe` would require a
+reference to the running loop and is designed for submitting work *to* a loop
+from another thread â€” the reverse of what we need.
+
+**`llm_query_many` parallelism**: Uses `ThreadPoolExecutor(max_workers=N)` for N
+prompts.  Futures are submitted all at once and results are gathered in index
+order via `[f.result() for f in futures]`, so results align with prompts
+regardless of completion order.
+
+### Thread-safety caveat: `sys.stdout`
+
+Child sandboxes use the same in-process `sys.stdout` swap as the parent.
+Parallel children running in separate threads can interleave `sys.stdout`
+assignments, corrupting each other's captures.  This is accepted because:
+
+- Children return their final answer via `FINAL()` (the return value path), not
+  via stdout.  The parent reads the *return value*, never the child's stdout.
+- The known limitation is documented in `docs/subagents.md`.
+
+### Thread-safety caveat: `set_default_openai_client`
+
+`CodeActAgent.__init__` calls `set_default_openai_client(client)` which is a
+module-level global in the `openai-agents` SDK.  Parallel children each call
+this with identical config (same model, key, base URL), so re-setting is
+harmless.  Documented as a known limitation.
+
+### `context` variable in children
+
+Children receive the full prompt (parent's `context` + task description) via
+`_build_prompt(prompt, context)`.  The child's `AgentLoop` calls
+`sandbox.set_context(user_query=full_prompt)` which seeds the `context`
+variable in the child namespace, mirroring how the parent works.  This is
+symmetric and requires no special handling.
+
+### `SubagentDepthError` inherits from `Exception` (not `BaseException`)
+
+Unlike `FinalSignal` (which inherits `BaseException` to bypass agent catch
+blocks), depth errors should be catchable by agent code.  An agent that hits a
+depth limit may want to degrade gracefully.  Using plain `Exception` gives that
+option.
+
+### Children do not stream to the console
+
+Children are run via `AgentLoop.run_turn` with no `on_stream_token` or
+`on_reasoning_token` callbacks.  A dim `â†³ subagent (depth N): â€¦` line is
+printed to the parent UI via the `progress_fn` callback injected into
+`SubagentRunner`.  This keeps the parent console readable.
+
+### System prompt update
+
+`CODEACT_SYSTEM_PROMPT` in `prompts.py` now documents `llm_query` and
+`llm_query_many` including the invariant (results are Python variables, not
+context), the parallelism pattern, and `SubagentDepthError`.
+
+---
+
 # Implementation Notes â€” Phase A (CodeAct Core)
 
 ## Decisions not covered by the spec
@@ -146,19 +238,19 @@ The REPL appeared to freeze after a query because (1) the configured
 free-tier model has multi-second first-token latency and the screen was blank
 during that wait (default --log-level WARNING hides logs), and (2) the
 streaming loop in loop.py only handled ResponseTextDeltaEvent and
-silently discarded ResponseReasoningTextDeltaEvent — so the model's actual
+silently discarded ResponseReasoningTextDeltaEvent ï¿½ so the model's actual
 thinking was never shown.
 
 ### Changes
 - AgentLoop.run_turn gained two optional callbacks: on_reasoning_token
   (each reasoning .delta) and on_llm_start (fired once immediately
   before every LLM call, streaming and non-streaming). Reasoning deltas are
-  display-only — only text deltas are accumulated into the response used
+  display-only ï¿½ only text deltas are accumulated into the response used
   for extract_code_blocks.
-- main.py shows a console.status spinner (Thinking…) started in
+- main.py shows a console.status spinner (Thinkingï¿½) started in
   on_llm_start and stopped by the first reasoning/text token. Reasoning
-  streams dim/italic under a ?? thinking… header; the answer streams
-  normally on a fresh line. A dim ? executing {lang} block… line precedes
+  streams dim/italic under a ?? thinkingï¿½ header; the answer streams
+  normally on a fresh line. A dim ? executing {lang} blockï¿½ line precedes
   each result panel.
 
 ### Decisions / tradeoffs
@@ -169,7 +261,7 @@ thinking was never shown.
   token callbacks; printing under an active Rich Status (a Live display)
   garbles output, so the spinner must be stopped before any print.
 - The execution indicator is a plain dim line, not a console.status,
-  because on_turn fires AFTER dispatch returns — a spinner there could not
+  because on_turn fires AFTER dispatch returns ï¿½ a spinner there could not
   span the actual blocking execution. Adding a pre-dispatch callback to
   loop.py would be interface creep, so it was avoided.
 - Token text is printed with markup=False so model output containing [

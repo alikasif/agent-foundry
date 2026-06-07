@@ -20,6 +20,7 @@ from codeact_agent import AgentLoop, CodeActAgent
 from codeact_agent.languages.default import build_default_registry
 from codeact_agent.prompts import BANNER, SLASH_COMMANDS
 from codeact_agent.sandbox import PythonSandbox
+from codeact_agent.subagents import SubagentRunner
 
 # Load .env at import time so Click's envvar resolution picks up
 # OPENROUTER_API_KEY, OPENAI_API_BASE, and CODEACT_MODEL from the
@@ -289,9 +290,22 @@ def _repl(
     _print_banner(model, base_url)
 
     agent = CodeActAgent(model=model, api_key=api_key, base_url=base_url)
+
+    # Wire a SubagentRunner so llm_query / llm_query_many work in agent code.
+    def _progress_note(depth: int, preview: str) -> None:
+        console.print(f"  [dim]↳ subagent (depth {depth}): {preview}…[/dim]")
+
+    child_runner = SubagentRunner(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        depth=0,
+        progress_fn=_progress_note,
+    )
+
     # Create a shared sandbox and registry; pass both into the loop so the
     # sandbox namespace persists across turns and /reset clears it correctly.
-    sandbox = PythonSandbox()
+    sandbox = PythonSandbox(child_runner=child_runner)
     registry = build_default_registry(sandbox)
     agent_loop = AgentLoop(agent=agent, sandbox=sandbox, registry=registry)
 

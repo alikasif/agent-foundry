@@ -8,6 +8,16 @@ Phase A additions
 - ``context`` variable: injected into the namespace at the start of each turn
   with the user's latest query text (seed for Phase C).
 - ``set_context(text)``: update the ``context`` variable between turns.
+
+Phase B additions
+-----------------
+- ``child_runner`` parameter: optional ``SubagentRunner`` injected at
+  construction time.  When present, the ``llm_query`` and ``llm_query_many``
+  builtins are injected into the namespace so agent code can spawn child agents.
+  When absent (default), calling those builtins raises a clear ``RuntimeError``
+  explaining that no runner was configured.
+- ``_inject_builtins()`` extended to inject ``llm_query`` and
+  ``llm_query_many`` alongside ``FINAL`` and ``context``.
 """
 
 from __future__ import annotations
@@ -16,8 +26,13 @@ import io
 import logging
 import sys
 import traceback
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    # Only imported for type annotations; avoid runtime circular import.
+    from codeact_agent.subagents import SubagentRunner
 
 
 class SandboxResult(BaseModel):
@@ -68,11 +83,18 @@ class PythonSandbox:
         large inputs by reference.
     """
 
-    def __init__(self) -> None:
-        """Initialize the sandbox with an empty namespace."""
+    def __init__(self, child_runner: SubagentRunner | None = None) -> None:
+        """Initialize the sandbox with an empty namespace.
+
+        Args:
+            child_runner: Optional ``SubagentRunner`` used by ``llm_query``
+                and ``llm_query_many`` builtins.  When ``None``, those
+                builtins raise a clear ``RuntimeError`` when called.
+        """
         self._namespace: dict[str, object] = {}
         self._logger = logging.getLogger("codeact.sandbox")
-        # Seed the namespace with FINAL and context immediately.
+        self._child_runner: SubagentRunner | None = child_runner
+        # Seed the namespace with FINAL, context, and Phase-B builtins.
         self._inject_builtins()
 
     # ------------------------------------------------------------------
@@ -173,7 +195,7 @@ class PythonSandbox:
     # ------------------------------------------------------------------
 
     def _inject_builtins(self) -> None:
-        """Inject FINAL() and context into the namespace.
+        """Inject FINAL(), llm_query(), llm_query_many(), and context.
 
         Called on init, on each execute(), and on reset() so these names
         are always available regardless of whether the user redefined them.
@@ -193,3 +215,63 @@ class PythonSandbox:
         self._namespace["FINAL"] = _final
         # Only seed context if not already set (preserve across turns).
         self._namespace.setdefault("context", "")
+
+        # Phase B: inject llm_query and llm_query_many.
+        runner = self._child_runner
+
+        def _llm_query(prompt: str, context: str | None = None) -> str:
+            """Spawn a child CodeAct agent and return its final answer.
+
+            The result is returned as a plain Python string that you can
+            assign to a variable.  It does NOT appear in the parent LLM's
+            context unless you explicitly print() or reference it.
+
+            Args:
+                prompt: Task description for the child agent.
+                context: Optional supplementary context string.
+
+            Returns:
+                The child agent's final answer as a string.
+
+            Raises:
+                SubagentDepthError: If max recursion depth is exceeded.
+                RuntimeError: If no child runner is configured.
+            """
+            if runner is None:
+                raise RuntimeError(
+                    "llm_query() requires a SubagentRunner injected into the "
+                    "PythonSandbox at construction time.  Use the AgentLoop "
+                    "or wire a SubagentRunner via PythonSandbox(child_runner=...)."
+                )
+            return runner.run_child(prompt, context)
+
+        def _llm_query_many(
+            prompts: list[str],
+            contexts: list[str | None] | None = None,
+        ) -> list[str]:
+            """Run multiple child agents in parallel, return answers in order.
+
+            Results are returned as a list of strings aligned with *prompts*.
+            None of the child answers enter the parent LLM's history unless
+            you explicitly print() them.
+
+            Args:
+                prompts: List of task prompts (one child per prompt).
+                contexts: Optional per-prompt context strings.
+
+            Returns:
+                List of final answer strings in prompt order.
+
+            Raises:
+                SubagentDepthError: If max recursion depth is exceeded.
+                RuntimeError: If no child runner is configured.
+            """
+            if runner is None:
+                raise RuntimeError(
+                    "llm_query_many() requires a SubagentRunner injected into "
+                    "the PythonSandbox at construction time."
+                )
+            return runner.run_children_parallel(prompts, contexts)
+
+        self._namespace["llm_query"] = _llm_query
+        self._namespace["llm_query_many"] = _llm_query_many

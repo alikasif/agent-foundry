@@ -82,6 +82,43 @@ FINAL(f"The total is {total}")
 It holds the user's latest query text. In Phase C it will grow into a \
 context-by-reference store for large inputs.
 
+### llm_query(prompt, context=None)
+
+Spawns a fresh child CodeAct agent and returns its final answer as a \
+Python string.  The result is bound to a variable in THIS agent's namespace \
+— it does NOT enter the parent LLM's conversation history automatically.
+
+```python
+FRUIT = llm_query("Name 3 tropical fruits, one per line.")
+# FRUIT is now a Python string; the parent LLM never sees it unless you print it.
+print(FRUIT)   # only now does the answer appear in the observation
+```
+
+Use this when a sub-task is self-contained and you do not want to pollute \
+the parent context with the child's full reasoning trace.
+
+Raises ``SubagentDepthError`` at the maximum recursion depth (default 3).
+
+### llm_query_many(prompts, contexts=None)
+
+Runs multiple child agents **in parallel** and returns a list of answers \
+in the same order as *prompts*.
+
+```python
+results = llm_query_many([
+    "List 3 tropical fruits.",
+    "List 3 European countries.",
+    "List 3 large animals.",
+])
+# results[0] = fruits, results[1] = countries, results[2] = animals
+combined = {"fruits": results[0], "countries": results[1], "animals": results[2]}
+FINAL(combined)
+```
+
+Key invariant: none of the child answers enter the parent LLM's history \
+unless the agent explicitly prints them.  Compose results via Python \
+variables, never by re-generating data token-by-token.
+
 ## Execution Feedback
 
 After each code block executes you will receive an observation:

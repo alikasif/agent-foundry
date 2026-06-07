@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openai.types.responses import (
     ResponseReasoningTextDeltaEvent,
@@ -35,6 +35,9 @@ from codeact_agent.agent import CodeActAgent
 from codeact_agent.languages import LanguageRegistry
 from codeact_agent.languages.default import build_default_registry
 from codeact_agent.sandbox import PythonSandbox, SandboxResult
+
+if TYPE_CHECKING:
+    from codeact_agent.subagents import SubagentRunner
 
 # ---------------------------------------------------------------------------
 # Code block extraction
@@ -128,6 +131,12 @@ class AgentLoop:
         the default registry (Python + bash + awk) is built using *sandbox*.
     max_turns:
         Maximum self-debug iterations per user message (default 20).
+    child_runner:
+        Optional ``SubagentRunner`` injected into the sandbox so that
+        ``llm_query``/``llm_query_many`` builtins work.  When ``None``,
+        those builtins raise ``RuntimeError`` if called.  This parameter
+        is ignored when an explicit *sandbox* is supplied (the caller is
+        responsible for configuring the sandbox with the desired runner).
     """
 
     def __init__(
@@ -136,18 +145,23 @@ class AgentLoop:
         sandbox: PythonSandbox | None = None,
         registry: LanguageRegistry | None = None,
         max_turns: int = 20,
+        child_runner: SubagentRunner | None = None,
     ) -> None:
         """Initialise the loop.
 
         Args:
             agent: The CodeActAgent instance.
             sandbox: Optional persistent Python sandbox.  Created if not given.
-            registry: Optional language registry.  Built from *sandbox* if not given.
+            registry: Optional language registry.  Built from *sandbox* if not
+                given.
             max_turns: Maximum self-debug turns per user message.
+            child_runner: Optional runner for spawning child agents.  Only
+                used when *sandbox* is ``None`` (a new sandbox is created
+                with this runner wired in).
         """
         self._agent = agent
         self._sandbox: PythonSandbox = (
-            sandbox if sandbox is not None else PythonSandbox()
+            sandbox if sandbox is not None else PythonSandbox(child_runner=child_runner)
         )
         self._registry: LanguageRegistry = (
             registry if registry is not None else build_default_registry(self._sandbox)
