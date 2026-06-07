@@ -18,6 +18,17 @@ Phase B additions
   explaining that no runner was configured.
 - ``_inject_builtins()`` extended to inject ``llm_query`` and
   ``llm_query_many`` alongside ``FINAL`` and ``context``.
+
+Phase C additions
+-----------------
+- ``context`` variable is now a ``ContextStore`` object (context.py) instead
+  of a plain string.  For short strings (< 10 000 chars) ``str(context)``
+  returns the full text (backward compat); for large inputs it returns a
+  summary repr so an accidental ``print(context)`` is safe.
+- ``set_context()`` accepts ``str | Path``: strings create an in-memory-backed
+  store; paths copy the source file into the workspace.
+- A ``workspace`` parameter selects the workspace directory passed through to
+  ``ContextStore``.
 """
 
 from __future__ import annotations
@@ -26,9 +37,12 @@ import io
 import logging
 import sys
 import traceback
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+
+from codeact_agent.context import ContextStore
 
 if TYPE_CHECKING:
     # Only imported for type annotations; avoid runtime circular import.
@@ -83,17 +97,27 @@ class PythonSandbox:
         large inputs by reference.
     """
 
-    def __init__(self, child_runner: SubagentRunner | None = None) -> None:
+    def __init__(
+        self,
+        child_runner: SubagentRunner | None = None,
+        workspace: Path | None = None,
+    ) -> None:
         """Initialize the sandbox with an empty namespace.
 
         Args:
             child_runner: Optional ``SubagentRunner`` used by ``llm_query``
                 and ``llm_query_many`` builtins.  When ``None``, those
                 builtins raise a clear ``RuntimeError`` when called.
+            workspace: Optional workspace directory passed to ``ContextStore``.
+                When ``None``, a temporary directory is created per store.
         """
         self._namespace: dict[str, object] = {}
         self._logger = logging.getLogger("codeact.sandbox")
         self._child_runner: SubagentRunner | None = child_runner
+        self._workspace: Path | None = workspace
+        # Phase C: when True, automatic set_context() calls from the loop
+        # are no-ops. Set to True by /load; cleared by reset().
+        self._context_locked: bool = False
         # Seed the namespace with FINAL, context, and Phase-B builtins.
         self._inject_builtins()
 
@@ -110,16 +134,54 @@ class PythonSandbox:
         """
         return self._namespace
 
-    def set_context(self, text: str) -> None:
+    def set_context(
+        self,
+        text: str | Path,
+        *,
+        lock: bool = False,
+        force: bool = False,
+    ) -> None:
         """Update the ``context`` variable in the namespace.
 
         Should be called by the loop at the start of each user turn so
         the agent can always read ``context`` to see the latest query.
 
+        Accepts either:
+        - A plain string (Phase A / B API): creates an in-memory-backed
+          ``ContextStore``.  For short strings ``str(context)`` returns the
+          full text (backward compatible); for large strings it returns a
+          summary repr.
+        - A ``pathlib.Path``: copies the file into the workspace and creates
+          a file-backed ``ContextStore``.
+
         Args:
-            text: The user's latest query string.
+            text: The user's latest query string, OR a path to a file to
+                load as the context corpus.
+            lock: When ``True``, set ``_context_locked = True`` so future
+                automatic calls from the loop do not overwrite this context.
+                Use this after ``/load`` so the file context persists across
+                turns.
+            force: When ``True``, update the context even if
+                ``_context_locked`` is ``True``.  The ``lock`` flag from
+                this call also applies.
         """
-        self._namespace["context"] = text
+        if self._context_locked and not force:
+            # Context has been explicitly locked (e.g. via /load).
+            # The loop's per-turn set_context calls are no-ops.
+            return
+        if isinstance(text, Path):
+            store = ContextStore.from_path(text, workspace=self._workspace)
+        else:
+            store = ContextStore.from_string(text, workspace=self._workspace)
+        self._namespace["context"] = store
+        self._context_locked = lock
+
+    def lock_context(self) -> None:
+        """Lock the current context so per-turn loop calls do not overwrite it.
+
+        Called by the ``/load`` command after setting a file-backed context.
+        """
+        self._context_locked = True
 
     async def execute(
         self,
@@ -185,8 +247,13 @@ class PythonSandbox:
         return result
 
     def reset(self) -> None:
-        """Clear the namespace and re-inject built-ins."""
+        """Clear the namespace and re-inject built-ins.
+
+        Also clears ``_context_locked`` so a freshly-reset sandbox behaves
+        like a new one (the loop can seed context again).
+        """
         self._namespace = {}
+        self._context_locked = False
         self._inject_builtins()
         self._logger.debug("[exec] namespace cleared.")
 
@@ -214,7 +281,8 @@ class PythonSandbox:
 
         self._namespace["FINAL"] = _final
         # Only seed context if not already set (preserve across turns).
-        self._namespace.setdefault("context", "")
+        # Phase C: default is an empty ContextStore, not a plain string.
+        self._namespace.setdefault("context", ContextStore(workspace=self._workspace))
 
         # Phase B: inject llm_query and llm_query_many.
         runner = self._child_runner

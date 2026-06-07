@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import sys
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -116,6 +117,42 @@ def _print_session_summary(turn_count: int, model: str) -> None:
             border_style="cyan",
         )
     )
+
+
+def _handle_load_command(
+    path_str: str,
+    sandbox: PythonSandbox,
+    console: Console,
+) -> None:
+    """Handle the /load <path> command: load a file as the context store.
+
+    Args:
+        path_str: Path string supplied by the user.
+        sandbox: The active PythonSandbox.
+        console: Rich console for output.
+    """
+    path = Path(path_str.strip()).expanduser()
+    if not path.exists():
+        console.print(f"[red]File not found: {path}[/red]")
+        return
+    if not path.is_file():
+        console.print(f"[red]Not a file: {path}[/red]")
+        return
+    # lock=True so the per-turn loop call does not overwrite the file context.
+    sandbox.set_context(path, lock=True)
+    from codeact_agent.context import ContextStore
+
+    store = sandbox.namespace.get("context")
+    if isinstance(store, ContextStore):
+        size_mb = store.size / 1_048_576
+        size_str = f"{size_mb:.2f} MB" if size_mb >= 0.1 else f"{store.size} chars"
+        console.print(
+            f"[green]Loaded:[/green] {path.name} "
+            f"({size_str}, {store._line_count} lines)"
+        )
+        console.print(f"  [dim]Spill path: {store.path}[/dim]")
+    else:
+        console.print(f"[green]Loaded:[/green] {path.name}")
 
 
 def _display_code(code: str, turn: int | None = None) -> None:
@@ -341,6 +378,16 @@ def _repl(
                 continue
             if cmd == "history":
                 _print_history(turn_count, model)
+                continue
+            if cmd.startswith("load ") or cmd == "load":
+                parts = cmd.split(None, 1)
+                if len(parts) < 2:
+                    console.print(
+                        "[red]Usage: /load <path>[/red]\n"
+                        "  Example: /load /data/big_corpus.txt"
+                    )
+                else:
+                    _handle_load_command(parts[1], sandbox, console)
                 continue
             console.print(f"[red]Unknown command: /{cmd}[/red]")
             continue

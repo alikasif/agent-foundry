@@ -1,4 +1,92 @@
-# Implementation Notes — Phase A (CodeAct Core) + Phase B (Recursive Subagents)
+# Implementation Notes — Phases A, B, C
+
+---
+
+## Phase C — Context By Reference (Filesystem)
+
+### Context object design: `ContextStore` class
+
+**Decision**: Replaced the plain `str` `context` variable with a
+`ContextStore` class in `src/codeact_agent/context.py`.
+
+**Why not a `str` subclass?** The tempting shortcut would be to subclass
+`str` — it would make most Phase A/B tests pass without changes. But:
+- `str(context)` on a `str` subclass returns the FULL text, violating the
+  core by-reference invariant for large inputs.
+- `str.__len__` returns the string length — that part is fine, but the
+  full-text-in-repr problem is blocking.
+
+**`str(context)` behaviour**: For short inputs (< 10 000 chars) `__str__`
+returns the full text (backward compat — Phase A tests do `print(context)`).
+For large inputs it returns a short `<Context: ... >` summary so an
+accidental `print(context)` is safe.
+
+### Spill strategy: always file-backed
+
+**Decision**: Both `from_string` and `from_path` always write to
+`workspace/context.txt`. There is no dual in-memory / on-disk code path.
+
+**Why**: A single file-backed path means `context.path` always works
+(bash/awk can always operate on the file), search/grep always stream from
+the file (memory-safe by construction), and there is no branching.
+
+**Tradeoff**: Short strings incur a file write that is technically
+unnecessary. This is acceptable (the strings are tiny) and simplifies the
+implementation considerably.
+
+### Workspace directory
+
+**Decision**: Defaulted to `tempfile.mkdtemp(prefix="codeact_")` per
+`ContextStore` instance (i.e. per `set_context` call unless an explicit
+`workspace` is provided). The main `PythonSandbox` passes `workspace=None`
+by default, so each `set_context` call creates a fresh temp dir.
+
+**Tradeoff**: Temp dirs accumulate across a session. For now this is
+acceptable — they are small and OS-cleaned on reboot. A future cleanup
+hook (e.g. `sandbox.cleanup()`) would address this.
+
+**The `workspace` param** can be passed to `PythonSandbox(workspace=...)` to
+use a stable, deterministic path (e.g. `./.codeact_workspace/`).
+
+### Context locking: `_context_locked` flag
+
+**Decision**: Added `_context_locked: bool` to `PythonSandbox`.
+`set_context(lock=True)` sets this flag; subsequent `set_context` calls
+from the loop are no-ops unless `force=True`. `reset()` clears the flag.
+
+**Why**: `AgentLoop.run_turn` calls `sandbox.set_context(user_query)` at
+the start of every turn (Phase A behaviour). After `/load`, we need to
+preserve the loaded file context across turns. The flag is the minimal
+intervention that preserves Phase A backward compat (the loop always calls
+`set_context(query)` but it becomes a no-op when locked).
+
+**Alternative considered**: Stop the loop from calling `set_context`
+automatically, and let agents use `history[-1]` to read the current query.
+Rejected: this would break `test_context_set_by_loop_before_turn` and
+change the documented Phase A/B agent API.
+
+### Truncation: single choke point in `_format_observation`
+
+**Decision**: `truncate_output(text, max_chars)` is a standalone function
+in `loop.py`. `_format_observation` calls it for stdout and stderr
+(but NOT exceptions — tracebacks are small and always useful).
+`AgentLoop` accepts `output_max_chars` (default 4 000) which is threaded
+through to `_format_observation` in the inner loop.
+
+**Why `_format_observation` and not each executor?** All languages return
+`SandboxResult` and all go through `_format_observation`. One truncation
+point covers Python, bash, and awk for free.
+
+**4 000 char limit**: Chosen as a practical balance — enough for most
+useful debug output, small enough to keep observations LLM-friendly. The
+constant `DEFAULT_OUTPUT_MAX_CHARS` is exported so callers can override.
+
+### `.gitignore` handling for `shared/`
+
+**Decision**: The `shared/` directory is already in `.gitignore`. Rather
+than adding a `!shared/implementation-notes.md` exception, this file is
+force-added with `git add -f shared/implementation-notes.md` when
+committing. This keeps the exception list clean.
 
 ---
 

@@ -68,9 +68,6 @@ instance/
 # Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/_build/
-
 # PyBuilder
 .pybuilder/
 target/
@@ -210,10 +207,18 @@ __marimo__/
 settings.json
 settings.local.json
 reminders.json
-shared/
 claude_waorkspace/
 budget_state.json
 .claude/skills/token-budget/scripts/budget_state.json
 .claude/skills/token-budget/scripts/budget_state.json
 tmp/*
 ignored/*
+skill_autoresearch/shared
+skill_autoresearch/skill_autoresearch/shared
+skill_planner/shared
+skillful_agent/shared
+skillrag/shared
+
+# codeact_agent workspace artifacts (Phase C context spill files)
+.codeact_workspace/
+codeact_workspace/

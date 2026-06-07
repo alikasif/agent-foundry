@@ -17,6 +17,15 @@ Phase A changes
 - The sync/await mismatch from the original implementation is resolved:
   all executors satisfy the ``LanguageExecutor`` protocol (async __call__),
   so every ``await registry.dispatch(...)`` is valid.
+
+Phase C changes
+---------------
+- ``_format_observation`` now calls ``truncate_output`` to cap stdout and
+  stderr at ``DEFAULT_OUTPUT_MAX_CHARS`` characters, keeping a head+tail
+  with a clear omission marker.  This prevents accidental
+  ``print(context)`` from flooding the LLM window.
+- ``AgentLoop`` accepts an optional ``output_max_chars`` parameter that
+  overrides the default truncation limit.
 """
 
 from __future__ import annotations
@@ -81,15 +90,64 @@ def extract_code_blocks(text: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# Output truncation
+# ---------------------------------------------------------------------------
+
+# Default cap: 4 000 chars per stream (stdout / stderr).
+DEFAULT_OUTPUT_MAX_CHARS: int = 4_000
+
+
+def truncate_output(text: str, max_chars: int = DEFAULT_OUTPUT_MAX_CHARS) -> str:
+    """Truncate *text* to at most *max_chars*, keeping head + tail.
+
+    When the text exceeds *max_chars*, the middle is replaced with a
+    clear omission marker so the LLM always sees both the start and end
+    of the output.
+
+    Args:
+        text: Raw stdout / stderr text.
+        max_chars: Maximum number of characters to pass through.
+
+    Returns:
+        Possibly-truncated text with an omission marker if content was
+        dropped.
+
+    Examples::
+
+        >>> truncate_output("hello", 10)
+        'hello'
+        >>> len(truncate_output("x" * 10_000, 100)) < 200
+        True
+    """
+    if len(text) <= max_chars:
+        return text
+    # Keep equal halves at head and tail.
+    half = max_chars // 2
+    head = text[:half]
+    tail = text[-half:]
+    omitted = len(text) - max_chars
+    marker = f"\n… [{omitted} chars omitted] …\n"
+    return head + marker + tail
+
+
+# ---------------------------------------------------------------------------
 # Observation formatter
 # ---------------------------------------------------------------------------
 
 
-def _format_observation(result: SandboxResult) -> str:
+def _format_observation(
+    result: SandboxResult,
+    max_chars: int = DEFAULT_OUTPUT_MAX_CHARS,
+) -> str:
     """Format a SandboxResult as an XML-tagged user observation message.
+
+    stdout and stderr are truncated to *max_chars* each (head+tail with
+    an omission marker) so that a careless ``print(context)`` cannot blow
+    up the LLM context window.
 
     Args:
         result: The sandbox execution result.
+        max_chars: Maximum characters per stream (stdout / stderr).
 
     Returns:
         Formatted observation string with XML tags.
@@ -97,10 +155,10 @@ def _format_observation(result: SandboxResult) -> str:
     parts = [
         "<execution>",
         "<stdout>",
-        result.stdout if result.stdout else "",
+        truncate_output(result.stdout, max_chars) if result.stdout else "",
         "</stdout>",
         "<stderr>",
-        result.stderr if result.stderr else "",
+        truncate_output(result.stderr, max_chars) if result.stderr else "",
         "</stderr>",
         "<exception>",
         result.exception if result.exception else "None",
@@ -137,6 +195,11 @@ class AgentLoop:
         those builtins raise ``RuntimeError`` if called.  This parameter
         is ignored when an explicit *sandbox* is supplied (the caller is
         responsible for configuring the sandbox with the desired runner).
+    output_max_chars:
+        Maximum characters per stream (stdout / stderr) fed back to the
+        LLM in each observation.  Larger output is capped with a
+        head+tail elision marker.  Defaults to
+        ``DEFAULT_OUTPUT_MAX_CHARS`` (4 000).
     """
 
     def __init__(
@@ -146,6 +209,7 @@ class AgentLoop:
         registry: LanguageRegistry | None = None,
         max_turns: int = 20,
         child_runner: SubagentRunner | None = None,
+        output_max_chars: int = DEFAULT_OUTPUT_MAX_CHARS,
     ) -> None:
         """Initialise the loop.
 
@@ -158,6 +222,7 @@ class AgentLoop:
             child_runner: Optional runner for spawning child agents.  Only
                 used when *sandbox* is ``None`` (a new sandbox is created
                 with this runner wired in).
+            output_max_chars: Per-stream truncation limit for observations.
         """
         self._agent = agent
         self._sandbox: PythonSandbox = (
@@ -167,6 +232,7 @@ class AgentLoop:
             registry if registry is not None else build_default_registry(self._sandbox)
         )
         self._max_turns = max_turns
+        self._output_max_chars = output_max_chars
 
     # ------------------------------------------------------------------
     # Public API
@@ -303,7 +369,7 @@ class AgentLoop:
                     preview = result.stdout[:80].replace("\n", "↵")
                     logger.debug(f"[sandbox] stdout preview: {preview}...")
 
-                observation = _format_observation(result)
+                observation = _format_observation(result, self._output_max_chars)
                 current_history = list(current_history)
                 current_history.append({"role": "user", "content": observation})
 

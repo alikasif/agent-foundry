@@ -76,11 +76,54 @@ total = sum(data)
 FINAL(f"The total is {total}")
 ```
 
-### context
+### context  (Phase C: context-by-reference store)
 
-`context` is a string variable always available in your Python namespace. \
-It holds the user's latest query text. In Phase C it will grow into a \
-context-by-reference store for large inputs.
+`context` is a **ContextStore** object always available in your Python \
+namespace.  It may hold arbitrarily large text backed by a file.
+
+**CRITICAL — NEVER do ``print(context)`` or ``str(context)`` on a large \
+context.**  For large inputs these return only a short summary like \
+``<Context: 4.2 MB, 51234 lines, file=...>`` — they do NOT dump the text.
+
+Always inspect context selectively:
+
+```python
+# Check what you have
+print(repr(context))          # summary: size, lines, path
+
+# Read a slice
+print(context.peek(500))      # first 500 chars
+print(context.head(20))       # first 20 lines
+print(context.tail(20))       # last 20 lines
+print(context.lines(100, 120)) # lines 100–120 (1-indexed)
+print(context[1000:2000])     # chars 1000–2000
+
+# Search / grep
+matches = context.search("needle")   # substring search
+matches = context.grep(r"\\bword\\b") # regex search
+# matches is [(line_num, line_text), ...]
+for lineno, text in matches:
+    print(f"Line {lineno}: {text}")
+
+# Access the backing file (for bash/awk blocks)
+print(context.path)           # absolute path to the file
+print(len(context))           # approximate character count
+```
+
+Use bash/awk blocks to operate over the context file when Unix tools are \
+more natural:
+```bash
+grep -n "needle" {context_path}
+```
+(Replace ``{context_path}`` with the value of ``context.path`` from a \
+preceding Python block.)
+
+For very large analysis tasks: break the input into slices and route each \
+slice through ``llm_query`` — the results come back as Python variables, \
+not as LLM context bloat.
+
+**Observations are truncated.**  stdout and stderr fed back to you are \
+capped (head+tail with an omission marker).  Print only what you need.
 
 ### llm_query(prompt, context=None)
 
@@ -168,6 +211,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "help": "Show available slash commands",
     "reset": "Clear conversation history and namespace",
     "history": "Show turn count and model info",
+    "load": "Load a file as the context store  (e.g. /load data.txt)",
     "exit": "Exit the session",
     "quit": "Exit the session",
 }
