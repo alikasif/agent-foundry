@@ -48,3 +48,25 @@
   reported error is `missing-import` for `rlm.prompts`, which is the pending
   T005 module dispatched concurrently — not a defect in agent.py. It resolves
   once T005 lands.
+
+## T002 — context.py
+
+- Faithful baseline copy of `codeact_agent/src/codeact_agent/context.py` into
+  `src/rlm/context.py`. The full `ContextStore` API is preserved verbatim:
+  `from_string`, `from_path`, `path`, `workspace`, `size`, `__len__`,
+  `__repr__`, `__str__`, `__getitem__`, `_read_chars`, `peek`, `head`, `tail`,
+  `lines`, `search`, `grep`, `write_file`, `read_file`, and the
+  `_SHORT_TEXT_THRESHOLD = 10_000` behaviour.
+- Adaptation deltas (cosmetic only — no behavioural change):
+  - The source has **no** `codeact_agent` import statements, so no import
+    rewrites were needed.
+  - `tempfile.mkdtemp` prefix changed from `"codeact_"` to `"rlm_"` (the only
+    string referencing the old package).
+  - Module/class docstrings reworded: "CodeAct agent" -> "RLM agent" and the
+    "Phase A / B / C" framing replaced with neutral "context-by-reference"
+    wording.
+  - `sub_context`/`from_slice`/`clone` deliberately NOT added — those are T010.
+- ruff format/check clean; `uv run pyrefly check src/rlm/context.py` -> 0
+  errors. (Repo-wide pyrefly currently reports an unrelated missing-import in
+  the concurrently-authored `agent.py`/`prompts.py` from T005/T006; out of
+  scope for T002.)

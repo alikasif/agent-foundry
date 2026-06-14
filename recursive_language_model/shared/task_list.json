@@ -25,7 +25,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/context.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/context.py. Preserve the existing ContextStore API (from_string, from_path, path, size, line_count, lines, head, tail, search, grep, __getitem__, _read_chars, etc.) verbatim/adapted to the new package namespace (imports referencing 'codeact_agent' must become 'rlm'). Do NOT yet add sub_context/from_slice/clone (that is T010) — this task is the faithful baseline copy only. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append a short note to shared/implementation-notes.md describing any adaptation deltas from the original file. Commit locally with a conventional commit message on the feature branch.",
       "depends_on": ["T001"],
-      "status": "pending",
+      "status": "done",
       "outputs": ["recursive_language_model/src/rlm/context.py"]
     },
     {
