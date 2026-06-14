@@ -225,3 +225,14 @@
   `uv run ruff check src/rlm/subagents.py` (all checks passed),
   `uv run pyrefly check src/rlm/` -> 0 errors. subagents.py was the last
   missing module, so the whole `src/rlm/` package is now pyrefly-clean.
+
+## T009 — main.py
+
+- Faithful baseline copy of `codeact_agent/src/codeact_agent/main.py`, adapted to the `rlm` package.
+- Imports adapted to `rlm.*`: `RLMAgent` (from `rlm.agent`, renamed from `CodeActAgent`), `AgentLoop` (`rlm.loop`), `SubagentRunner` (`rlm.subagents`), `build_default_registry` (`rlm.languages.default`), `PythonSandbox`/`SandboxResult` (`rlm.sandbox`), `ContextStore` (`rlm.context`), and `BANNER`/`SLASH_COMMANDS` (`rlm.prompts`).
+- Imported `RLMAgent` and `AgentLoop` directly from their submodules rather than the top-level package. The codeact source did `from codeact_agent import AgentLoop, CodeActAgent`, but `rlm/__init__.py` is currently empty (it was not in scope for this task to populate it, and the task scoped edits to main.py only). Submodule imports match the import targets named in the T009 task description.
+- Model env var: `CODEACT_MODEL` -> `RLM_MODEL`, kept as the single `--model` flag with default `openrouter/anthropic/claude-sonnet-4`. This is the GAP 2 / T011 placeholder — T011 will supersede it with `--root-model`/`--sub-model` and `RLM_ROOT_MODEL`/`RLM_SUB_MODEL`.
+- Cosmetic adaptations: logger name `codeact` -> `rlm`; REPL prompt `codeact>` -> `rlm>`; banner/docstring reworded for RLM framing. CLI structure, `/load` and `/reset` commands, and rich rendering preserved unchanged.
+- `main()` callable name/signature preserved to match the `rlm = "rlm.main:main"` entry point in pyproject.toml.
+- `_display_code` helper is carried over unused from the source (same as in the original codeact file); left in place as a faithful copy rather than removing it. ruff does not flag it (module-level def).
+- Verification: `uv run ruff format src/rlm/main.py` (unchanged), `uv run ruff check src/rlm/main.py` (passed), `uv run pyrefly check src/rlm/` (0 errors), `uv run python -c "import rlm.main"` (OK).

@@ -93,7 +93,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/main.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/main.py. Adapt imports to rlm.* (rlm.agent.RLMAgent, rlm.loop.AgentLoop, rlm.subagents.SubagentRunner, rlm.context.ContextStore). Preserve CLI commands /load and /reset and general CLI structure (click-based, rich rendering of display text). For THIS task, keep the existing single --model CLI flag and single CODEACT_MODEL-equivalent env var as a faithful baseline copy — GAP 2's --root-model/--sub-model flags and RLM_ROOT_MODEL/RLM_SUB_MODEL env vars (designs.md section 2.2 'Configuration entry point') are a follow-up edit to this same file performed within T011. Wire entry point so pyproject.toml's 'rlm' command invokes this main(). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
       "depends_on": ["T002", "T003", "T006", "T007", "T008"],
-      "status": "pending",
+      "status": "done",
       "outputs": ["recursive_language_model/src/rlm/main.py"]
     },
     {
