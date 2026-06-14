@@ -13,7 +13,7 @@ from agents.result import RunResultStreaming
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
-from rlm.prompts import CODEACT_SYSTEM_PROMPT
+from rlm.prompts import RLM_SYSTEM_PROMPT
 
 # Monkey-patch the Converter.items_to_messages to convert 'developer' role to 'system'
 # role for non-OpenAI endpoints that don't support the developer role.
@@ -87,7 +87,7 @@ class RLMAgent:
 
         self._agent = Agent(
             name="RLMAgent",
-            instructions=CODEACT_SYSTEM_PROMPT,
+            instructions=RLM_SYSTEM_PROMPT,
             model=model,
         )
 
