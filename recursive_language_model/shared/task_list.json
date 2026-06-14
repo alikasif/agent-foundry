@@ -75,7 +75,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/loop.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/loop.py as AgentLoop. Adapt imports to rlm.* (rlm.agent.RLMAgent, rlm.context, rlm.sandbox, rlm.prompts, rlm.languages). For THIS task, preserve run_turn's CURRENT return shape (tuple[str, list[dict[str,str]]]) as a faithful baseline copy — the signature change to (display_text, final_value, history) is GAP 3 and is implemented in T012 as a follow-up edit to this same file. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
       "depends_on": ["T002", "T003", "T005", "T006"],
-      "status": "pending",
+      "status": "done",
       "outputs": ["recursive_language_model/src/rlm/loop.py"]
     },
     {

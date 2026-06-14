@@ -168,3 +168,31 @@
   `uv run pyrefly check src/rlm/languages/ src/rlm/bash_resolver.py`
   (0 errors). `rlm.sandbox` (T003) had landed by the time pyrefly ran, so the
   imports resolved cleanly with no transient unresolved-import errors.
+
+## T007 — loop.py
+
+- Faithful baseline copy of `codeact_agent/src/codeact_agent/loop.py` into
+  `src/rlm/loop.py` as `AgentLoop`. No behavioural changes.
+- Adapted imports to the `rlm.*` namespace: `from rlm.agent import RLMAgent`,
+  `from rlm.languages import LanguageRegistry`,
+  `from rlm.languages.default import build_default_registry`,
+  `from rlm.sandbox import PythonSandbox, SandboxResult`, and the
+  TYPE_CHECKING-only `from rlm.subagents import SubagentRunner`.
+- Type references and docstrings updated `CodeActAgent` -> `RLMAgent`. The
+  constructor's `agent` param is now typed `RLMAgent`.
+- Default logger name changed from `"codeact"` to `"rlm"` (cosmetic; matches
+  package identity). No public-API impact.
+- loop.py does NOT import any prompt constant directly (it reaches the system
+  prompt indirectly via `agent.py`), so the `CODEACT_SYSTEM_PROMPT` ->
+  `RLM_SYSTEM_PROMPT` rename required no edit here.
+- `run_turn` return shape preserved verbatim as `tuple[str, list[dict[str, str]]]`.
+  The `(display_text, final_value, history)` signature change is GAP 3 / T012
+  and is intentionally NOT done here.
+- Preserved verbatim: `extract_code_blocks`, `truncate_output`
+  (`DEFAULT_OUTPUT_MAX_CHARS = 4000`), `_format_observation`, all callbacks
+  (`on_turn`, `on_stream_token`, `on_reasoning_token`, `on_llm_start`),
+  `max_turns`, `reset()`, and `_extract_last_user_query`.
+- Verification: `uv run ruff format src/rlm/loop.py` (unchanged),
+  `uv run ruff check src/rlm/loop.py` (all checks passed),
+  `uv run pyrefly check src/rlm/loop.py` -> 1 error, the expected
+  `Cannot find module rlm.subagents` (T008 not yet built). No other errors.
