@@ -84,7 +84,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/subagents.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/subagents.py as SubagentRunner. Adapt imports to rlm.* (rlm.context, rlm.agent, rlm.loop, rlm.sandbox). Copy verbatim: SubagentDepthError, max_depth default (3), _CHILD_TIMEOUT_SECONDS (300), _CHILD_MAX_TURNS (8), in-process worker-thread execution model (no pickling/serialization boundary). For THIS task, preserve the CURRENT constructor signature (single 'model: str' param) and CURRENT context parameter type (str | None) and CURRENT return types (str / list[str]) as a faithful baseline copy — GAP 2 (model_for_depth, T011) and GAP 3 (ContextStore context param + object returns, T012) are follow-up edits to this same file. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
       "depends_on": ["T003", "T006", "T007"],
-      "status": "pending",
+      "status": "done",
       "outputs": ["recursive_language_model/src/rlm/subagents.py"]
     },
     {

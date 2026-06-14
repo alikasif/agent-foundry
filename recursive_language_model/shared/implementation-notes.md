@@ -196,3 +196,32 @@
   `uv run ruff check src/rlm/loop.py` (all checks passed),
   `uv run pyrefly check src/rlm/loop.py` -> 1 error, the expected
   `Cannot find module rlm.subagents` (T008 not yet built). No other errors.
+
+## T008 — subagents.py
+
+- Copied `codeact_agent/src/codeact_agent/subagents.py` into
+  `src/rlm/subagents.py` as a faithful baseline. Only edits were the
+  `rlm.*` import retarget and the `CodeActAgent` -> `RLMAgent` rename.
+- Deferred (call-time) imports inside `_run_child_async` now read:
+  `from rlm.agent import RLMAgent`, `from rlm.languages.default import
+  build_default_registry`, `from rlm.loop import AgentLoop`,
+  `from rlm.sandbox import PythonSandbox`. Logger renamed to
+  `rlm.subagents`. Docstring reference to `CodeActAgent.__init__` updated
+  to `RLMAgent.__init__`.
+- Copied VERBATIM (no behavioral change): `SubagentDepthError`,
+  `_DEFAULT_MAX_DEPTH` (3), `_CHILD_TIMEOUT_SECONDS` (300),
+  `_CHILD_MAX_TURNS` (8), the in-process ThreadPoolExecutor +
+  `asyncio.run`-per-child worker-thread model (no pickling/subprocess),
+  `_build_prompt`, `run_child`, `run_children_parallel`.
+- Per task scope, preserved the CURRENT constructor signature (single
+  `model: str`), context param type (`str | None`), and return types
+  (`str` / `list[str]`). GAP 2 (model_for_depth, T011) and GAP 3
+  (ContextStore + object returns, T012) are intentionally NOT done here.
+- Verified `RLMAgent.__init__(model, api_key, base_url)`,
+  `AgentLoop(agent, sandbox, registry, max_turns)`, and
+  `AgentLoop.run_turn(history=..., user_query=...) -> tuple[str, list[...]]`
+  signatures match the call sites in this copy.
+- Verification: `uv run ruff format src/rlm/subagents.py` (unchanged),
+  `uv run ruff check src/rlm/subagents.py` (all checks passed),
+  `uv run pyrefly check src/rlm/` -> 0 errors. subagents.py was the last
+  missing module, so the whole `src/rlm/` package is now pyrefly-clean.
