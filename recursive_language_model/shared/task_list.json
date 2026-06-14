@@ -66,7 +66,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/agent.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/agent.py. Rename CodeActAgent -> RLMAgent. Preserve the 'developer'->'system' role monkeypatch verbatim. Constructor takes a 'model: str' parameter per-instance (unchanged shape from original, but ensure it is the single source of model identity for this agent instance — Wave 3 T011 will route which model string is passed in by callers). Adapt imports to rlm.* (rlm.context, rlm.sandbox, rlm.prompts, rlm.languages). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
       "depends_on": ["T001"],
-      "status": "pending",
+      "status": "done",
       "outputs": ["recursive_language_model/src/rlm/agent.py"]
     },
     {
