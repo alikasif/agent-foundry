@@ -70,3 +70,38 @@
   errors. (Repo-wide pyrefly currently reports an unrelated missing-import in
   the concurrently-authored `agent.py`/`prompts.py` from T005/T006; out of
   scope for T002.)
+
+## T005 — prompts.py
+
+- Copied `codeact_agent/src/codeact_agent/prompts.py` and adapted to RLM
+  framing per `designs.md` 1.3-1.4.
+- Renamed `CODEACT_SYSTEM_PROMPT` -> `RLM_SYSTEM_PROMPT`; updated BANNER from
+  "CodeAct Agent" to "RLM Agent / Recursive Language Model /
+  Context-by-Reference Recursion".
+- `context` section: reframed as a file-backed `ContextStore` that is NEVER
+  auto-loaded into the LLM window; kept the
+  peek/head/tail/lines/`__getitem__`/search/grep/path/len selective-inspection
+  API verbatim (with index conventions spelled out: lines 1-indexed
+  inclusive, chars 0-indexed end-exclusive).
+- Added a dedicated `context.sub_context(start_line=, end_line=, start_char=,
+  end_char=)` subsection: returns a NEW ContextStore over the slice; exactly
+  one pair (line XOR char), mixing raises ValueError; parent left unchanged.
+- Reworked `llm_query(prompt, context=ContextStore|None)` /
+  `llm_query_many(prompts, contexts=...)`: `context` is now a ContextStore
+  (not a string); the child's own `context` variable is a ContextStore over
+  the passed slice, by reference (slice text never enters any LLM message).
+  Documented the canonical slice-then-recurse pattern and positional
+  `contexts` alignment for the parallel variant. Kept the SubagentDepthError
+  (depth 3) note.
+- `FINAL()` section updated to state the value is returned as a raw object
+  (structured results), consistent with T012's intended API.
+- Decision: prompt documents the INTENDED T010/T012 API (sub_context +
+  ContextStore-typed llm_query context) since the prompt is documentation for
+  the model, per the task brief; those methods are implemented later.
+- Kept languages table, code format, persistence, execution-feedback,
+  completion sections, and SLASH_COMMANDS adapted unchanged (multi-language
+  action space is retained for RLM).
+- Verification (scoped to avoid concurrent-edit interference):
+  `uv run ruff format src/rlm/prompts.py` (unchanged),
+  `uv run ruff check src/rlm/prompts.py` (All checks passed),
+  `uv run pyrefly check src/rlm/prompts.py` (0 errors).

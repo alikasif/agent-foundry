@@ -57,7 +57,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/prompts.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/prompts.py. Adapt the system prompt to RLM-specific framing per shared/designs.md: explain that 'context' is a ContextStore backed by a file (never auto-loaded into the LLM window), describe context.sub_context(start_line=, end_line=, start_char=, end_char=) for selecting slices, and describe llm_query(prompt, context=ContextStore|None) / llm_query_many(prompts, contexts=...) for recursive sub-calls whose own 'context' variable is a ContextStore over the selected slice. Keep any other prompt scaffolding (role formatting, examples) adapted from the original. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
       "depends_on": ["T001"],
-      "status": "pending",
+      "status": "done",
       "outputs": ["recursive_language_model/src/rlm/prompts.py"]
     },
     {
