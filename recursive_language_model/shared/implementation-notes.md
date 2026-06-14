@@ -105,3 +105,66 @@
   `uv run ruff format src/rlm/prompts.py` (unchanged),
   `uv run ruff check src/rlm/prompts.py` (All checks passed),
   `uv run pyrefly check src/rlm/prompts.py` (0 errors).
+
+## T003 — sandbox.py
+
+- Faithful baseline copy of `codeact_agent/src/codeact_agent/sandbox.py` into
+  `src/rlm/sandbox.py`. The full `PythonSandbox` API is preserved verbatim:
+  namespace setup (`_inject_builtins`, `namespace` property), `set_context`
+  (str|Path with `lock`/`force` kwargs), `lock_context`, async `execute`/`reset`,
+  `FinalSignal` + injected `FINAL()` handling, `SandboxResult` (including
+  `final_value`), and the `child_runner`-gated `llm_query`/`llm_query_many`
+  namespace hooks (current `str | None` context signature retained per task
+  scope).
+- Adaptation deltas (cosmetic only — no behavioural change):
+  - Import rewrites: `from codeact_agent.context import ContextStore` ->
+    `from rlm.context import ContextStore`; the TYPE_CHECKING import
+    `from codeact_agent.subagents import SubagentRunner` ->
+    `from rlm.subagents import SubagentRunner`.
+  - Logger name `"codeact.sandbox"` -> `"rlm.sandbox"`.
+  - Two `llm_query` docstrings reworded from "child CodeAct agent" to
+    "child agent".
+  - `set_context_store` deliberately NOT added — that is T010.
+  - `llm_query`/`llm_query_many` signatures left unchanged — that is T012.
+- Note: the task mentioned "observation truncation at 4000 chars" but that
+  logic lives in `loop.py` (and `prompts.py`), NOT `sandbox.py`. The original
+  `sandbox.py` has no truncation code, so none was copied here — out of scope
+  for this file.
+- ruff format/check clean. `uv run pyrefly check src/rlm/sandbox.py` reports a
+  single `missing-import` for `rlm.subagents` (the TYPE_CHECKING-only import),
+  which is the pending T008 module — not a defect in sandbox.py. It resolves
+  once T008 lands. `rlm.context` (T002) resolves cleanly.
+
+## T004 — languages/
+
+- Faithful copy of the four language modules from
+  `codeact_agent/src/codeact_agent/languages/` into `src/rlm/languages/`:
+  `registry.py`, `default.py`, `python_executor.py`, `subprocess_executor.py`.
+  Also copied the `languages/__init__.py` (the empty scaffold stub was
+  replaced) so the package's public API — `LanguageExecutor`,
+  `LanguageRegistry`, module-level `default_registry`, and `register()` — is
+  faithfully mirrored.
+- **bash_resolver.py WAS needed.** `subprocess_executor.py` imports
+  `require_tool` from `codeact_agent.bash_resolver` (used by `BashExecutor`
+  and `AwkExecutor`). It is NOT referenced by `registry.py`/`default.py`, but
+  it is a transitive dependency of the languages package, so
+  `codeact_agent/src/codeact_agent/bash_resolver.py` was copied verbatim to
+  `src/rlm/bash_resolver.py` (it has no `codeact_agent` imports, so no
+  rewrites were required).
+- Import rewrites (`codeact_agent.* -> rlm.*`):
+  - `registry.py`: `codeact_agent.sandbox` -> `rlm.sandbox`.
+  - `default.py`: `codeact_agent.languages.*` -> `rlm.languages.*`;
+    `codeact_agent.sandbox` -> `rlm.sandbox`.
+  - `python_executor.py`: `codeact_agent.sandbox` -> `rlm.sandbox`.
+  - `subprocess_executor.py`: `codeact_agent.bash_resolver` ->
+    `rlm.bash_resolver`; `codeact_agent.sandbox` -> `rlm.sandbox`.
+  - `__init__.py`: `codeact_agent.languages.*` -> `rlm.languages.*`.
+- Behaviour unchanged: executors never inspect the `context` namespace
+  object; the GAP work (sub_context/clone/structured results) does not touch
+  these modules.
+- Verification (scoped to T004 files):
+  `uv run ruff format src/rlm/languages/ src/rlm/bash_resolver.py`
+  (6 files unchanged), `uv run ruff check ...` (All checks passed),
+  `uv run pyrefly check src/rlm/languages/ src/rlm/bash_resolver.py`
+  (0 errors). `rlm.sandbox` (T003) had landed by the time pyrefly ran, so the
+  imports resolved cleanly with no transient unresolved-import errors.

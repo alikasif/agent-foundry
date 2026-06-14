@@ -34,7 +34,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/sandbox.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/sandbox.py. Preserve PythonSandbox API (namespace setup, set_context, exec/run, FINAL() handling, observation truncation at 4000 chars, etc.) adapted to import from rlm.context instead of codeact_agent.context. Do NOT yet add set_context_store (that is T010) — faithful baseline copy only. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append adaptation notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
       "depends_on": ["T001"],
-      "status": "pending",
+      "status": "done",
       "outputs": ["recursive_language_model/src/rlm/sandbox.py"]
     },
     {
@@ -43,7 +43,7 @@
       "agent": "python-backend-coder",
       "description": "Copy and adapt the languages package from D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/languages/ (registry.py, default.py, python_executor.py, subprocess_executor.py, and bash_resolver.py from codeact_agent/src/codeact_agent/bash_resolver.py ONLY if it is referenced by registry.py/default.py) into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/languages/. Update imports from codeact_agent.* to rlm.*. Behavior unchanged (the executors treat 'context' as an opaque namespace object, no changes needed for the GAPs). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append adaptation notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
       "depends_on": ["T001"],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/src/rlm/languages/registry.py",
         "recursive_language_model/src/rlm/languages/default.py",
