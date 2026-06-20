@@ -174,7 +174,7 @@
         "T008",
         "T010"
       ],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/src/rlm/loop.py",
         "recursive_language_model/src/rlm/subagents.py",
@@ -206,7 +206,7 @@
         "T009",
         "T013"
       ],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/evals/baseline.py",
         "recursive_language_model/evals/run_eval.py"

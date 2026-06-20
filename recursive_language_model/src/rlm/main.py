@@ -287,7 +287,7 @@ async def _run_turn(
                 final_triggered.append(result.final_value)
             _display_result(result, turn=turn_idx)
 
-    response, updated_history = await agent_loop.run_turn(
+    response, _final_value, updated_history = await agent_loop.run_turn(
         history,
         logger=logger,
         on_turn=on_turn,

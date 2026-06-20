@@ -303,24 +303,40 @@ class PythonSandbox:
         # Phase B: inject llm_query and llm_query_many.
         runner = self._child_runner
 
-        def _llm_query(prompt: str, context: str | None = None) -> str:
-            """Spawn a child agent and return its final answer.
+        def _reject_str_context(value: object) -> None:
+            """Raise a helpful TypeError if a raw string is passed as context."""
+            if isinstance(value, str):
+                raise TypeError(
+                    "llm_query context must be a ContextStore (passed by "
+                    "reference), not a str.  Slice the current context with "
+                    "context.sub_context(start_line=.., end_line=..) or wrap "
+                    "text with ContextStore.from_string(text)."
+                )
 
-            The result is returned as a plain Python string that you can
-            assign to a variable.  It does NOT appear in the parent LLM's
-            context unless you explicitly print() or reference it.
+        def _llm_query(prompt: str, context: ContextStore | None = None) -> object:
+            """Spawn a child RLM and return its final answer (by reference).
+
+            The child's ``context`` variable becomes a ContextStore over a
+            clone of *context* (context-by-reference): the slice text never
+            enters this prompt or the parent LLM's window.  The return value
+            is the raw object the child passed to ``FINAL()`` -- it may be any
+            Python object (dict/list/dataclass/str), bound directly in your
+            namespace without being forced through ``str()``.
 
             Args:
                 prompt: Task description for the child agent.
-                context: Optional supplementary context string.
+                context: Optional ContextStore (e.g. a slice from
+                    ``context.sub_context(...)``) to hand the child.
 
             Returns:
-                The child agent's final answer as a string.
+                The child agent's ``FINAL()`` value (any object).
 
             Raises:
+                TypeError: If *context* is a raw ``str``.
                 SubagentDepthError: If max recursion depth is exceeded.
                 RuntimeError: If no child runner is configured.
             """
+            _reject_str_context(context)
             if runner is None:
                 raise RuntimeError(
                     "llm_query() requires a SubagentRunner injected into the "
@@ -331,25 +347,30 @@ class PythonSandbox:
 
         def _llm_query_many(
             prompts: list[str],
-            contexts: list[str | None] | None = None,
-        ) -> list[str]:
-            """Run multiple child agents in parallel, return answers in order.
+            contexts: list[ContextStore | None] | None = None,
+        ) -> list[object]:
+            """Run multiple child RLMs in parallel, return results in order.
 
-            Results are returned as a list of strings aligned with *prompts*.
-            None of the child answers enter the parent LLM's history unless
-            you explicitly print() them.
+            Each child's ``context`` is a clone of the aligned entry in
+            *contexts* (context-by-reference).  Results are returned as a list
+            of the children's ``FINAL()`` objects, aligned with *prompts*, and
+            never enter the parent LLM's history unless you print() them.
 
             Args:
                 prompts: List of task prompts (one child per prompt).
-                contexts: Optional per-prompt context strings.
+                contexts: Optional per-prompt ContextStore objects.
 
             Returns:
-                List of final answer strings in prompt order.
+                List of child ``FINAL()`` values (any objects) in prompt order.
 
             Raises:
+                TypeError: If any entry in *contexts* is a raw ``str``.
                 SubagentDepthError: If max recursion depth is exceeded.
                 RuntimeError: If no child runner is configured.
             """
+            if contexts is not None:
+                for c in contexts:
+                    _reject_str_context(c)
             if runner is None:
                 raise RuntimeError(
                     "llm_query_many() requires a SubagentRunner injected into "

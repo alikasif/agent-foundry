@@ -250,7 +250,7 @@ class AgentLoop:
         on_reasoning_token: Callable[[str], None] | None = None,
         on_llm_start: Callable[[], None] | None = None,
         user_query: str | None = None,
-    ) -> tuple[str, list[dict[str, str]]]:
+    ) -> tuple[str, object, list[dict[str, str]]]:
         """Run one self-debug cycle.
 
         Sends the conversation history to the agent, extracts any code
@@ -280,10 +280,12 @@ class AgentLoop:
                 from the last user message in *history* if not given.
 
         Returns:
-            A tuple of ``(final_response_text, updated_history)``.
-            When ``FINAL(answer)`` was called, ``final_response_text``
-            will be ``str(answer)`` and the ``SandboxResult.final_value``
-            field on the last result will hold the raw value.
+            A tuple of ``(display_text, final_value, updated_history)``.
+            ``display_text`` is always a string for UI rendering:
+            ``str(final_value)`` when ``FINAL(answer)`` was called, otherwise
+            the agent's plain-text response.  ``final_value`` is the raw
+            object passed to ``FINAL(...)`` (any Python type), or ``None`` if
+            ``FINAL`` was never called.
         """
         if logger is None:
             logger = logging.getLogger("rlm")
@@ -330,12 +332,11 @@ class AgentLoop:
                 logger.debug("[LLM response] no code blocks — final answer returned.")
                 if on_turn is not None:
                     on_turn(turn_idx + 1, response, [], [])
-                return response, current_history
+                return response, None, current_history
 
             logger.debug(f"[LLM response] {len(code_blocks)} code block(s) found.")
 
             results: list[SandboxResult] = []
-            final_answer: str | None = None
 
             for block_idx, (lang, code) in enumerate(code_blocks, start=1):
                 logger.debug(
@@ -348,13 +349,14 @@ class AgentLoop:
 
                 # Check for FINAL() signal.
                 if result.final_value is not None:
-                    final_answer = str(result.final_value)
-                    logger.debug(f"[sandbox] FINAL() called — answer: {final_answer!r}")
+                    final_value = result.final_value
+                    display_text = str(final_value)
+                    logger.debug(f"[sandbox] FINAL() called — answer: {display_text!r}")
                     if on_turn is not None:
                         on_turn(
                             turn_idx + 1, response, code_blocks[:block_idx], results
                         )
-                    return final_answer, current_history
+                    return display_text, final_value, current_history
 
                 if result.exception:
                     last_line = (
@@ -379,7 +381,7 @@ class AgentLoop:
         logger.warning(
             f"[loop] max_turns={self._max_turns} reached — returning last response."
         )
-        return response, current_history
+        return response, None, current_history
 
     def reset(self) -> None:
         """Reset the loop: clears the persistent Python namespace."""

@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Avoid circular import at runtime; only used for type annotations.
-    pass
+    from rlm.context import ContextStore
 
 logger = logging.getLogger("rlm.subagents")
 
@@ -153,19 +153,22 @@ class SubagentRunner:
     # Public API — called by llm_query / llm_query_many in the sandbox
     # ------------------------------------------------------------------
 
-    def run_child(self, prompt: str, context: str | None = None) -> str:
-        """Run a child agent synchronously and return its final answer.
+    def run_child(self, prompt: str, context: ContextStore | None = None) -> object:
+        """Run a child RLM synchronously and return its ``FINAL()`` value.
 
         This method is called from within ``exec()`` on the main event-loop
         thread.  It dispatches async work to a worker thread so that the
         child's ``asyncio.run()`` is not called from inside a running loop.
+        The child's ``context`` variable is set to a clone of *context*
+        (context-by-reference); *prompt* is passed unchanged as the child's
+        task.
 
         Args:
             prompt: The task prompt for the child agent.
-            context: Optional context string prepended to the prompt.
+            context: Optional ContextStore handed to the child by reference.
 
         Returns:
-            The child agent's final answer string.
+            The child agent's ``FINAL()`` value (any Python object).
 
         Raises:
             SubagentDepthError: If ``max_depth`` would be exceeded.
@@ -177,19 +180,17 @@ class SubagentRunner:
                 f"restructure to avoid deeper nesting."
             )
 
-        full_prompt = _build_prompt(prompt, context)
-
         if self._progress_fn is not None:
-            preview = full_prompt[:60].replace("\n", " ")
+            preview = prompt[:60].replace("\n", " ")
             self._progress_fn(self._depth + 1, preview)
 
         logger.debug(
             f"[subagent] depth={self._depth} -> spawning child "
-            f"(depth={self._depth + 1}): {full_prompt[:60]!r}"
+            f"(depth={self._depth + 1}): {prompt[:60]!r}"
         )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(self._run_child_in_thread, full_prompt)
+            future = pool.submit(self._run_child_in_thread, prompt, context)
             result = future.result(timeout=_CHILD_TIMEOUT_SECONDS)
 
         logger.debug(
@@ -200,12 +201,13 @@ class SubagentRunner:
     def run_children_parallel(
         self,
         prompts: list[str],
-        contexts: list[str | None] | None = None,
-    ) -> list[str]:
-        """Run multiple child agents in parallel and return results in order.
+        contexts: list[ContextStore | None] | None = None,
+    ) -> list[object]:
+        """Run multiple child RLMs in parallel and return results in order.
 
         Each child runs in its own worker thread (and thus its own event
-        loop).  Results are returned in the same order as *prompts*.
+        loop).  Results are returned in the same order as *prompts*.  Each
+        child's ``context`` is a clone of the aligned entry in *contexts*.
 
         Thread-safety caveat: child sandboxes swap ``sys.stdout`` during
         execution.  Concurrent swaps can interleave; children must NOT rely
@@ -213,11 +215,11 @@ class SubagentRunner:
 
         Args:
             prompts: List of task prompts.
-            contexts: Optional per-prompt context strings (same length as
+            contexts: Optional per-prompt ContextStore objects (same length as
                 *prompts*, or ``None`` to use no context for any prompt).
 
         Returns:
-            List of final answer strings, in the same order as *prompts*.
+            List of child ``FINAL()`` values, in the same order as *prompts*.
 
         Raises:
             SubagentDepthError: If ``max_depth`` would be exceeded.
@@ -229,17 +231,15 @@ class SubagentRunner:
             )
 
         if contexts is None:
-            ctx_list: list[str | None] = [None] * len(prompts)
+            ctx_list: list[ContextStore | None] = [None] * len(prompts)
         else:
             ctx_list = list(contexts)
 
-        full_prompts = [
-            _build_prompt(p, c) for p, c in zip(prompts, ctx_list, strict=True)
-        ]
+        pairs = list(zip(prompts, ctx_list, strict=True))
 
         if self._progress_fn is not None:
-            for fp in full_prompts:
-                preview = fp[:60].replace("\n", " ")
+            for p, _c in pairs:
+                preview = p[:60].replace("\n", " ")
                 self._progress_fn(self._depth + 1, preview)
 
         logger.debug(
@@ -248,9 +248,7 @@ class SubagentRunner:
         )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as pool:
-            futures = [
-                pool.submit(self._run_child_in_thread, fp) for fp in full_prompts
-            ]
+            futures = [pool.submit(self._run_child_in_thread, p, c) for p, c in pairs]
             results = [f.result(timeout=_CHILD_TIMEOUT_SECONDS) for f in futures]
 
         return results
@@ -259,32 +257,38 @@ class SubagentRunner:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _run_child_in_thread(self, full_prompt: str) -> str:
+    def _run_child_in_thread(self, prompt: str, context: ContextStore | None) -> object:
         """Run a child agent loop in a worker thread.
 
         This function is executed in a thread (no running event loop),
         so ``asyncio.run()`` is valid here.
 
         Args:
-            full_prompt: Complete prompt text for the child agent.
+            prompt: The child agent's task prompt.
+            context: Optional ContextStore handed to the child by reference.
 
         Returns:
-            The child's final answer string.
+            The child's ``FINAL()`` value (any object).
         """
-        return asyncio.run(self._run_child_async(full_prompt))
+        return asyncio.run(self._run_child_async(prompt, context))
 
-    async def _run_child_async(self, full_prompt: str) -> str:
+    async def _run_child_async(
+        self, prompt: str, context: ContextStore | None
+    ) -> object:
         """Async body of the child agent run.
 
         Args:
-            full_prompt: Complete prompt text for the child agent.
+            prompt: The child agent's task prompt.
+            context: Optional ContextStore handed to the child by reference.
 
         Returns:
-            The child's final answer string.
+            The child's ``FINAL()`` value, or its display text if ``FINAL()``
+            was never called.
         """
         # Import here to avoid module-level circular imports.
         # subagents.py -> agent.py/loop.py is fine at call time.
         from rlm.agent import RLMAgent
+        from rlm.context import ContextStore
         from rlm.languages.default import build_default_registry
         from rlm.loop import AgentLoop
         from rlm.sandbox import PythonSandbox
@@ -313,6 +317,11 @@ class SubagentRunner:
         )
 
         child_sandbox = PythonSandbox(child_runner=child_runner)
+        # Context-by-reference: always clone the given store (or an empty one)
+        # into a fresh child-owned file, so the child's `context` never shares
+        # a backing file with the parent or any ancestor.
+        source_store = context if context is not None else ContextStore.from_string("")
+        child_sandbox.set_context_store(source_store.clone())
         child_registry = build_default_registry(child_sandbox)
         child_loop = AgentLoop(
             agent=child_agent,
@@ -321,31 +330,13 @@ class SubagentRunner:
             max_turns=self._child_max_turns,
         )
 
-        history: list[dict[str, str]] = [{"role": "user", "content": full_prompt}]
+        history: list[dict[str, str]] = [{"role": "user", "content": prompt}]
 
         # Run silent (no stream callbacks) -- children must not garble parent UI.
-        final_answer, _ = await child_loop.run_turn(
+        display_text, final_value, _ = await child_loop.run_turn(
             history=history,
-            user_query=full_prompt,
+            user_query=prompt,
         )
-        return final_answer
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _build_prompt(prompt: str, context: str | None) -> str:
-    """Combine a prompt and optional context into a single string.
-
-    Args:
-        prompt: The main task prompt.
-        context: Optional supplementary context.
-
-    Returns:
-        Combined prompt string.
-    """
-    if context:
-        return f"{context}\n\n{prompt}"
-    return prompt
+        # Return the raw FINAL() object by reference; fall back to display text
+        # if the child never called FINAL().
+        return final_value if final_value is not None else display_text

@@ -289,3 +289,42 @@ session-wide Edit/Write/Bash permission denials and could not write. The lead
 agent implemented all three directly from the agents' validated plans. ruff +
 pyrefly clean; functional self-checks pass (slice/clone path-independence and
 parent-unchanged invariant, ROOT/SUB/SUB routing, generator determinism).
+
+## T012 — GAP 3 structured results + ContextStore-only context (implemented by lead)
+
+- `loop.py` `run_turn` now returns `(display_text, final_value, history)`.
+  `final_value` is the raw object passed to `FINAL(...)` (or `None` if never
+  called); `display_text` = `str(final_value)` when set, else the plain
+  response. All three return sites updated.
+- `subagents.py`: `run_child`/`run_children_parallel`/`_run_child_async`/
+  `_run_child_in_thread` now take a `ContextStore | None` and return `object`/
+  `list[object]`. The child's context is `source.clone()` (or a cloned empty
+  store when `None`) bound via `set_context_store` — context-by-reference, no
+  prompt concatenation. `_build_prompt` removed; `prompt` is the child's task
+  verbatim. Returns `final_value` (by reference), falling back to display text.
+- `sandbox.py`: `llm_query`/`llm_query_many` namespace hooks now take
+  `ContextStore | None`, return `object`/`list[object]`, and raise `TypeError`
+  (pointing at `sub_context`/`from_string`) if a raw `str` is passed.
+- `main.py`: root `_run_turn` unpacks the new 3-tuple, renders `display_text`.
+- **FINAL(None) limitation** (designs.md §7): a literal `FINAL(None)` is
+  indistinguishable from "FINAL not called" — both fall back to display text.
+  Falsy-but-non-None values (`0`, `""`, `[]`, `False`) ARE preserved.
+
+## T014 — GAP 4b eval harness (implemented by lead)
+
+- `evals/baseline.py`: `BaselineAgent` (live-mode, no-recursion wrapper) plus
+  deterministic LLM-free `offline_rlm_*` and `offline_baseline_*` solvers. The
+  RLM solvers inspect the full context by reference (`ContextStore.search`),
+  the baseline solvers see only a 4000-char prefix — modelling the capability
+  gap so the RLM-vs-baseline delta is reproducible offline.
+- `evals/run_eval.py`: `--benchmark {sniah,browsecomp,oolong,oolong_pairs}`
+  `[--seed] [--n] [--live]`. Offline by default (deterministic, CI-safe);
+  `--live` is gated by `RLM_LIVE_EVAL=1` (not yet wired to real models —
+  prints a clear message). Writes per-run JSON to `shared/eval_results/`
+  with `{benchmark, approach, score, n_items, config, seed}`.
+- Offline smoke: RLM beats baseline on all four (deltas +1.0/+0.5/+0.7/+1.0),
+  all explicitly "inspired by, not reproducing" the paper, relative-delta only.
+- **Tooling note**: `evals` is a top-level package (not under `src/`), so
+  `uv run pyrefly check --search-path . evals/` is the way to type-check it
+  cleanly under pyrefly's basic preset (no `[tool.pyrefly]` config added, to
+  keep the whole project on the same lenient preset as earlier waves).
