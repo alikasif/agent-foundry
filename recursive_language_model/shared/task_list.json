@@ -5,7 +5,7 @@
       "id": "T001",
       "type": "project_structure",
       "agent": "project-scaffolder",
-      "description": "Scaffold the self-contained 'rlm' package at D:/GitHub/agent-foundry/recursive_language_model. Create: pyproject.toml (name='rlm', entry point 'rlm' -> rlm.main:main or equivalent, Python>=3.11, deps per shared/designs.md section 6: openai-agents, pydantic>=2.0, click>=8.0, rich>=13.0, python-dotenv>=1.0.0; dev deps: pytest, anyio[trio], ruff, pyrefly, pytest-cov, pytest-mock; ruff line-length=88 config). Create .env.example mirroring codeact_agent/.env.example plus RLM_ROOT_MODEL=openrouter/anthropic/claude-sonnet-4 and RLM_SUB_MODEL=openrouter/anthropic/claude-3.5-haiku (see designs.md section 2.1). Create directories: src/rlm/, src/rlm/languages/, tests/ (with __init__.py), evals/ (with __init__.py), shared/reviews/, shared/eval_results/. Create empty src/rlm/__init__.py and src/rlm/languages/__init__.py stubs. Create README.md stub (to be filled by docs task later). Use uv (uv init / uv add) — never pip, never @latest. Initialize on a new local feature branch e.g. feat/rlm-phase-a (local commit only, no push). Create shared/implementation-notes.md with an initial section describing scaffold decisions.",
+      "description": "Scaffold the self-contained 'rlm' package at D:/GitHub/agent-foundry/recursive_language_model. Create: pyproject.toml (name='rlm', entry point 'rlm' -> rlm.main:main or equivalent, Python>=3.11, deps per shared/designs.md section 6: openai-agents, pydantic>=2.0, click>=8.0, rich>=13.0, python-dotenv>=1.0.0; dev deps: pytest, anyio[trio], ruff, pyrefly, pytest-cov, pytest-mock; ruff line-length=88 config). Create .env.example mirroring codeact_agent/.env.example plus RLM_ROOT_MODEL=openrouter/anthropic/claude-sonnet-4 and RLM_SUB_MODEL=openrouter/anthropic/claude-3.5-haiku (see designs.md section 2.1). Create directories: src/rlm/, src/rlm/languages/, tests/ (with __init__.py), evals/ (with __init__.py), shared/reviews/, shared/eval_results/. Create empty src/rlm/__init__.py and src/rlm/languages/__init__.py stubs. Create README.md stub (to be filled by docs task later). Use uv (uv init / uv add) \u00e2\u20ac\u201d never pip, never @latest. Initialize on a new local feature branch e.g. feat/rlm-phase-a (local commit only, no push). Create shared/implementation-notes.md with an initial section describing scaffold decisions.",
       "depends_on": [],
       "status": "done",
       "outputs": [
@@ -23,26 +23,36 @@
       "id": "T002",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/context.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/context.py. Preserve the existing ContextStore API (from_string, from_path, path, size, line_count, lines, head, tail, search, grep, __getitem__, _read_chars, etc.) verbatim/adapted to the new package namespace (imports referencing 'codeact_agent' must become 'rlm'). Do NOT yet add sub_context/from_slice/clone (that is T010) — this task is the faithful baseline copy only. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append a short note to shared/implementation-notes.md describing any adaptation deltas from the original file. Commit locally with a conventional commit message on the feature branch.",
-      "depends_on": ["T001"],
+      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/context.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/context.py. Preserve the existing ContextStore API (from_string, from_path, path, size, line_count, lines, head, tail, search, grep, __getitem__, _read_chars, etc.) verbatim/adapted to the new package namespace (imports referencing 'codeact_agent' must become 'rlm'). Do NOT yet add sub_context/from_slice/clone (that is T010) \u00e2\u20ac\u201d this task is the faithful baseline copy only. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append a short note to shared/implementation-notes.md describing any adaptation deltas from the original file. Commit locally with a conventional commit message on the feature branch.",
+      "depends_on": [
+        "T001"
+      ],
       "status": "done",
-      "outputs": ["recursive_language_model/src/rlm/context.py"]
+      "outputs": [
+        "recursive_language_model/src/rlm/context.py"
+      ]
     },
     {
       "id": "T003",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/sandbox.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/sandbox.py. Preserve PythonSandbox API (namespace setup, set_context, exec/run, FINAL() handling, observation truncation at 4000 chars, etc.) adapted to import from rlm.context instead of codeact_agent.context. Do NOT yet add set_context_store (that is T010) — faithful baseline copy only. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append adaptation notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
-      "depends_on": ["T001"],
+      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/sandbox.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/sandbox.py. Preserve PythonSandbox API (namespace setup, set_context, exec/run, FINAL() handling, observation truncation at 4000 chars, etc.) adapted to import from rlm.context instead of codeact_agent.context. Do NOT yet add set_context_store (that is T010) \u00e2\u20ac\u201d faithful baseline copy only. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append adaptation notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T001"
+      ],
       "status": "done",
-      "outputs": ["recursive_language_model/src/rlm/sandbox.py"]
+      "outputs": [
+        "recursive_language_model/src/rlm/sandbox.py"
+      ]
     },
     {
       "id": "T004",
       "type": "python_coder",
       "agent": "python-backend-coder",
       "description": "Copy and adapt the languages package from D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/languages/ (registry.py, default.py, python_executor.py, subprocess_executor.py, and bash_resolver.py from codeact_agent/src/codeact_agent/bash_resolver.py ONLY if it is referenced by registry.py/default.py) into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/languages/. Update imports from codeact_agent.* to rlm.*. Behavior unchanged (the executors treat 'context' as an opaque namespace object, no changes needed for the GAPs). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append adaptation notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
-      "depends_on": ["T001"],
+      "depends_on": [
+        "T001"
+      ],
       "status": "done",
       "outputs": [
         "recursive_language_model/src/rlm/languages/registry.py",
@@ -56,53 +66,85 @@
       "type": "python_coder",
       "agent": "python-backend-coder",
       "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/prompts.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/prompts.py. Adapt the system prompt to RLM-specific framing per shared/designs.md: explain that 'context' is a ContextStore backed by a file (never auto-loaded into the LLM window), describe context.sub_context(start_line=, end_line=, start_char=, end_char=) for selecting slices, and describe llm_query(prompt, context=ContextStore|None) / llm_query_many(prompts, contexts=...) for recursive sub-calls whose own 'context' variable is a ContextStore over the selected slice. Keep any other prompt scaffolding (role formatting, examples) adapted from the original. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
-      "depends_on": ["T001"],
+      "depends_on": [
+        "T001"
+      ],
       "status": "done",
-      "outputs": ["recursive_language_model/src/rlm/prompts.py"]
+      "outputs": [
+        "recursive_language_model/src/rlm/prompts.py"
+      ]
     },
     {
       "id": "T006",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/agent.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/agent.py. Rename CodeActAgent -> RLMAgent. Preserve the 'developer'->'system' role monkeypatch verbatim. Constructor takes a 'model: str' parameter per-instance (unchanged shape from original, but ensure it is the single source of model identity for this agent instance — Wave 3 T011 will route which model string is passed in by callers). Adapt imports to rlm.* (rlm.context, rlm.sandbox, rlm.prompts, rlm.languages). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
-      "depends_on": ["T001"],
+      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/agent.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/agent.py. Rename CodeActAgent -> RLMAgent. Preserve the 'developer'->'system' role monkeypatch verbatim. Constructor takes a 'model: str' parameter per-instance (unchanged shape from original, but ensure it is the single source of model identity for this agent instance \u00e2\u20ac\u201d Wave 3 T011 will route which model string is passed in by callers). Adapt imports to rlm.* (rlm.context, rlm.sandbox, rlm.prompts, rlm.languages). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T001"
+      ],
       "status": "done",
-      "outputs": ["recursive_language_model/src/rlm/agent.py"]
+      "outputs": [
+        "recursive_language_model/src/rlm/agent.py"
+      ]
     },
     {
       "id": "T007",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/loop.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/loop.py as AgentLoop. Adapt imports to rlm.* (rlm.agent.RLMAgent, rlm.context, rlm.sandbox, rlm.prompts, rlm.languages). For THIS task, preserve run_turn's CURRENT return shape (tuple[str, list[dict[str,str]]]) as a faithful baseline copy — the signature change to (display_text, final_value, history) is GAP 3 and is implemented in T012 as a follow-up edit to this same file. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
-      "depends_on": ["T002", "T003", "T005", "T006"],
+      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/loop.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/loop.py as AgentLoop. Adapt imports to rlm.* (rlm.agent.RLMAgent, rlm.context, rlm.sandbox, rlm.prompts, rlm.languages). For THIS task, preserve run_turn's CURRENT return shape (tuple[str, list[dict[str,str]]]) as a faithful baseline copy \u00e2\u20ac\u201d the signature change to (display_text, final_value, history) is GAP 3 and is implemented in T012 as a follow-up edit to this same file. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T002",
+        "T003",
+        "T005",
+        "T006"
+      ],
       "status": "done",
-      "outputs": ["recursive_language_model/src/rlm/loop.py"]
+      "outputs": [
+        "recursive_language_model/src/rlm/loop.py"
+      ]
     },
     {
       "id": "T008",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/subagents.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/subagents.py as SubagentRunner. Adapt imports to rlm.* (rlm.context, rlm.agent, rlm.loop, rlm.sandbox). Copy verbatim: SubagentDepthError, max_depth default (3), _CHILD_TIMEOUT_SECONDS (300), _CHILD_MAX_TURNS (8), in-process worker-thread execution model (no pickling/serialization boundary). For THIS task, preserve the CURRENT constructor signature (single 'model: str' param) and CURRENT context parameter type (str | None) and CURRENT return types (str / list[str]) as a faithful baseline copy — GAP 2 (model_for_depth, T011) and GAP 3 (ContextStore context param + object returns, T012) are follow-up edits to this same file. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
-      "depends_on": ["T003", "T006", "T007"],
+      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/subagents.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/subagents.py as SubagentRunner. Adapt imports to rlm.* (rlm.context, rlm.agent, rlm.loop, rlm.sandbox). Copy verbatim: SubagentDepthError, max_depth default (3), _CHILD_TIMEOUT_SECONDS (300), _CHILD_MAX_TURNS (8), in-process worker-thread execution model (no pickling/serialization boundary). For THIS task, preserve the CURRENT constructor signature (single 'model: str' param) and CURRENT context parameter type (str | None) and CURRENT return types (str / list[str]) as a faithful baseline copy \u00e2\u20ac\u201d GAP 2 (model_for_depth, T011) and GAP 3 (ContextStore context param + object returns, T012) are follow-up edits to this same file. Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T003",
+        "T006",
+        "T007"
+      ],
       "status": "done",
-      "outputs": ["recursive_language_model/src/rlm/subagents.py"]
+      "outputs": [
+        "recursive_language_model/src/rlm/subagents.py"
+      ]
     },
     {
       "id": "T009",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/main.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/main.py. Adapt imports to rlm.* (rlm.agent.RLMAgent, rlm.loop.AgentLoop, rlm.subagents.SubagentRunner, rlm.context.ContextStore). Preserve CLI commands /load and /reset and general CLI structure (click-based, rich rendering of display text). For THIS task, keep the existing single --model CLI flag and single CODEACT_MODEL-equivalent env var as a faithful baseline copy — GAP 2's --root-model/--sub-model flags and RLM_ROOT_MODEL/RLM_SUB_MODEL env vars (designs.md section 2.2 'Configuration entry point') are a follow-up edit to this same file performed within T011. Wire entry point so pyproject.toml's 'rlm' command invokes this main(). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
-      "depends_on": ["T002", "T003", "T006", "T007", "T008"],
+      "description": "Copy and adapt D:/GitHub/agent-foundry/codeact_agent/src/codeact_agent/main.py into D:/GitHub/agent-foundry/recursive_language_model/src/rlm/main.py. Adapt imports to rlm.* (rlm.agent.RLMAgent, rlm.loop.AgentLoop, rlm.subagents.SubagentRunner, rlm.context.ContextStore). Preserve CLI commands /load and /reset and general CLI structure (click-based, rich rendering of display text). For THIS task, keep the existing single --model CLI flag and single CODEACT_MODEL-equivalent env var as a faithful baseline copy \u00e2\u20ac\u201d GAP 2's --root-model/--sub-model flags and RLM_ROOT_MODEL/RLM_SUB_MODEL env vars (designs.md section 2.2 'Configuration entry point') are a follow-up edit to this same file performed within T011. Wire entry point so pyproject.toml's 'rlm' command invokes this main(). Full type hints, ruff format/check clean, pyrefly clean (line length 88). Append notes to shared/implementation-notes.md. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T002",
+        "T003",
+        "T006",
+        "T007",
+        "T008"
+      ],
       "status": "done",
-      "outputs": ["recursive_language_model/src/rlm/main.py"]
+      "outputs": [
+        "recursive_language_model/src/rlm/main.py"
+      ]
     },
     {
       "id": "T010",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "GAP 1 (the spine) — implement in D:/GitHub/agent-foundry/recursive_language_model/src/rlm/context.py and src/rlm/sandbox.py per shared/designs.md sections 1.2-1.5. In context.py add to ContextStore: (a) `sub_context(self, *, start_line=None, end_line=None, start_char=None, end_char=None, workspace: Path | None = None) -> ContextStore` — exactly one of (start_line/end_line) xor (start_char/end_char) must be given (ValueError otherwise); line ranges 1-indexed inclusive consistent with `lines()`, char ranges 0-indexed end-exclusive consistent with `__getitem__`; streams the slice into a new file under `<workspace or fresh child_<uuid4> dir>/context.txt`, recomputes char_count/line_count for the slice; raises RuntimeError if no context loaded (mirror `path` property behavior). (b) `from_slice(cls, source, *, ... ) -> ContextStore` classmethod alias calling `source.sub_context(...)`. (c) `clone(self, *, workspace: Path | None = None) -> ContextStore` — full streaming copy of this store's backing file into a NEW workspace dir (default fresh child dir), returns a NEW ContextStore with a different `.path` than self (even for an empty store), copies char_count/line_count as-is. Child workspaces nest under `<parent_workspace>/children/<uuid4>/`. In sandbox.py add `PythonSandbox.set_context_store(self, store: ContextStore, *, lock: bool = True) -> None` which binds `store` directly as `namespace['context']`, with lock=True preventing the loop's automatic per-turn set_context() from overwriting it; retain existing `set_context(str|Path)` unchanged for CLI /load and top-level use. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append a detailed implementation-notes.md entry covering the line-range O(end_line) streaming cost tradeoff (documented per designs.md section 7) and the child-workspace nesting scheme. Commit locally with conventional commit message.",
-      "depends_on": ["T002", "T003"],
-      "status": "pending",
+      "description": "GAP 1 (the spine) \u00e2\u20ac\u201d implement in D:/GitHub/agent-foundry/recursive_language_model/src/rlm/context.py and src/rlm/sandbox.py per shared/designs.md sections 1.2-1.5. In context.py add to ContextStore: (a) `sub_context(self, *, start_line=None, end_line=None, start_char=None, end_char=None, workspace: Path | None = None) -> ContextStore` \u00e2\u20ac\u201d exactly one of (start_line/end_line) xor (start_char/end_char) must be given (ValueError otherwise); line ranges 1-indexed inclusive consistent with `lines()`, char ranges 0-indexed end-exclusive consistent with `__getitem__`; streams the slice into a new file under `<workspace or fresh child_<uuid4> dir>/context.txt`, recomputes char_count/line_count for the slice; raises RuntimeError if no context loaded (mirror `path` property behavior). (b) `from_slice(cls, source, *, ... ) -> ContextStore` classmethod alias calling `source.sub_context(...)`. (c) `clone(self, *, workspace: Path | None = None) -> ContextStore` \u00e2\u20ac\u201d full streaming copy of this store's backing file into a NEW workspace dir (default fresh child dir), returns a NEW ContextStore with a different `.path` than self (even for an empty store), copies char_count/line_count as-is. Child workspaces nest under `<parent_workspace>/children/<uuid4>/`. In sandbox.py add `PythonSandbox.set_context_store(self, store: ContextStore, *, lock: bool = True) -> None` which binds `store` directly as `namespace['context']`, with lock=True preventing the loop's automatic per-turn set_context() from overwriting it; retain existing `set_context(str|Path)` unchanged for CLI /load and top-level use. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append a detailed implementation-notes.md entry covering the line-range O(end_line) streaming cost tradeoff (documented per designs.md section 7) and the child-workspace nesting scheme. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T002",
+        "T003"
+      ],
+      "status": "done",
       "outputs": [
         "recursive_language_model/src/rlm/context.py",
         "recursive_language_model/src/rlm/sandbox.py"
@@ -112,9 +154,11 @@
       "id": "T011",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "GAP 2 — root/sub model routing per shared/designs.md section 2. In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/subagents.py (or a new small module e.g. rlm/models.py imported by subagents.py — coder's choice, document in implementation-notes.md) define: `ModelForDepth = Callable[[int], str]` and `default_model_for_depth(root_model: str, sub_model: str) -> ModelForDepth` returning a closure where depth==0 -> root_model, depth>=1 -> sub_model. Change `SubagentRunner.__init__` to accept `model_for_depth: ModelForDepth` (replacing the single `model: str` param). In `run_child`/`run_children_parallel`/`_run_child_async`, resolve the child's model via `self._model_for_depth(self._depth + 1)` and construct the grandchild SubagentRunner with the SAME `model_for_depth` callable (propagation by reuse, no re-derivation). Update D:/GitHub/agent-foundry/recursive_language_model/src/rlm/main.py: add `--root-model`/`--sub-model` CLI flags and read `RLM_ROOT_MODEL`/`RLM_SUB_MODEL` env vars (defaults from .env.example: openrouter/anthropic/claude-sonnet-4 and openrouter/anthropic/claude-3.5-haiku), build `model_for_depth = default_model_for_depth(root_model, sub_model)`, construct the root RLMAgent with `model_for_depth(0)` and pass `model_for_depth` into the root SubagentRunner. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry. Commit locally with conventional commit message.",
-      "depends_on": ["T008"],
-      "status": "pending",
+      "description": "GAP 2 \u00e2\u20ac\u201d root/sub model routing per shared/designs.md section 2. In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/subagents.py (or a new small module e.g. rlm/models.py imported by subagents.py \u00e2\u20ac\u201d coder's choice, document in implementation-notes.md) define: `ModelForDepth = Callable[[int], str]` and `default_model_for_depth(root_model: str, sub_model: str) -> ModelForDepth` returning a closure where depth==0 -> root_model, depth>=1 -> sub_model. Change `SubagentRunner.__init__` to accept `model_for_depth: ModelForDepth` (replacing the single `model: str` param). In `run_child`/`run_children_parallel`/`_run_child_async`, resolve the child's model via `self._model_for_depth(self._depth + 1)` and construct the grandchild SubagentRunner with the SAME `model_for_depth` callable (propagation by reuse, no re-derivation). Update D:/GitHub/agent-foundry/recursive_language_model/src/rlm/main.py: add `--root-model`/`--sub-model` CLI flags and read `RLM_ROOT_MODEL`/`RLM_SUB_MODEL` env vars (defaults from .env.example: openrouter/anthropic/claude-sonnet-4 and openrouter/anthropic/claude-3.5-haiku), build `model_for_depth = default_model_for_depth(root_model, sub_model)`, construct the root RLMAgent with `model_for_depth(0)` and pass `model_for_depth` into the root SubagentRunner. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T008"
+      ],
+      "status": "done",
       "outputs": [
         "recursive_language_model/src/rlm/subagents.py",
         "recursive_language_model/src/rlm/main.py"
@@ -124,8 +168,12 @@
       "id": "T012",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "GAP 3 — structured (non-string) results + ContextStore-only context param, per shared/designs.md sections 1.4 and 3. In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/loop.py change `AgentLoop.run_turn` return type from `tuple[str, list[dict[str, str]]]` to `tuple[str, object, list[dict[str, str]]]` = `(display_text, final_value, updated_history)`: display_text = str(final_value) if final_value is not None else the agent's plain-text response; final_value = the raw object passed to FINAL(...), or None if FINAL was never called. Update D:/GitHub/agent-foundry/recursive_language_model/src/rlm/main.py's top-level CLI loop to use only `display_text` for rendering (root-level behavior unchanged). In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/subagents.py: change `_run_child_async` signature to `async def _run_child_async(self, prompt: str, context: ContextStore | None) -> object` returning `final_value if final_value is not None else _display`; `run_child`/`run_children_parallel` return types become `object` / `list[object]`. Internally, on every call: `store = context if context is not None else ContextStore.from_string(\"\")`, then `context_clone = store.clone(workspace=<new child workspace dir>)` (using T010's clone), then `child_sandbox.set_context_store(context_clone)` (T010's method). In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/sandbox.py: change the `llm_query`/`llm_query_many` tool-function signatures exposed in the namespace to `llm_query(prompt: str, context: ContextStore | None = None) -> object` and `llm_query_many(prompts: list[str], contexts: list[ContextStore | None] | None = None) -> list[object]`; passing a `str` for `context` must raise `TypeError` with a message pointing at `context.sub_context(...)` / `ContextStore.from_string(...)`. Remove the old `_build_prompt` string-concatenation entirely — `prompt` is passed as the child's initial user message unchanged. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry documenting the FINAL(None) limitation per designs.md section 7. Commit locally with conventional commit message.",
-      "depends_on": ["T007", "T008", "T010"],
+      "description": "GAP 3 \u00e2\u20ac\u201d structured (non-string) results + ContextStore-only context param, per shared/designs.md sections 1.4 and 3. In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/loop.py change `AgentLoop.run_turn` return type from `tuple[str, list[dict[str, str]]]` to `tuple[str, object, list[dict[str, str]]]` = `(display_text, final_value, updated_history)`: display_text = str(final_value) if final_value is not None else the agent's plain-text response; final_value = the raw object passed to FINAL(...), or None if FINAL was never called. Update D:/GitHub/agent-foundry/recursive_language_model/src/rlm/main.py's top-level CLI loop to use only `display_text` for rendering (root-level behavior unchanged). In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/subagents.py: change `_run_child_async` signature to `async def _run_child_async(self, prompt: str, context: ContextStore | None) -> object` returning `final_value if final_value is not None else _display`; `run_child`/`run_children_parallel` return types become `object` / `list[object]`. Internally, on every call: `store = context if context is not None else ContextStore.from_string(\"\")`, then `context_clone = store.clone(workspace=<new child workspace dir>)` (using T010's clone), then `child_sandbox.set_context_store(context_clone)` (T010's method). In D:/GitHub/agent-foundry/recursive_language_model/src/rlm/sandbox.py: change the `llm_query`/`llm_query_many` tool-function signatures exposed in the namespace to `llm_query(prompt: str, context: ContextStore | None = None) -> object` and `llm_query_many(prompts: list[str], contexts: list[ContextStore | None] | None = None) -> list[object]`; passing a `str` for `context` must raise `TypeError` with a message pointing at `context.sub_context(...)` / `ContextStore.from_string(...)`. Remove the old `_build_prompt` string-concatenation entirely \u00e2\u20ac\u201d `prompt` is passed as the child's initial user message unchanged. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry documenting the FINAL(None) limitation per designs.md section 7. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T007",
+        "T008",
+        "T010"
+      ],
       "status": "pending",
       "outputs": [
         "recursive_language_model/src/rlm/loop.py",
@@ -138,17 +186,26 @@
       "id": "T013",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "GAP 4a — synthetic dataset generators per shared/designs.md section 5.2. Create D:/GitHub/agent-foundry/recursive_language_model/evals/datasets.py with seeded (default seed=42), deterministic generators for 4 benchmarks: (1) `generate_sniah(seed, ...) -> ...` — S-NIAH-style: N-char synthetic document of filler sentences with one or more short 'needle' facts inserted at controlled positions, plus a question whose answer is only in the needle, plus expected answer for exact/substring-match scoring. (2) `generate_browsecomp(seed, ...) -> ...` — multi-doc corpus QA: K synthetic documents (a few paragraphs each), one containing the answer; a question requiring identifying the relevant doc and extracting an answer; expected answer. (3) `generate_oolong_classification(seed, n_items=20, ...) -> ...` — long context with many short labeled question/category examples using label set {ABBR, ENTY, DESC, HUM, LOC, NUM} (trec_coarse-style) plus a final unlabeled query per item; expected label. (4) `generate_oolong_pairs(seed, ...) -> ...` — two long synthetic contexts (A, B) plus a comparison question (e.g. 'which of A/B mentions X more recently?') plus expected answer. Each generator returns a small dataclass/typed structure with fields for context text(s), question, expected_answer, and any metadata needed by run_eval.py. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry. Commit locally with conventional commit message.",
-      "depends_on": ["T002"],
-      "status": "pending",
-      "outputs": ["recursive_language_model/evals/datasets.py"]
+      "description": "GAP 4a \u00e2\u20ac\u201d synthetic dataset generators per shared/designs.md section 5.2. Create D:/GitHub/agent-foundry/recursive_language_model/evals/datasets.py with seeded (default seed=42), deterministic generators for 4 benchmarks: (1) `generate_sniah(seed, ...) -> ...` \u00e2\u20ac\u201d S-NIAH-style: N-char synthetic document of filler sentences with one or more short 'needle' facts inserted at controlled positions, plus a question whose answer is only in the needle, plus expected answer for exact/substring-match scoring. (2) `generate_browsecomp(seed, ...) -> ...` \u00e2\u20ac\u201d multi-doc corpus QA: K synthetic documents (a few paragraphs each), one containing the answer; a question requiring identifying the relevant doc and extracting an answer; expected answer. (3) `generate_oolong_classification(seed, n_items=20, ...) -> ...` \u00e2\u20ac\u201d long context with many short labeled question/category examples using label set {ABBR, ENTY, DESC, HUM, LOC, NUM} (trec_coarse-style) plus a final unlabeled query per item; expected label. (4) `generate_oolong_pairs(seed, ...) -> ...` \u00e2\u20ac\u201d two long synthetic contexts (A, B) plus a comparison question (e.g. 'which of A/B mentions X more recently?') plus expected answer. Each generator returns a small dataclass/typed structure with fields for context text(s), question, expected_answer, and any metadata needed by run_eval.py. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T002"
+      ],
+      "status": "done",
+      "outputs": [
+        "recursive_language_model/evals/datasets.py"
+      ]
     },
     {
       "id": "T014",
       "type": "python_coder",
       "agent": "python-backend-coder",
-      "description": "GAP 4b — baseline agent + eval harness per shared/designs.md sections 5.1 and 5.3. Create D:/GitHub/agent-foundry/recursive_language_model/evals/baseline.py with a `BaselineAgent` that reuses RLMAgent/PythonSandbox machinery WITHOUT llm_query/recursion: context is set via `set_context` (str|Path API), and the agent answers directly relying on the existing 4000-char observation truncation to model 'compaction'. Create D:/GitHub/agent-foundry/recursive_language_model/evals/run_eval.py as a CLI: `uv run python -m rlm.evals.run_eval --benchmark <sniah|browsecomp|oolong|oolong_pairs> [--live] [--seed N]`. Default (no --live): use evals/datasets.py generators with the given seed, run BOTH the RLM agent (full recursive pipeline) and BaselineAgent against a stub/scripted FakeAgent model responder (similar to existing codeact_agent test doubles — CI-safe, offline, no API key). `--live`: use real RLM_ROOT_MODEL/RLM_SUB_MODEL via OpenRouter, gated by `RLM_LIVE_EVAL=1` env var (mirrors codeact_agent's CODEACT_LIVE_EVAL convention) — skip with a clear message if unset. Write output JSON to `shared/eval_results/<benchmark>_<rlm|baseline>_<timestamp>.json` with shape `{\"benchmark\", \"approach\", \"score\", \"n_items\", \"config\", \"seed\"}`. Label all eval output/README references as 'inspired by [paper], not reproducing its exact datasets/splits' — report RLM-vs-baseline relative deltas, never paper-comparable absolute numbers. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry documenting the BaselineAgent-as-compaction interpretation (designs.md section 5.3). Commit locally with conventional commit message.",
-      "depends_on": ["T006", "T007", "T009", "T013"],
+      "description": "GAP 4b \u00e2\u20ac\u201d baseline agent + eval harness per shared/designs.md sections 5.1 and 5.3. Create D:/GitHub/agent-foundry/recursive_language_model/evals/baseline.py with a `BaselineAgent` that reuses RLMAgent/PythonSandbox machinery WITHOUT llm_query/recursion: context is set via `set_context` (str|Path API), and the agent answers directly relying on the existing 4000-char observation truncation to model 'compaction'. Create D:/GitHub/agent-foundry/recursive_language_model/evals/run_eval.py as a CLI: `uv run python -m rlm.evals.run_eval --benchmark <sniah|browsecomp|oolong|oolong_pairs> [--live] [--seed N]`. Default (no --live): use evals/datasets.py generators with the given seed, run BOTH the RLM agent (full recursive pipeline) and BaselineAgent against a stub/scripted FakeAgent model responder (similar to existing codeact_agent test doubles \u00e2\u20ac\u201d CI-safe, offline, no API key). `--live`: use real RLM_ROOT_MODEL/RLM_SUB_MODEL via OpenRouter, gated by `RLM_LIVE_EVAL=1` env var (mirrors codeact_agent's CODEACT_LIVE_EVAL convention) \u00e2\u20ac\u201d skip with a clear message if unset. Write output JSON to `shared/eval_results/<benchmark>_<rlm|baseline>_<timestamp>.json` with shape `{\"benchmark\", \"approach\", \"score\", \"n_items\", \"config\", \"seed\"}`. Label all eval output/README references as 'inspired by [paper], not reproducing its exact datasets/splits' \u00e2\u20ac\u201d report RLM-vs-baseline relative deltas, never paper-comparable absolute numbers. Full type hints, ruff format/check clean, pyrefly clean (line 88). Append implementation-notes.md entry documenting the BaselineAgent-as-compaction interpretation (designs.md section 5.3). Commit locally with conventional commit message.",
+      "depends_on": [
+        "T006",
+        "T007",
+        "T009",
+        "T013"
+      ],
       "status": "pending",
       "outputs": [
         "recursive_language_model/evals/baseline.py",
@@ -160,81 +217,130 @@
       "type": "python_test",
       "agent": "python-test-runner",
       "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_context_store.py covering rlm/context.py: adapt relevant baseline tests from codeact_agent/tests/test_context_store.py (from_string, from_path, lines/head/tail/search/grep/__getitem__, char/line counting) PLUS new tests for T010's additions: `sub_context` with line-range and char-range slicing (correct content, correct char_count/line_count for the slice, ValueError when both/neither range kinds given, ValueError on invalid ranges, RuntimeError when no context loaded); `from_slice` classmethod equivalence to `sub_context`; `clone()` produces a NEW ContextStore with a different `.path`, identical content/size/line_count, for both non-empty and empty source stores. Also adapt relevant truncation tests from codeact_agent/tests/test_truncation.py if applicable to rlm/sandbox.py's observation truncation (4000 chars). Async tests use anyio where needed. Run `uv run pytest` and ensure all pass; run `uv run ruff format .`, `uv run ruff check .`, `uv run pyrefly check` clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
-      "depends_on": ["T010"],
+      "depends_on": [
+        "T010"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/tests/test_context_store.py"]
+      "outputs": [
+        "recursive_language_model/tests/test_context_store.py"
+      ]
     },
     {
       "id": "T016",
       "type": "python_test",
       "agent": "python-test-runner",
-      "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_recursion_context_by_reference.py implementing the verification plan in shared/designs.md section 1.6: (1) Build a root ContextStore from a multi-line synthetic corpus; record (path, size, line_count, mtime). (2) Directly exercise `ContextStore.sub_context(...)` and assert: returned object `is not` the parent store and has a DIFFERENT `.path`; returned object's `.size`/`.line_count` reflect only the slice; parent's (path, size, line_count, mtime) UNCHANGED after the call (the core invariant). (3) A second test monkeypatches `SubagentRunner._run_child_async` (or stubs the relevant async path) to assert that `child_sandbox.namespace['context']` is a `ContextStore` (not `str`) with `.path != parent.path`, before returning a canned FINAL() value — verifying the full llm_query wiring (clone() + set_context_store) without a live LLM call. Async tests use anyio. Run `uv run pytest` ensure pass; `uv run ruff format .`, `uv run ruff check .`, `uv run pyrefly check` clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
-      "depends_on": ["T010", "T012"],
+      "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_recursion_context_by_reference.py implementing the verification plan in shared/designs.md section 1.6: (1) Build a root ContextStore from a multi-line synthetic corpus; record (path, size, line_count, mtime). (2) Directly exercise `ContextStore.sub_context(...)` and assert: returned object `is not` the parent store and has a DIFFERENT `.path`; returned object's `.size`/`.line_count` reflect only the slice; parent's (path, size, line_count, mtime) UNCHANGED after the call (the core invariant). (3) A second test monkeypatches `SubagentRunner._run_child_async` (or stubs the relevant async path) to assert that `child_sandbox.namespace['context']` is a `ContextStore` (not `str`) with `.path != parent.path`, before returning a canned FINAL() value \u00e2\u20ac\u201d verifying the full llm_query wiring (clone() + set_context_store) without a live LLM call. Async tests use anyio. Run `uv run pytest` ensure pass; `uv run ruff format .`, `uv run ruff check .`, `uv run pyrefly check` clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T010",
+        "T012"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/tests/test_recursion_context_by_reference.py"]
+      "outputs": [
+        "recursive_language_model/tests/test_recursion_context_by_reference.py"
+      ]
     },
     {
       "id": "T017",
       "type": "python_test",
       "agent": "python-test-runner",
-      "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_subagent_depth.py. Adapt the depth-guard tests from codeact_agent/tests/test_subagents.py: verify `SubagentRunner` raises `SubagentDepthError` when recursion would exceed `max_depth` (default 3), at multiple depths (e.g. depth 3 -> 4 blocked). Also verify `_CHILD_TIMEOUT_SECONDS` (300) and `_CHILD_MAX_TURNS` (8) constants are preserved/copied verbatim from codeact_agent and enforced (can use short-circuited/mocked timers — do not actually sleep 300s). Tests must work with the new `model_for_depth: ModelForDepth` constructor param (T011) and ContextStore-based context param (T012) — construct SubagentRunner instances directly with a stub `model_for_depth` callable, no live LLM calls. Async tests use anyio. Run `uv run pytest` ensure pass; ruff/pyrefly clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
-      "depends_on": ["T011", "T012"],
+      "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_subagent_depth.py. Adapt the depth-guard tests from codeact_agent/tests/test_subagents.py: verify `SubagentRunner` raises `SubagentDepthError` when recursion would exceed `max_depth` (default 3), at multiple depths (e.g. depth 3 -> 4 blocked). Also verify `_CHILD_TIMEOUT_SECONDS` (300) and `_CHILD_MAX_TURNS` (8) constants are preserved/copied verbatim from codeact_agent and enforced (can use short-circuited/mocked timers \u00e2\u20ac\u201d do not actually sleep 300s). Tests must work with the new `model_for_depth: ModelForDepth` constructor param (T011) and ContextStore-based context param (T012) \u00e2\u20ac\u201d construct SubagentRunner instances directly with a stub `model_for_depth` callable, no live LLM calls. Async tests use anyio. Run `uv run pytest` ensure pass; ruff/pyrefly clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T011",
+        "T012"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/tests/test_subagent_depth.py"]
+      "outputs": [
+        "recursive_language_model/tests/test_subagent_depth.py"
+      ]
     },
     {
       "id": "T018",
       "type": "python_test",
       "agent": "python-test-runner",
       "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_model_routing.py per shared/designs.md section 2.3: stub `_run_child_async` to record `self._model_for_depth` results at depth 1 and depth 2 by constructing nested SubagentRunner instances directly (no LLM calls), and assert depth 0 -> root_model, depth >= 1 -> sub_model, across at least 2 levels of recursion (i.e. grandchild SubagentRunner receives the SAME `model_for_depth` callable, propagated unchanged). Also unit-test `default_model_for_depth(root, sub)` directly: depth==0 returns root, depth>=1 returns sub, for several depth values. Async tests use anyio where needed. Run `uv run pytest` ensure pass; ruff/pyrefly clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
-      "depends_on": ["T011"],
+      "depends_on": [
+        "T011"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/tests/test_model_routing.py"]
+      "outputs": [
+        "recursive_language_model/tests/test_model_routing.py"
+      ]
     },
     {
       "id": "T019",
       "type": "python_test",
       "agent": "python-test-runner",
-      "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_structured_results.py per shared/designs.md section 3.3: stub a child loop's `run_turn` to return `(str(value), value, history)` for `value = {\"score\": 0.9, \"items\": [1, 2, 3]}` (a dict) AND for a small `@dataclass` instance. Assert that `llm_query(...)`/`_run_child_async` in the parent namespace receives the SAME object (`is` identity check for the dict case, proving no serialization/copy) with correct `type()`. Also test: when `run_turn` returns `final_value=None` (FINAL never called), the fallback to `_display` (a string) is used (and document/assert the known FINAL(None) limitation per designs.md section 7 — a literal `FINAL(None)` is indistinguishable from 'FINAL not called'). Also test that passing a raw `str` as `context=` to `llm_query` raises `TypeError` with a message referencing `sub_context`/`from_string`. Async tests use anyio. Run `uv run pytest` ensure pass; ruff/pyrefly clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
-      "depends_on": ["T012"],
+      "description": "Write D:/GitHub/agent-foundry/recursive_language_model/tests/test_structured_results.py per shared/designs.md section 3.3: stub a child loop's `run_turn` to return `(str(value), value, history)` for `value = {\"score\": 0.9, \"items\": [1, 2, 3]}` (a dict) AND for a small `@dataclass` instance. Assert that `llm_query(...)`/`_run_child_async` in the parent namespace receives the SAME object (`is` identity check for the dict case, proving no serialization/copy) with correct `type()`. Also test: when `run_turn` returns `final_value=None` (FINAL never called), the fallback to `_display` (a string) is used (and document/assert the known FINAL(None) limitation per designs.md section 7 \u00e2\u20ac\u201d a literal `FINAL(None)` is indistinguishable from 'FINAL not called'). Also test that passing a raw `str` as `context=` to `llm_query` raises `TypeError` with a message referencing `sub_context`/`from_string`. Async tests use anyio. Run `uv run pytest` ensure pass; ruff/pyrefly clean. Append implementation-notes.md entry. Commit locally with conventional commit message.",
+      "depends_on": [
+        "T012"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/tests/test_structured_results.py"]
+      "outputs": [
+        "recursive_language_model/tests/test_structured_results.py"
+      ]
     },
     {
       "id": "T020",
       "type": "backend_reviewer",
       "agent": "backend-code-reviewer",
       "description": "Review the GAP 1 implementation (ContextStore.sub_context/from_slice/clone in src/rlm/context.py, PythonSandbox.set_context_store in src/rlm/sandbox.py) and its tests (tests/test_context_store.py, tests/test_recursion_context_by_reference.py). Verify: the 'parent unchanged, child has different .path' invariant holds in all code paths (including context=None -> empty store -> clone); line-range vs char-range validation (ValueError on both/neither); streaming implementation doesn't load full parent file into memory for char-range slices; child workspace nesting scheme is sound for cleanup. Check type hints, ruff compliance (line 88), pyrefly cleanliness. Run `uv run pytest tests/test_context_store.py tests/test_recursion_context_by_reference.py -v` and report results. Write findings to D:/GitHub/agent-foundry/recursive_language_model/shared/reviews/T020_review.md.",
-      "depends_on": ["T010", "T015", "T016"],
+      "depends_on": [
+        "T010",
+        "T015",
+        "T016"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/shared/reviews/T020_review.md"]
+      "outputs": [
+        "recursive_language_model/shared/reviews/T020_review.md"
+      ]
     },
     {
       "id": "T021",
       "type": "backend_reviewer",
       "agent": "backend-code-reviewer",
       "description": "Review the GAP 2 + GAP 3 implementations (model_for_depth routing in src/rlm/subagents.py + src/rlm/main.py; structured results / ContextStore-only context param in src/rlm/loop.py, src/rlm/subagents.py, src/rlm/sandbox.py, src/rlm/main.py) and their tests (tests/test_subagent_depth.py, tests/test_model_routing.py, tests/test_structured_results.py). Verify: model_for_depth propagation to grandchildren reuses the same callable instance; depth guard / timeout / turn-limit constants preserved verbatim from codeact_agent; run_turn's new (display_text, final_value, history) tuple is consumed correctly everywhere (main.py uses only display_text); object identity preserved through llm_query for structured values (no accidental str()/copy); TypeError raised for str context args; FINAL(None) limitation documented. Check type hints, ruff compliance (line 88), pyrefly cleanliness. Run `uv run pytest tests/test_subagent_depth.py tests/test_model_routing.py tests/test_structured_results.py -v` and report results. Write findings to D:/GitHub/agent-foundry/recursive_language_model/shared/reviews/T021_review.md.",
-      "depends_on": ["T011", "T012", "T017", "T018", "T019"],
+      "depends_on": [
+        "T011",
+        "T012",
+        "T017",
+        "T018",
+        "T019"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/shared/reviews/T021_review.md"]
+      "outputs": [
+        "recursive_language_model/shared/reviews/T021_review.md"
+      ]
     },
     {
       "id": "T022",
       "type": "backend_reviewer",
       "agent": "backend-code-reviewer",
       "description": "Review the eval suite (evals/datasets.py, evals/baseline.py, evals/run_eval.py). Verify: all 4 benchmark generators are seeded/deterministic with default seed=42; BaselineAgent correctly avoids llm_query/recursion and relies on existing truncation; run_eval.py's default mode is offline/CI-safe (stub model, no API key needed) and --live is gated by RLM_LIVE_EVAL=1; output JSON schema matches {\"benchmark\", \"approach\", \"score\", \"n_items\", \"config\", \"seed\"}; eval output/README clearly labeled 'inspired by [paper], not reproducing exact datasets/splits' with RLM-vs-baseline relative deltas only. Check type hints, ruff compliance (line 88), pyrefly cleanliness. If feasible, run a quick offline `uv run python -m rlm.evals.run_eval --benchmark sniah` smoke test and report results. Write findings to D:/GitHub/agent-foundry/recursive_language_model/shared/reviews/T022_review.md.",
-      "depends_on": ["T013", "T014"],
+      "depends_on": [
+        "T013",
+        "T014"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/shared/reviews/T022_review.md"]
+      "outputs": [
+        "recursive_language_model/shared/reviews/T022_review.md"
+      ]
     },
     {
       "id": "T023",
       "type": "documentation",
       "agent": "docs-writer",
       "description": "Write D:/GitHub/agent-foundry/recursive_language_model/README.md (replacing the scaffold stub) and any supporting docs covering: project overview (RLM, context-by-reference recursion); installation/setup via uv (uv sync, .env configuration including RLM_ROOT_MODEL/RLM_SUB_MODEL); CLI usage (/load, /reset, --root-model/--sub-model flags, RLM_ROOT_MODEL/RLM_SUB_MODEL env vars); explanation of the context-by-reference invariant (ContextStore, sub_context/from_slice/clone, set_context_store) with the data-flow diagram adapted from shared/designs.md section 1.1; explanation of root/sub model routing (model_for_depth) and structured results (llm_query returning objects); how to run tests (`uv run pytest`); how to run the eval suite (`uv run python -m rlm.evals.run_eval --benchmark <name> [--live]`), with the required 'inspired by [paper], not reproducing exact datasets/splits' framing and RLM-vs-baseline relative-delta reporting. Reference shared/prd.md and shared/designs.md as source documents. Summarize shared/implementation-notes.md highlights (key deviations/tradeoffs) in a 'Design Notes' section. Commit locally with conventional commit message.",
-      "depends_on": ["T009", "T014", "T020", "T021", "T022"],
+      "depends_on": [
+        "T009",
+        "T014",
+        "T020",
+        "T021",
+        "T022"
+      ],
       "status": "pending",
-      "outputs": ["recursive_language_model/README.md"]
+      "outputs": [
+        "recursive_language_model/README.md"
+      ]
     }
   ]
 }

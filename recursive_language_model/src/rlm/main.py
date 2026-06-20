@@ -22,11 +22,11 @@ from rlm.languages.default import build_default_registry
 from rlm.loop import AgentLoop
 from rlm.prompts import BANNER, SLASH_COMMANDS
 from rlm.sandbox import PythonSandbox
-from rlm.subagents import SubagentRunner
+from rlm.subagents import SubagentRunner, default_model_for_depth
 
 # Load .env at import time so Click's envvar resolution picks up
-# OPENROUTER_API_KEY, OPENAI_API_BASE, and RLM_MODEL from the
-# .env file before it parses CLI options.
+# OPENROUTER_API_KEY, OPENAI_API_BASE, RLM_ROOT_MODEL, and RLM_SUB_MODEL
+# from the .env file before it parses CLI options.
 load_dotenv()
 
 console = Console()
@@ -312,7 +312,8 @@ async def _run_turn(
 
 
 def _repl(
-    model: str,
+    root_model: str,
+    sub_model: str,
     api_key: str,
     base_url: str,
     logger: logging.Logger,
@@ -320,21 +321,24 @@ def _repl(
     """Run the interactive REPL loop.
 
     Args:
-        model: The model identifier.
+        root_model: Model identifier for the root agent (depth 0).
+        sub_model: Model identifier for recursive children (depth >= 1).
         api_key: The API key for the LLM provider.
         base_url: The base URL for the OpenAI-compatible API.
         logger: Logger instance for flow visibility.
     """
-    _print_banner(model, base_url)
+    _print_banner(f"{root_model} (sub: {sub_model})", base_url)
 
-    agent = RLMAgent(model=model, api_key=api_key, base_url=base_url)
+    # Root agent runs at depth 0.
+    model_for_depth = default_model_for_depth(root_model, sub_model)
+    agent = RLMAgent(model=model_for_depth(0), api_key=api_key, base_url=base_url)
 
     # Wire a SubagentRunner so llm_query / llm_query_many work in agent code.
     def _progress_note(depth: int, preview: str) -> None:
         console.print(f"  [dim]↳ subagent (depth {depth}): {preview}…[/dim]")
 
     child_runner = SubagentRunner(
-        model=model,
+        model_for_depth=model_for_depth,
         api_key=api_key,
         base_url=base_url,
         depth=0,
@@ -354,7 +358,7 @@ def _repl(
         try:
             user_input = console.input("[bold cyan]rlm> [/bold cyan]")
         except (EOFError, KeyboardInterrupt):
-            _print_session_summary(turn_count, model)
+            _print_session_summary(turn_count, root_model)
             break
 
         user_input = user_input.strip()
@@ -364,7 +368,7 @@ def _repl(
         if user_input.startswith("/") or user_input == "exit":
             cmd = user_input.lstrip("/").strip()
             if cmd in ("exit", "quit"):
-                _print_session_summary(turn_count, model)
+                _print_session_summary(turn_count, root_model)
                 break
             if cmd == "help":
                 _print_help()
@@ -378,7 +382,7 @@ def _repl(
                 console.print("[yellow]Session reset.[/yellow]")
                 continue
             if cmd == "history":
-                _print_history(turn_count, model)
+                _print_history(turn_count, root_model)
                 continue
             if cmd.startswith("load ") or cmd == "load":
                 parts = cmd.split(None, 1)
@@ -398,7 +402,7 @@ def _repl(
 
         try:
             response, history, turns = anyio.run(
-                _run_turn, agent_loop, history, model, logger, user_input
+                _run_turn, agent_loop, history, root_model, logger, user_input
             )
             turn_count += turns if turns > 0 else 1
             logger.info(
@@ -420,10 +424,17 @@ def _repl(
 
 @click.command()
 @click.option(
-    "--model",
-    envvar="RLM_MODEL",
+    "--root-model",
+    envvar="RLM_ROOT_MODEL",
     default="openrouter/anthropic/claude-sonnet-4",
-    help="Model identifier.",
+    help="Model identifier for the root agent (depth 0).",
+    show_default=True,
+)
+@click.option(
+    "--sub-model",
+    envvar="RLM_SUB_MODEL",
+    default="openrouter/anthropic/claude-3.5-haiku",
+    help="Model identifier for recursive children (depth >= 1).",
     show_default=True,
 )
 @click.option(
@@ -449,7 +460,8 @@ def _repl(
     show_default=True,
 )
 def main(
-    model: str,
+    root_model: str,
+    sub_model: str,
     api_key: str | None,
     base_url: str,
     log_level: str,
@@ -478,10 +490,17 @@ def main(
     os.environ.setdefault("OPENAI_API_KEY", api_key)
 
     logger.debug(
-        f"Starting session — model={model}, base_url={base_url}, log_level={log_level}"
+        f"Starting session — root_model={root_model}, sub_model={sub_model}, "
+        f"base_url={base_url}, log_level={log_level}"
     )
 
-    _repl(model=model, api_key=api_key, base_url=base_url, logger=logger)
+    _repl(
+        root_model=root_model,
+        sub_model=sub_model,
+        api_key=api_key,
+        base_url=base_url,
+        logger=logger,
+    )
 
 
 if __name__ == "__main__":

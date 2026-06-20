@@ -183,6 +183,22 @@ class PythonSandbox:
         """
         self._context_locked = True
 
+    def set_context_store(self, store: ContextStore, *, lock: bool = True) -> None:
+        """Bind an existing ``ContextStore`` directly as ``context``.
+
+        Used by ``SubagentRunner`` to inject a child's context-by-reference
+        store (a clone of a parent slice).  Unlike :meth:`set_context`, this
+        bypasses string/path construction and binds the given object as-is.
+
+        Args:
+            store: The ContextStore to expose as the ``context`` variable.
+            lock: When ``True`` (default), set ``_context_locked`` so the
+                loop's automatic per-turn ``set_context`` calls do not
+                overwrite the injected child context.
+        """
+        self._namespace["context"] = store
+        self._context_locked = lock
+
     async def execute(
         self,
         code: str,

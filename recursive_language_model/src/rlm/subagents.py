@@ -48,6 +48,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("rlm.subagents")
 
+# A callable mapping a recursion depth to the model identifier to use at that
+# depth.  Depth 0 is the root agent; depth >= 1 are recursive children.
+ModelForDepth = Callable[[int], str]
+
+
+def default_model_for_depth(root_model: str, sub_model: str) -> ModelForDepth:
+    """Return a ``ModelForDepth`` using *root_model* at depth 0 and *sub_model*
+    at every deeper level.
+
+    This implements the paper's root/sub model split: a stronger (more
+    expensive) model orchestrates at the root while cheaper models handle the
+    recursive sub-queries.
+
+    Args:
+        root_model: Model identifier for the root agent (depth 0).
+        sub_model: Model identifier for all recursive children (depth >= 1).
+
+    Returns:
+        A callable ``(depth: int) -> str``.
+    """
+
+    def _model_for_depth(depth: int) -> str:
+        return root_model if depth == 0 else sub_model
+
+    return _model_for_depth
+
+
 # Maximum permitted recursion depth for subagents.
 _DEFAULT_MAX_DEPTH: int = 3
 
@@ -71,8 +98,11 @@ class SubagentRunner:
 
     Parameters
     ----------
-    model:
-        Model identifier forwarded to child ``RLMAgent`` instances.
+    model_for_depth:
+        Callable mapping a recursion depth to the model identifier used at
+        that depth.  Depth 0 is the root; depth >= 1 are children.  The same
+        callable is reused (propagated) at every level so grandchildren route
+        consistently.
     api_key:
         API key forwarded to child agents.
     base_url:
@@ -92,7 +122,7 @@ class SubagentRunner:
 
     def __init__(
         self,
-        model: str,
+        model_for_depth: ModelForDepth,
         api_key: str,
         base_url: str,
         depth: int = 0,
@@ -103,7 +133,7 @@ class SubagentRunner:
         """Initialise the runner.
 
         Args:
-            model: LLM model identifier.
+            model_for_depth: Callable ``(depth) -> model identifier``.
             api_key: API key for the provider.
             base_url: Base URL for the OpenAI-compatible API.
             depth: Current recursion depth (0 = root).
@@ -111,7 +141,7 @@ class SubagentRunner:
             child_max_turns: Max self-debug iterations per child turn.
             progress_fn: Optional UI progress callback.
         """
-        self._model = model
+        self._model_for_depth = model_for_depth
         self._api_key = api_key
         self._base_url = base_url
         self._depth = depth
@@ -259,19 +289,24 @@ class SubagentRunner:
         from rlm.loop import AgentLoop
         from rlm.sandbox import PythonSandbox
 
+        # Resolve the child's model from its depth (root=0, children>=1).
+        child_depth = self._depth + 1
+        child_model = self._model_for_depth(child_depth)
+
         # Build a fresh child runtime.
         child_agent = RLMAgent(
-            model=self._model,
+            model=child_model,
             api_key=self._api_key,
             base_url=self._base_url,
         )
 
-        # Child runner propagates depth + 1 so grandchildren are capped.
+        # Child runner propagates depth + 1 so grandchildren are capped, and
+        # reuses the SAME model_for_depth callable so routing stays consistent.
         child_runner = SubagentRunner(
-            model=self._model,
+            model_for_depth=self._model_for_depth,
             api_key=self._api_key,
             base_url=self._base_url,
-            depth=self._depth + 1,
+            depth=child_depth,
             max_depth=self._max_depth,
             child_max_turns=self._child_max_turns,
             progress_fn=self._progress_fn,

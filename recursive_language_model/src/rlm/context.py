@@ -39,6 +39,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import overload
+from uuid import uuid4
 
 # Threshold below which str(context) returns the full text (backward compat).
 _SHORT_TEXT_THRESHOLD: int = 10_000
@@ -133,6 +134,173 @@ class ContextStore:
         store._char_count = char_count
         store._line_count = line_count
         return store
+
+    @classmethod
+    def from_slice(
+        cls,
+        source: ContextStore,
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        start_char: int | None = None,
+        end_char: int | None = None,
+        workspace: Path | None = None,
+    ) -> ContextStore:
+        """Create a ContextStore over a slice of *source*.
+
+        Convenience classmethod alias for ``source.sub_context(...)`` so
+        ``ContextStore.from_slice(context, start_line=a, end_line=b)`` reads
+        symmetrically with ``from_string`` / ``from_path``.
+
+        Args:
+            source: The store to slice.
+            start_line: 1-indexed inclusive start line (line-range mode).
+            end_line: 1-indexed inclusive end line (line-range mode).
+            start_char: 0-indexed start char (char-range mode).
+            end_char: 0-indexed end char, exclusive (char-range mode).
+            workspace: Optional workspace for the new slice store.
+
+        Returns:
+            A new ContextStore over the requested slice.
+        """
+        return source.sub_context(
+            start_line=start_line,
+            end_line=end_line,
+            start_char=start_char,
+            end_char=end_char,
+            workspace=workspace,
+        )
+
+    # ------------------------------------------------------------------
+    # Context-by-reference: slicing and cloning (RLM additions)
+    # ------------------------------------------------------------------
+
+    def _child_workspace(self, workspace: Path | None) -> Path:
+        """Return a fresh child-workspace dir nested under this store.
+
+        Child workspaces live under ``<workspace>/children/<uuid4>/`` so
+        cleaning a parent workspace also removes descendants, while each
+        child's ``context.path`` stays independent of the parent's.
+
+        Args:
+            workspace: Explicit workspace, or ``None`` to derive a fresh one.
+
+        Returns:
+            The child workspace directory (created).
+        """
+        if workspace is not None:
+            ws = workspace
+        else:
+            ws = self._workspace / "children" / uuid4().hex
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
+
+    def sub_context(
+        self,
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+        start_char: int | None = None,
+        end_char: int | None = None,
+        workspace: Path | None = None,
+    ) -> ContextStore:
+        """Return a NEW ContextStore over a slice of this context.
+
+        Exactly one range kind must be supplied: line-range
+        (``start_line`` / ``end_line``, 1-indexed inclusive, consistent with
+        ``lines()``) XOR char-range (``start_char`` / ``end_char``, 0-indexed
+        end-exclusive, consistent with ``__getitem__``).  The slice is
+        streamed from this store's backing file into a new file in a fresh
+        child workspace; the parent file is never mutated and never fully
+        loaded into memory.
+
+        Args:
+            start_line: 1-indexed inclusive start line.
+            end_line: 1-indexed inclusive end line.
+            start_char: 0-indexed start char.
+            end_char: 0-indexed end char, exclusive.
+            workspace: Optional explicit workspace for the new store.
+
+        Returns:
+            A new ContextStore over the requested slice, with its own path.
+
+        Raises:
+            RuntimeError: If no context has been loaded.
+            ValueError: If both/neither range kinds are given, or a range is
+                invalid.
+        """
+        if self._path is None:
+            raise RuntimeError(
+                "No context loaded.  Call set_context() first or use /load."
+            )
+
+        line_given = start_line is not None or end_line is not None
+        char_given = start_char is not None or end_char is not None
+        if line_given and char_given:
+            raise ValueError(
+                "sub_context: provide either a line range (start_line/end_line) "
+                "or a char range (start_char/end_char), not both."
+            )
+        if not line_given and not char_given:
+            raise ValueError(
+                "sub_context: provide a line range (start_line/end_line) or a "
+                "char range (start_char/end_char)."
+            )
+
+        if line_given:
+            s_line = 1 if start_line is None else start_line
+            e_line = self._line_count if end_line is None else end_line
+            if s_line < 1:
+                raise ValueError(f"start_line must be >= 1, got {s_line}.")
+            if e_line < s_line:
+                raise ValueError(
+                    f"end_line ({e_line}) must be >= start_line ({s_line})."
+                )
+            slice_text = self.lines(s_line, e_line)
+        else:
+            s_char = 0 if start_char is None else start_char
+            e_char = self._char_count if end_char is None else end_char
+            if s_char < 0 or e_char < 0:
+                raise ValueError("char range indices must be non-negative.")
+            if e_char < s_char:
+                raise ValueError(
+                    f"end_char ({e_char}) must be >= start_char ({s_char})."
+                )
+            slice_text = self._read_chars(s_char, e_char)
+
+        child_ws = self._child_workspace(workspace)
+        return ContextStore.from_string(slice_text, workspace=child_ws)
+
+    def clone(self, *, workspace: Path | None = None) -> ContextStore:
+        """Return a NEW ContextStore that is a full copy of this store.
+
+        The backing file is copied into a fresh child workspace so the new
+        store's ``.path`` always differs from this store's (even for an empty
+        store).  Char/line counts and the short-text cache are copied as-is
+        (content is identical, so nothing is recomputed).
+
+        This is the primitive ``SubagentRunner`` always applies before binding
+        a context into a child, guaranteeing the child never shares a backing
+        file with the parent or any ancestor.
+
+        Args:
+            workspace: Optional explicit workspace for the clone.
+
+        Returns:
+            A new, independent ContextStore with identical content.
+        """
+        child_ws = self._child_workspace(workspace)
+        if self._path is None:
+            # Empty store: still materialise a real, independent file.
+            return ContextStore.from_string("", workspace=child_ws)
+        clone = ContextStore(child_ws)
+        dest = child_ws / "context.txt"
+        shutil.copy2(self._path, dest)
+        clone._path = dest
+        clone._char_count = self._char_count
+        clone._line_count = self._line_count
+        clone._text = self._text
+        return clone
 
     # ------------------------------------------------------------------
     # Core properties

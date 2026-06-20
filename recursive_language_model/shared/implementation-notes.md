@@ -236,3 +236,56 @@
 - `main()` callable name/signature preserved to match the `rlm = "rlm.main:main"` entry point in pyproject.toml.
 - `_display_code` helper is carried over unused from the source (same as in the original codeact file); left in place as a faithful copy rather than removing it. ruff does not flag it (module-level def).
 - Verification: `uv run ruff format src/rlm/main.py` (unchanged), `uv run ruff check src/rlm/main.py` (passed), `uv run pyrefly check src/rlm/` (0 errors), `uv run python -c "import rlm.main"` (OK).
+
+## T010 — GAP 1 context-by-reference (implemented by lead)
+
+- Added `ContextStore.sub_context`, `from_slice` (classmethod alias), and
+  `clone` to `src/rlm/context.py`; added `PythonSandbox.set_context_store` to
+  `src/rlm/sandbox.py`.
+- **Slice construction via `from_string`, not `from_path`**: building the new
+  slice store with `from_string(slice_text, workspace=child_ws)` avoids a
+  `shutil.SameFileError` trap (both source and dest would be `context.txt`)
+  and reuses the already-tested streaming read helpers (`lines`,
+  `_read_chars`). The full parent file is never loaded into memory.
+- **Line-range cost tradeoff** (per designs.md §7): line-range slicing streams
+  via `self.lines(start, end)`, an O(end_line) read of the parent file. This is
+  acceptable since slices are expected small/early; a future line-offset index
+  could optimise very large `end_line`.
+- **Child workspace nesting**: new stores live under
+  `<parent_workspace>/children/<uuid4>/context.txt`, so a parent-workspace
+  cleanup removes descendants while each child `.path` stays independent.
+- **`clone` copies `_text` and counts as-is** (content is identical), so a
+  cloned short-string store still returns full text from `str(context)`.
+  `clone` of an empty store (`_path is None`) materialises an empty
+  `context.txt` so `context.path`/`search` never crash.
+- **Lock interaction**: `set_context_store(store, lock=True)` binds the store
+  directly and sets `_context_locked`, so the loop's per-turn `set_context`
+  becomes a no-op for an injected child context (same flag `/load` uses).
+
+## T011 — GAP 2 model routing (implemented by lead)
+
+- Added `ModelForDepth = Callable[[int], str]` and `default_model_for_depth`
+  directly in `src/rlm/subagents.py` (no separate `models.py`).
+- `SubagentRunner.__init__` now takes `model_for_depth` (replacing `model`);
+  `_run_child_async` resolves the child model via
+  `self._model_for_depth(self._depth + 1)` and constructs the grandchild
+  runner with the SAME callable (propagation by reuse).
+- `src/rlm/main.py`: replaced `--model`/`RLM_MODEL` with `--root-model`
+  (`RLM_ROOT_MODEL`, default `openrouter/anthropic/claude-sonnet-4`) and
+  `--sub-model` (`RLM_SUB_MODEL`, default `openrouter/anthropic/claude-3.5-haiku`);
+  root agent built with `model_for_depth(0)`; root runner gets `model_for_depth`.
+
+## T013 — GAP 4a eval datasets (implemented by lead)
+
+- `evals/datasets.py`: four deterministic generators (`generate_sniah`,
+  `generate_browsecomp`, `generate_oolong_classification`,
+  `generate_oolong_pairs`) using a local `random.Random(seed)` (default 42),
+  returning frozen dataclasses. Pure data, no LLM/agent imports, no side
+  effects. Labeled "inspired by, not reproducing" the paper benchmarks.
+
+### Process note (Batch A)
+T010, T011, T013 were dispatched as subagents but those agents hit
+session-wide Edit/Write/Bash permission denials and could not write. The lead
+agent implemented all three directly from the agents' validated plans. ruff +
+pyrefly clean; functional self-checks pass (slice/clone path-independence and
+parent-unchanged invariant, ROOT/SUB/SUB routing, generator determinism).
