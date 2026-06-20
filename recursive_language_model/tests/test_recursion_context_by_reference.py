@@ -75,6 +75,25 @@ def test_llm_query_wiring_gives_child_its_own_contextstore() -> None:
     assert parent[:].startswith("row-1")
 
 
+def test_set_context_store_lock_protects_child_context() -> None:
+    """The lock is the mechanism that keeps a child's by-reference slice alive.
+
+    This exercises the real path (no stub): after ``set_context_store(lock=True)``
+    a subsequent ``set_context`` -- exactly what ``AgentLoop.run_turn`` calls
+    each turn with the prompt -- must be a no-op, so the injected ContextStore
+    survives.
+    """
+    sandbox = PythonSandbox()
+    store = ContextStore.from_string("CORPUS-BY-REFERENCE")
+    sandbox.set_context_store(store, lock=True)
+
+    # Simulates run_turn seeding the prompt as context on the next turn.
+    sandbox.set_context("a different prompt string")
+
+    assert sandbox.namespace["context"] is store
+    assert sandbox.namespace["context"][:] == "CORPUS-BY-REFERENCE"
+
+
 def test_run_turn_returns_three_tuple() -> None:
     """A trivial loop run returns (display_text, final_value, history)."""
     from rlm.loop import AgentLoop
