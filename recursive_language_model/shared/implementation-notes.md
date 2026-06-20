@@ -328,3 +328,21 @@ parent-unchanged invariant, ROOT/SUB/SUB routing, generator determinism).
   `uv run pyrefly check --search-path . evals/` is the way to type-check it
   cleanly under pyrefly's basic preset (no `[tool.pyrefly]` config added, to
   keep the whole project on the same lenient preset as earlier waves).
+
+## T015–T019 — Deterministic test suite (implemented by lead)
+
+- `test_context_store.py`: sub_context (line/char), from_slice, clone (incl.
+  empty store), all ValueError/RuntimeError validation paths, parent-unchanged.
+- `test_recursion_context_by_reference.py`: the by-reference invariant (slice
+  has its own path, parent byte-for-byte unchanged); llm_query wiring binds a
+  cloned ContextStore (different path) into the child sandbox; run_turn returns
+  the (display_text, final_value, history) 3-tuple.
+- `test_subagent_depth.py`: SubagentDepthError at max_depth (run_child and
+  run_children_parallel), boundary behavior, preserved constants (3/8/300).
+- `test_model_routing.py`: default_model_for_depth (0->root, >=1->sub), same
+  callable propagated to grandchildren (identity check, no re-derivation).
+- `test_structured_results.py`: dict/dataclass results preserved by identity
+  (no str()), parallel order preserved, TypeError on str context (both
+  llm_query and llm_query_many), FINAL(None) display-text fallback.
+- All async exercised via anyio; no live LLM. **30 passed**, ruff + pyrefly
+  (basic preset) clean.

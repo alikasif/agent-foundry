@@ -220,7 +220,7 @@
       "depends_on": [
         "T010"
       ],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/tests/test_context_store.py"
       ]
@@ -234,7 +234,7 @@
         "T010",
         "T012"
       ],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/tests/test_recursion_context_by_reference.py"
       ]
@@ -248,7 +248,7 @@
         "T011",
         "T012"
       ],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/tests/test_subagent_depth.py"
       ]
@@ -261,7 +261,7 @@
       "depends_on": [
         "T011"
       ],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/tests/test_model_routing.py"
       ]
@@ -274,7 +274,7 @@
       "depends_on": [
         "T012"
       ],
-      "status": "pending",
+      "status": "done",
       "outputs": [
         "recursive_language_model/tests/test_structured_results.py"
       ]
