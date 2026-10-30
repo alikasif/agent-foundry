@@ -78,3 +78,75 @@
   (all acceptance criteria incl. frozen dataclass, repr/safe_summary key exclusion,
   recursion limit 100/480/1600, shlex parsing, every ConfigError path, and `make_model`
   attributes). `uv run pytest` still exits 5 (no tests collected yet).
+
+### T003 — models.py
+
+- **Who sorts:** `ReadingList` never sorts. `store.assemble_reading_list` (T004) must build
+  `items` in final display order (priority, `order`, `mentioned_in` desc, `first_seen`;
+  unranked: `mentioned_in` desc, `first_seen`), because `ReadingItem` carries neither
+  `order` nor `first_seen`. `must_read()` and `by_topic()` preserve list order.
+- **D8:** `must_read()` returns `[]` when `ranked` is False. `by_topic()` drops
+  must-read items only when `ranked` is True; in the unranked fallback every item
+  appears in its topic section. Topic sections follow `Topic` declaration order;
+  empty topics are omitted.
+- **`Topic` is a `StrEnum`** (not literally `class Topic(str, Enum)`): it is a subclass of
+  both `str` and `Enum`, so the contract holds, and `str(topic)` returns the value, which
+  is safer in templates and f-strings. Requires Python 3.11 (project floor).
+- **`coerce_topic` matching:** the key is casefolded, `&` becomes `and`, and punctuation or
+  `_` becomes a space, so `"RAG / Retrieval"`, `"rag-retrieval"`, `"DATA_ENG"` (enum name)
+  and `"tools and libraries"` all match. The lookup holds the enum values, the enum names
+  and `TOPIC_ALIASES`: llm/llms/large language models/language models/genai/generative ai
+  -> LLMs; agent/agentic/ai agents -> Agents; rag/retrieval/search/embeddings/vector
+  databases -> RAG/Retrieval; data/data eng/data engineering/data pipelines/databases/
+  analytics -> Data Engineering; mlops/ml ops/infra/infrastructure/ml infra/ml
+  infrastructure -> MLOps/Infra; research/paper/papers/research paper/arxiv -> Research
+  Papers; industry/funding/business/startups/news -> Industry/Funding; tools/tool/
+  libraries/library/frameworks/open source -> Tools & Libraries; misc/miscellaneous ->
+  Other. Anything else, `None` or `""` gives `Topic.OTHER`. Exact-key lookup only, no
+  substring or fuzzy matching (keeps it predictable). `coerce_topic` accepts a `Topic` and
+  returns it unchanged.
+- **Truncation rule (one helper, `_truncate`):** the whitespace is collapsed first
+  (newlines and runs become one space). If the text is still over the limit, it is cut
+  to `limit - 1` chars at the last space, as long as that keeps at least half the budget
+  (otherwise mid-word, e.g. one huge token). Then trailing ` ,;:` are trimmed and `…`
+  (U+2026) is appended, so the result is always `<= limit`. Used for title (300), summary
+  (300), reason (200) and newsletter (120). The spec says "word boundary" only for the
+  summary; the title and the reason use the same rule for consistency.
+- **Truncate vs reject (deviation for `EmailSource`):** the spec gives `newsletter` 1..120
+  and `date` <=64 without saying what to do when they are too long. Over-long values are
+  truncated (newsletter with `…`, date with a hard cut at 64), not rejected, because a
+  rejected `EmailSource` would reject the whole `record_articles` call. Empty values are
+  still rejected: blank `newsletter`, `email_id`, `title`, `reason` and `article_id` raise
+  a `ValidationError`.
+- **URL validation (`ArticleIn.url`):** the value is stripped. It needs a `urlsplit`
+  scheme in {http, https} (case-insensitive) and a non-empty `hostname`, else
+  `ValueError` ("only absolute http(s) URLs with a host are allowed"). This rejects
+  `javascript:`, `data:`, `mailto:`, relative, protocol-relative `//x`, `http://`,
+  `https:///x`, `ftp:` and malformed IPv6 (`http://[::1`). Python 3.11+ `urlsplit` strips
+  `\t\r\n`, so `java\tscript:` is still rejected. **Addition:** URLs longer than 2048
+  chars are rejected. The URL is otherwise stored as given (no normalisation);
+  `store.normalize_url` does that.
+- **LLM-tolerance additions:** `ArticleIn.summary=None` becomes `""`. A blank
+  `topic_hint` becomes `None`. `RankedItem.priority` is normalised (casefold, runs of
+  spaces/underscores become `-`), so `"Must Read"`/`"must_read"` -> `"must-read"`. Unknown
+  values (`"high"`) are still rejected by the `Literal`. `order` accepts numeric strings
+  (pydantic lax mode) and must be >= 0. Extra keys in payloads are ignored (pydantic
+  default).
+- **`ReadingItem.read_key`** is a `@computed_field` (`sha1(url or id)[:16]`), not a
+  stored field. The store cannot set it inconsistently, the template reads
+  `item.read_key` as before, and it is included in `model_dump()`.
+- **`StoredArticle.topic_hint`** and **`RankedItem.topic`** use a `mode="before"`
+  validator that calls `coerce_topic`. The store can pass the raw hint string.
+- **Result models:** list fields (`AddResult.rejected`, `RankResult.errors`,
+  `RankResult.unranked_remaining`) default to `[]`. The other fields are as in plan.md §5.
+- **Constants exported:** `ELLIPSIS`, `MAX_TITLE_CHARS`, `MAX_SUMMARY_CHARS`,
+  `MAX_REASON_CHARS`, `MAX_NEWSLETTER_CHARS`, `MAX_DATE_CHARS`, `MAX_URL_CHARS`,
+  `ALLOWED_URL_SCHEMES`, `TOPIC_ALIASES`.
+- **Verification:** the tests belong to T011. T003 was checked with a scratch probe that
+  covers: topic order, about 20 coerce_topic cases, 10 rejected URL forms, truncation
+  lengths and the ellipsis, empty title/reason/id rejection, unknown priority and negative
+  order rejection, unknown topic -> Other, `mentioned_in` casefold de-dupe,
+  `must_read`/`by_topic` ranked vs unranked, `read_key`, and an import scan (only
+  pydantic plus stdlib: re, hashlib, datetime, enum, typing, urllib.parse). `ruff format
+  --check .`, `ruff check .` and `pyrefly check` (0 errors) are clean. `pytest` exits 5
+  because no tests are collected yet.
