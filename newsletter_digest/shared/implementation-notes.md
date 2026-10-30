@@ -150,3 +150,80 @@
   pydantic plus stdlib: re, hashlib, datetime, enum, typing, urllib.parse). `ruff format
   --check .`, `ruff check .` and `pyrefly check` (0 errors) are clean. `pytest` exits 5
   because no tests are collected yet.
+
+### T010 — tests for config.py and llm.py
+
+- **Files:** `tests/test_config.py` (92 tests) and `tests/test_llm.py` (7 tests); 99 pass
+  offline. Coverage of `config.py` and `llm.py` is 100% (measured with
+  `uv run --with pytest-cov`, so pytest-cov was not added to pyproject).
+- **Env and `Settings.build`:** `build` takes explicit arguments and reads no env vars
+  (env resolution is the CLI's job). The env test sets `OPENROUTER_API_KEY` etc. with
+  monkeypatch and asserts `build` still uses only its arguments. CLI > env precedence
+  belongs in the cli tests.
+- **`make_model` without network:** the test checks `model_name`, `openai_api_base`,
+  `temperature`, `max_retries`, `request_timeout` and the `SecretStr` key value on the
+  constructed `ChatOpenAI`. An autouse fixture clears `OPENAI_API_KEY`/`OPENAI_API_BASE`/
+  `OPENAI_BASE_URL`/`OPENROUTER_API_KEY`, and one test sets wrong env values to show that
+  Settings wins.
+- **"No other module constructs a chat model"** is checked with a regex over
+  `src/newsletter_digest/*.py` (excluding `llm.py`) for `ChatOpenAI(`, `ChatAnthropic(`,
+  `ChatOpenRouter(` and `init_chat_model(`. **"config.py imports no LangChain"** is checked
+  by parsing the module's imports with AST.
+- **Tests added beyond the task list:** extra invalid windows (`3w`, `2m`, `1 w`, `1.5d`,
+  bare `1`, `d`, whitespace-only); words that look like date operators (`afterparty`,
+  `from:before@...`) must still get `newer_than` appended, because `\b...:` requires the
+  colon; the INFO log lines from D1; ConfigError messages never contain the key; the
+  log-level and MCP-args ConfigError paths; and recursion_limit values around the
+  100/104 boundary.
+- **Bugs found:** none. Every contract in plan.md/designs.md D1/D2/D10 holds.
+
+### T006 — render.py and template
+
+- **CSP / hash:** `SCRIPT_BODY` is a module-level static string; `SCRIPT_HASH =
+  base64(sha256(SCRIPT_BODY.encode("utf-8")))`. The template emits it as
+  `<script>{{ script_body | safe }}</script>` with nothing between the tags, so the hashed
+  bytes equal the emitted bytes (checked by extracting the script from rendered output and
+  re-hashing). CSP is exactly the designs.md string. Inline `on*=` handlers would be
+  blocked by the CSP even if escaping failed.
+- **The one `|safe`:** autoescape would turn the script's `"` into `&#34;` and break it,
+  so the static trusted script is marked safe in the template. `Markup` was not used
+  because jinja2 3.1 no longer re-exports it and importing `markupsafe` would break the
+  "render imports only jinja2 + stdlib + models" rule. No model/email data uses `|safe`.
+- **`safe_url`:** removes ASCII control chars (`\x00-\x1f`, `\x7f`) anywhere, strips,
+  `urlsplit`s (malformed -> `None`), and requires scheme http/https. **Stricter than spec:**
+  it requires a non-empty `hostname` (not just `netloc`), so `http://:80` / `http://@`
+  are rejected too. Returns the cleaned URL; Jinja escapes `&` and quotes inside `href`.
+- **`slug`:** lowercase alphanumeric runs joined by `-` (`RAG/Retrieval` ->
+  `rag-retrieval`, `Tools & Libraries` -> `tools-libraries`); no topic slug can collide
+  with `must-read`.
+- **Environment:** module-level `ENVIRONMENT` with `PackageLoader("newsletter_digest",
+  "templates")`, `autoescape=True`, `StrictUndefined`, plus `trim_blocks`/`lstrip_blocks`
+  for tidy output. Verified the template ships in the wheel
+  (`newsletter_digest/templates/reading_list.html.j2`) and loads from the extracted wheel.
+- **Template decisions / small additions:**
+  - Unranked-fallback note is shown only when `not ranked` **and** there are items (the
+    zero-email empty state is also unranked, and the note would be misleading there).
+  - Empty state: when `emails_found == 0` the designs.md text ("No newsletter emails
+    matched `<query>` in this window."); when emails were found but no articles were
+    extracted, "No articles were found in the N matching emails." The nav is omitted
+    when there are no items.
+  - Nav and section headings show item counts. The priority pill shows `must read` /
+    `worth reading` / `skim` (hyphen -> space); its class keeps the raw value.
+  - Sources and date are separate flex spans (gap instead of a literal `·`), so an
+    empty date leaves no dangling separator.
+  - Read styling also works without JS via `.item:has(.mark-read:checked)`; the script
+    adds `.is-read` and persistence under `localStorage["nd-read:" + read_key]`.
+  - Dates are rendered with `isoformat()`; `generated_at` as
+    `isoformat(sep=" ", timespec="minutes")` (keeps the UTC offset when aware).
+- **Note for T013 (no-external-resources check):** the page contains the literal
+  `http-equiv` (CSP meta, required by designs.md), so a bare `"http"` grep must exclude
+  it; `http://`/`https://` appear only in item `href`s. No `<link>`, `src=`, `url(`,
+  `@import` or `@font-face` occur.
+- **Verification:** scratch probe (not committed; tests belong to T013) covered 17 unsafe
+  URL forms, slugs for all topics, hostile title/summary/reason/newsletter/query escaping,
+  link only for the safe URL with `target="_blank" rel="noopener noreferrer"`, CSP hash ==
+  sha256 of the emitted script, http only in hrefs, Must read before topic sections in
+  `Topic` order, unranked note/no Must read, empty state, failed-emails note, and
+  `write_reading_list` (nested mkdir, `reading-list-2026-10-30.html`, same-day
+  overwrite). `ruff format --check .`, `ruff check .`, `pyrefly check` (0 errors, 0
+  warnings for render.py) and `pytest` (99 passed) are clean.
