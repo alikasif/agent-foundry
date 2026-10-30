@@ -22,3 +22,12 @@
 - (T006) Jinja autoescape escapes `"` inside a `<script>` body, which breaks JS and
   changes the CSP hash; the static script must be emitted with `|safe`. jinja2 3.1 no
   longer exports `Markup`.
+- (T010) `git commit -- <paths>` commits the WORKING-TREE content of those paths, not
+  the staged hunks. On shared files such as implementation-notes.md that pulls in other
+  agents' uncommitted sections (a737e72 swept in the T006 notes). For shared files, stage
+  only your own hunks (e.g. `git diff file > p; edit p; git apply --cached p`) and run a
+  plain `git commit` with no pathspec.
+- (T006) The shared notes files are appended by several agents at once; a
+  `git commit <path>` commits the whole working-tree file, so another agent's commit can
+  carry your section (T006's notes landed in the T010 commit a737e72). Harmless, but
+  check `git show --stat HEAD` before assuming your notes are still uncommitted.

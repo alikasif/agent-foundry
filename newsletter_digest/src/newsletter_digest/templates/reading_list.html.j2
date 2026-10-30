@@ -1,0 +1,220 @@
+{#- Newsletter reading list. Autoescape is on: every value below is HTML-escaped.
+    The only |safe is script_body, the static trusted script from render.py whose
+    sha256 hash is allowed by the CSP. Never use |safe on model/email-derived data. -#}
+{% macro render_item(item) %}
+<article class="item" data-key="{{ item.read_key }}">
+  <label class="check"><input type="checkbox" class="mark-read" aria-label="Mark read"></label>
+  <div class="body">
+    {% set href = item.url | safe_url %}
+    <h3 class="title">
+      {%- if href -%}
+      <a href="{{ href }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+      {%- else -%}
+      {{ item.title }}
+      {%- endif -%}
+    </h3>
+    {% if item.summary %}
+    <p class="summary">{{ item.summary }}</p>
+    {% endif %}
+    <p class="meta">
+      {%- if item.sources %}<span class="sources">{{ item.sources | join(", ") }}</span>{% endif %}
+      {%- if item.date %}<span class="date">{{ item.date }}</span>{% endif %}
+      {%- if item.mentioned_in > 1 %}<span class="badge">mentioned in {{ item.mentioned_in }}</span>{% endif %}
+      {%- if item.priority %}<span class="prio prio-{{ item.priority }}">{{ item.priority | replace("-", " ") }}</span>{% endif -%}
+    </p>
+    {% if item.reason %}
+    <p class="reason">Why: {{ item.reason }}</p>
+    {% endif %}
+  </div>
+</article>
+{% endmacro %}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-{{ script_hash }}'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Newsletter reading list — {{ meta.end_date.isoformat() }}</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f7f6f2;
+  --surface: #ffffff;
+  --text: #1d1d1b;
+  --muted: #5f5e58;
+  --border: #e2e0d8;
+  --accent: #1f5fbf;
+  --accent-visited: #6b3fa0;
+  --badge-bg: #e8eefa;
+  --badge-text: #1f4a8f;
+  --must-bg: #fbe9e4;
+  --must-text: #9a2f12;
+  --worth-bg: #e6f3ea;
+  --worth-text: #1e6b38;
+  --skim-bg: #efeee9;
+  --skim-text: #5f5e58;
+  --note-bg: #fff6dc;
+  --note-text: #6b5300;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --surface: #1f1f1d;
+    --text: #ecebe6;
+    --muted: #a5a39b;
+    --border: #34332f;
+    --accent: #8db4f2;
+    --accent-visited: #c3a4ec;
+    --badge-bg: #22314a;
+    --badge-text: #b9cff5;
+    --must-bg: #47231a;
+    --must-text: #f5b7a3;
+    --worth-bg: #1d3a27;
+    --worth-text: #a7dcb6;
+    --skim-bg: #2b2a27;
+    --skim-text: #b9b7ae;
+    --note-bg: #3a3218;
+    --note-text: #ecd58c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+.page { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+header h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 .5rem; }
+.stats { color: var(--muted); margin: 0 0 .25rem; }
+.stats strong { color: var(--text); font-weight: 600; }
+.note {
+  background: var(--note-bg);
+  color: var(--note-text);
+  border-radius: .5rem;
+  padding: .5rem .75rem;
+  margin: .75rem 0 0;
+  font-size: .925rem;
+}
+nav { margin: 1.25rem 0 0; padding: .75rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem .9rem; }
+nav a { color: var(--accent); text-decoration: none; font-size: .95rem; }
+nav a:hover, nav a:focus-visible { text-decoration: underline; }
+nav .count { color: var(--muted); }
+section { margin-top: 2rem; scroll-margin-top: 1rem; }
+section h2 { font-size: 1.2rem; margin: 0 0 .75rem; display: flex; align-items: baseline; gap: .5rem; }
+section h2 .count { color: var(--muted); font-size: .9rem; font-weight: 400; }
+#must-read h2 { color: var(--must-text); }
+.item {
+  display: flex;
+  gap: .75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: .6rem;
+  padding: .85rem 1rem;
+  margin: 0 0 .65rem;
+}
+.item .check { padding-top: .2rem; }
+.item .mark-read { width: 1.05rem; height: 1.05rem; margin: 0; cursor: pointer; accent-color: var(--accent); }
+.item .body { min-width: 0; flex: 1; }
+.item .title { font-size: 1.05rem; line-height: 1.35; margin: 0; overflow-wrap: anywhere; }
+.item .title a { color: var(--accent); text-decoration: none; }
+.item .title a:visited { color: var(--accent-visited); }
+.item .title a:hover, .item .title a:focus-visible { text-decoration: underline; }
+.item .summary { margin: .35rem 0 0; overflow-wrap: anywhere; }
+.item .meta {
+  margin: .45rem 0 0;
+  color: var(--muted);
+  font-size: .85rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .3rem .6rem;
+}
+.item .reason { margin: .4rem 0 0; color: var(--muted); font-size: .9rem; font-style: italic; }
+.badge, .prio { border-radius: 999px; padding: .05rem .5rem; font-size: .78rem; font-weight: 600; white-space: nowrap; }
+.badge { background: var(--badge-bg); color: var(--badge-text); }
+.prio-must-read { background: var(--must-bg); color: var(--must-text); }
+.prio-worth-reading { background: var(--worth-bg); color: var(--worth-text); }
+.prio-skim { background: var(--skim-bg); color: var(--skim-text); }
+.item.is-read, .item:has(.mark-read:checked) { opacity: .55; }
+.item.is-read .title a, .item:has(.mark-read:checked) .title a { text-decoration: line-through; }
+.empty { margin: 2.5rem 0; color: var(--muted); font-size: 1.05rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; overflow-wrap: anywhere; }
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .85rem; }
+footer p { margin: .2rem 0; }
+@media (max-width: 30rem) {
+  .page { padding: 1.25rem .9rem 2rem; }
+  header h1 { font-size: 1.35rem; }
+  .item { padding: .75rem .8rem; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<header>
+  <h1>Newsletter reading list</h1>
+  <p class="stats">
+    Window <strong>{{ meta.window }}</strong> ({{ meta.days }} days):
+    {{ meta.start_date.isoformat() }} – {{ meta.end_date.isoformat() }}
+  </p>
+  <p class="stats">
+    Emails: <strong>{{ meta.emails_found }}</strong> found,
+    <strong>{{ meta.emails_processed }}</strong> processed,
+    <strong>{{ meta.emails_failed }}</strong> failed
+    · Articles: <strong>{{ reading_list.article_count }}</strong>
+  </p>
+  {% if items and not reading_list.ranked %}
+  <p class="note">Ranking was not completed, so this list is unranked: articles are grouped by their suggested topic and there is no Must read section.</p>
+  {% endif %}
+  {% if meta.emails_failed > 0 %}
+  <p class="note">{{ meta.emails_failed }} email{{ "s" if meta.emails_failed != 1 }} could not be read and {{ "were" if meta.emails_failed != 1 else "was" }} skipped.</p>
+  {% endif %}
+</header>
+{% set show_must_read = reading_list.ranked and must_read %}
+{% if items %}
+<nav aria-label="Sections">
+  <ul>
+    {% if show_must_read %}
+    <li><a href="#must-read">Must read</a> <span class="count">{{ must_read | length }}</span></li>
+    {% endif %}
+    {% for topic, topic_items in by_topic %}
+    <li><a href="#{{ topic.value | slug }}">{{ topic.value }}</a> <span class="count">{{ topic_items | length }}</span></li>
+    {% endfor %}
+  </ul>
+</nav>
+{% endif %}
+<main>
+{% if show_must_read %}
+<section id="must-read">
+  <h2>Must read <span class="count">{{ must_read | length }}</span></h2>
+  {% for item in must_read %}
+  {{ render_item(item) }}
+  {% endfor %}
+</section>
+{% endif %}
+{% for topic, topic_items in by_topic %}
+<section id="{{ topic.value | slug }}">
+  <h2>{{ topic.value }} <span class="count">{{ topic_items | length }}</span></h2>
+  {% for item in topic_items %}
+  {{ render_item(item) }}
+  {% endfor %}
+</section>
+{% endfor %}
+{% if not items %}
+{% if meta.emails_found == 0 %}
+<p class="empty">No newsletter emails matched <code>{{ meta.query }}</code> in this window.</p>
+{% else %}
+<p class="empty">No articles were found in the {{ meta.emails_found }} matching email{{ "s" if meta.emails_found != 1 }}.</p>
+{% endif %}
+{% endif %}
+</main>
+<footer>
+  <p>Generated {{ meta.generated_at.isoformat(sep=" ", timespec="minutes") }}.</p>
+  <p>Summaries come from newsletter emails; links not fetched.</p>
+</footer>
+</div>
+<script>{{ script_body | safe }}</script>
+</body>
+</html>
