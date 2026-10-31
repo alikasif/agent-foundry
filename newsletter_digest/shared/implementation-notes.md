@@ -297,3 +297,32 @@ Reviewer notes:
   `+k more`, unknown ranking ids, partial and never-finalised assembly, and that the only
   imports are stdlib + `newsletter_digest.models`. `ruff format --check .`,
   `ruff check`, `pyrefly check` (0 errors) and `pytest` (99 passed) are clean.
+
+### T013 — tests for render.py and the template
+
+- **File:** `tests/test_render.py` (87 tests, all green; `render.py` coverage 100%).
+  Fixtures build `ReadingItem`/`DigestMeta`/`ReadingList` directly through factory
+  fixtures (`make_item`, `make_meta`, `make_list`); `ReadingItem.url` is not validated
+  by the model, so hostile URLs can be injected straight into the view model.
+- **Parsing approach:** a small stdlib `html.parser` tree builder (`Node`) is used for
+  structural assertions (section order, nav targets, ancestors of links, attribute
+  values after entity decoding). Raw-string checks are kept for the contract items that
+  are about bytes on the page (payload never appears unescaped, no `<link`, no
+  `src="http`, no `url(http`, CSP hash vs the literal `<script>` body).
+- **"http only inside item hrefs":** every `http` occurrence except the CSP meta's
+  `http-equiv` must fall inside an `href="..."` value, and every http(s) anchor must sit
+  inside an `article.item` (count == number of items).
+- **Contract vs wording:** tests assert the T006 wording only loosely (`"unranked"` in
+  the fallback note, `"could not be read"` in the failed-email note, `"No newsletter
+  emails matched"` from designs.md); badge text `mentioned in N` and `Why: <reason>`
+  come from designs.md.
+- **Extra cases beyond the task text:** unranked list with a stale `must-read` priority
+  (no Must read section, item rendered once), ranked list with no must-reads (no
+  section, no fallback note), empty list with emails found (no-articles message),
+  hostile `meta.query` in the empty state, `"` inside an otherwise safe URL (attribute
+  escaped, href round-trips), `on*` attributes never created, utf-8 output, same-day
+  overwrite.
+- **Sanity check of the tests (scratch only, not committed):** disabling autoescape
+  fails 23 tests, replacing the `safe_url` filter with identity fails 9, and a wrong
+  `SCRIPT_HASH` fails the CSP test.
+- **Bugs found in T006:** none.

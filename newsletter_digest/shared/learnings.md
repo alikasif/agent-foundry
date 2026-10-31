@@ -34,3 +34,9 @@
 - (T004) When a dedupe rule relaxes thresholds for "same host", exclude click-tracker
   hosts: every link in one newsletter issue can share the tracker host, so it is not
   evidence that two articles share a destination.
+- (T013) Quick mutation check for a test file without touching source: a scratch script
+  that patches the module (e.g. `render.ENVIRONMENT.autoescape = False`) and then calls
+  `pytest.main([...])` run via `uv run python <scratch>/mut.py` shows whether the tests
+  actually guard the property. Keep the script in the scratchpad.
+- (T013) `shared/task_list.json` usually carries other agents' uncommitted status edits;
+  update your task's status in the working tree but do not commit the file unless asked.
