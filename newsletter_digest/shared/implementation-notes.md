@@ -769,3 +769,40 @@ Results:
   `test_dotenv_in_current_directory_is_loaded_by_a_script` covers this (subprocess,
   coverage env vars stripped). It turns into a strict-xfail failure once the bug is
   fixed, and then the marker should be removed.
+
+### T015 — tests for agent.py
+
+- **File:** `tests/test_agent.py`, 36 tests, offline (no LLM, Gmail or network).
+  `agent.py` coverage is 100%.
+- **Fakes:** `FakeGmail` has dict-schema `StructuredTool`s keyed by `GMAIL_ARG_MAP`. The
+  search tool returns the verified `ID:/Subject:/From:/Date:` text (V8) as MCP text
+  blocks and ignores `maxResults`, so the truncation test is real. The read tool returns
+  headers plus a body (V9), or `Error: ...` text for the unreadable email. Its `open()`
+  asynccontextmanager records the settings and each close.
+- **Two agent layers** (the task text described only the first):
+  1. `ScriptedBuilder` is an `agent_builder` that builds the REAL wrapper and store tools,
+     as `build_agent` does. Its agent's `ainvoke` runs a script: search, read each email,
+     record what the read text contains, list, finalize. This layer covers task items
+     1-6 and 8.
+  2. The REAL `build_agent` and deepagents graph, driven by `ScriptedChatModel` (the T008
+     trick). It runs a real `task` fan-out, checks the exact tool allowlists from
+     `bind_tools` and raises a real `GraphRecursionError`. The tool sets are main =
+     `read_file, task` + the 4 wrappers and reader = `read_file, read_email,
+     record_articles`. They are compared to the raw Gmail tools by identity, not only by
+     name. The raw and wrapper tools have the same names, so a name check alone proves
+     nothing.
+  `build_agent` kwargs (item 7) are checked with `create_deep_agent` monkeypatched in
+  `newsletter_digest.agent`.
+- **Contract choices pinned by the tests:** a `GmailMCPError` raised *inside* the agent
+  run with articles recorded falls back, like any other `Exception`, as the T008 notes
+  and designs.md step 2.6 say. With an empty store it propagates. A `GmailMCPError` from
+  the opener or the pre-flight search always propagates before any build.
+  `KeyboardInterrupt` is not swallowed. The API key never appears in the logs.
+- **Real-graph tests run under `anyio.fail_after(20)`:** without the per-call
+  `recursion_limit`, deepagents' bound 9_999 lets a looping model run for minutes
+  instead of failing.
+- **Mutation check (scratchpad, not committed):** 8 mutants of agent.py were run. Each one
+  failed at least one test: no per-call recursion limit, always swallow, never swallow,
+  raw read tool given to the reader, no file-tool trimming, agent built on zero results,
+  main model used for the reader, and an off-by-one `start_date`.
+- **No bugs found in agent.py.**

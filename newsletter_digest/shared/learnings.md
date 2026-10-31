@@ -113,3 +113,14 @@
 - (T016) Rich stderr output under `CliRunner` wraps at 80 columns, and long tokens are
   folded mid-word. Collapse whitespace (`" ".join(s.split())`) before substring checks,
   and remove all whitespace before a "secret not in output" check.
+- (T015) Scripted fake chat models for deepagents must answer as a pure function of the
+  messages they get: every parallel `newsletter-reader` task shares ONE reader model
+  instance, so a counter or queue of replies interleaves between tasks. Take the email id
+  from the task's human message and the step from the ToolMessages present.
+- (T015) Dropping the per-call `recursion_limit` does not make a looping real deepagents
+  graph fail; it runs to the bound 9_999 (minutes). Wrap real-graph tests in
+  `anyio.fail_after(...)`, and assert `len(model.replies) <= settings.recursion_limit`.
+- (T015) Mutation-test a module without editing it: in a scratch script, read the source,
+  `str.replace` one line, `exec` it into a `types.ModuleType("newsletter_digest.agent")`
+  registered in `sys.modules` (and as the package attribute) and call `pytest.main`.
+  Tests that do `import newsletter_digest.agent as m` then see the mutant.
