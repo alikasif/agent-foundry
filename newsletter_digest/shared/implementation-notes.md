@@ -335,7 +335,9 @@ Reviewer notes:
   `load_mcp_tools(session, server_name="gmail", handle_tool_errors=False)` inside an
   `AsyncExitStack`, so `npx` starts once per run and the subprocess is closed on normal
   exit, on a startup failure and when the caller's block raises. Exceptions from the
-  caller's block pass through unchanged. Only spawn/initialise/list failures become
+  caller's block, and the allowlist's own `GmailMCPError`, come out as the original
+  exception object (see "T005 review fix" below: the real session would otherwise wrap
+  them in `ExceptionGroup`s). Only spawn/initialise/list failures become
   `GmailMCPError` (chained `from exc`).
 - **`handle_tool_errors=False`:** an MCP `isError` result raises `ToolException` instead of
   coming back as a normal-looking string. The callers (`search_email_refs`, and the
@@ -392,6 +394,39 @@ Reviewer notes:
   error and a crashing server (`McpError: Connection closed` -> `GmailMCPError`).
   `ruff format`/`ruff check` are clean, `pyrefly check` reports 0 diagnostics, and
   `pytest` passes 186 tests.
+
+### T005 review fix (T020 M1)
+
+- **Bug:** with a real stdio session, `client.session` -> `ClientSession` ->
+  `stdio_client` each run an anyio task group around the `yield`. So anything raised
+  inside the `AsyncExitStack` (the caller's block, `filter_read_only`, or a
+  `GmailMCPError` from `load_mcp_tools` after the session opened) came out as
+  `ExceptionGroup(ExceptionGroup(<original>))`, and the CLI's `except GmailMCPError`
+  never matched. The fake-client tests missed it because the fake session has no task
+  group.
+- **Fix:** `open_gmail_tools` remembers the exception raised in the stack body (startup
+  conversion, `filter_read_only` and the `yield`). It catches `BaseExceptionGroup` around
+  the `AsyncExitStack`. If unwrapping nested single-member groups reaches that exact
+  object, it re-raises the original. Otherwise (other leaves, such as a server crash at
+  the same time, or a group the session raised on its own after a clean block) the group
+  is re-raised intact. `_describe` and the new check share one helper, `_sole_leaf`.
+- **Decision:** the original is re-raised after the `except` block, not inside it, so
+  the group does not become its `__context__`. Its traceback and `__cause__` (for
+  example the startup error chain) are kept. The unwrap stops at the remembered object,
+  so a caller that itself raises a single-member `ExceptionGroup` gets that group back,
+  not its leaf.
+- **Decision:** `filter_read_only` stays inside the stack, because it needs the session's
+  tools. Its error is covered by the same mechanism instead of being moved.
+- **Not done:** the optional T009 hardening (`except*` in `cli.py`). cli.py was owned by
+  another agent during this fix.
+- **Tests (tests/test_gmail_mcp.py):** these use the real FastMCP stdio fake server. The
+  script now registers only the tools listed in `TOOLS`, so a missing allowlisted tool
+  can be simulated. A `GmailMCPError`/`ValueError` raised in the block comes back as the
+  same object, with no group as `__context__`. A search `Error: invalid_grant` keeps the
+  auth hint and README pointer. A server lacking `read_email` or `search_emails` raises
+  `GmailMCPError`. Fake-client tests with a session that groups like anyio cover: nested
+  single leaf unwrapped, multi-leaf group kept, unrelated close-time group kept. The six
+  new single-leaf tests fail against the previous code.
 
 ### T007 — tools.py and prompts.py
 

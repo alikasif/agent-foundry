@@ -170,22 +170,42 @@ async def open_gmail_tools(
             "npx) or set GMAIL_MCP_COMMAND."
         )
     client = client_factory(build_connections(settings))
-    async with AsyncExitStack() as stack:
-        try:
-            session = await stack.enter_async_context(client.session(SERVER_NAME))
-            # handle_tool_errors=False: an MCP isError result raises ToolException
-            # instead of looking like a normal result.
-            tools = await load_mcp_tools(
-                session, server_name=SERVER_NAME, handle_tool_errors=False
-            )
-        except Exception as exc:
-            raise GmailMCPError(
-                f"Could not start the Gmail MCP server "
-                f"({command} {' '.join(settings.gmail_mcp_args)}): "
-                f"{_describe(exc)}. {AUTH_HINT}"
-            ) from exc
-        # Errors raised by the caller's block pass through unchanged.
-        yield filter_read_only(tools)
+    # The real session runs anyio task groups (client.session -> ClientSession ->
+    # stdio_client), which wrap anything raised inside the stack, including the
+    # caller's block and filter_read_only, in nested ExceptionGroups. Remember
+    # what was raised so it can be re-raised as is below.
+    raised: BaseException | None = None
+    try:
+        async with AsyncExitStack() as stack:
+            try:
+                try:
+                    session = await stack.enter_async_context(
+                        client.session(SERVER_NAME)
+                    )
+                    # handle_tool_errors=False: an MCP isError result raises
+                    # ToolException instead of looking like a normal result.
+                    tools = await load_mcp_tools(
+                        session, server_name=SERVER_NAME, handle_tool_errors=False
+                    )
+                except Exception as exc:
+                    raise GmailMCPError(
+                        f"Could not start the Gmail MCP server "
+                        f"({command} {' '.join(settings.gmail_mcp_args)}): "
+                        f"{_describe(exc)}. {AUTH_HINT}"
+                    ) from exc
+                yield filter_read_only(tools)
+            except BaseException as exc:
+                raised = exc
+                raise
+    except BaseExceptionGroup as group:
+        # A group with other leaves (e.g. the server also crashed) stays intact.
+        if raised is None or _sole_leaf(group, raised) is not raised:
+            raise
+    else:
+        return
+    # Re-raised outside the except block so the group does not become its
+    # __context__; the original traceback and __cause__ are kept.
+    raise raised
 
 
 def tool_result_text(result: object) -> str:
@@ -458,6 +478,14 @@ def _clip(text: str) -> str:
 
 def _describe(exc: BaseException) -> str:
     """Short ``Type: message`` description, unwrapping single-error groups."""
+    leaf = _sole_leaf(exc)
+    return _clip(f"{type(leaf).__name__}: {leaf}")
+
+
+def _sole_leaf(exc: BaseException, stop: BaseException | None = None) -> BaseException:
+    """Unwrap nested single-member exception groups, stopping early at ``stop``."""
     while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+        if exc is stop:
+            break
         exc = exc.exceptions[0]
-    return _clip(f"{type(exc).__name__}: {exc}")
+    return exc

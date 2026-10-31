@@ -48,6 +48,11 @@
   `-> AsyncIterator[T]`; annotate `-> AsyncGenerator[T, None]` instead.
 - (T005) The Gmail MCP server reports handler failures as normal text `Error: ...`
   (no `isError`), so `handle_tool_errors=False` alone does not catch them.
+- (T005 fix) Exceptions raised inside an `async with` over an mcp `ClientSession` /
+  `stdio_client` (anyio task groups) come out wrapped in nested single-member
+  `ExceptionGroup`s, so a plain `except SomeError` around it never matches. Fake
+  sessions without a task group hide this: test error propagation against a real stdio
+  FastMCP server.
 - (T007) langchain-core 1.7.3 `StructuredTool(handle_validation_error=<callable>)` turns
   argument-schema `ValidationError`s into the callable's string on both `ainvoke(dict)`
   and `ToolCall` paths (ToolMessage status "error"), so a tool can "never raise" on bad

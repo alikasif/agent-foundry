@@ -586,12 +586,10 @@ FAKE_SERVER_SCRIPT = textwrap.dedent(
     server = FastMCP("fake-gmail")
 
 
-    @server.tool()
     def search_emails(query: str, maxResults: int = 10) -> str:
         return SEARCH
 
 
-    @server.tool()
     def read_email(messageId: str) -> str:
         return READ if messageId == "18f1a" else "Error: Requested entity not found"
 
@@ -603,28 +601,37 @@ FAKE_SERVER_SCRIPT = textwrap.dedent(
         return handler
 
 
+    ALLOWED = {{"search_emails": search_emails, "read_email": read_email}}
     for _name in TOOLS:
-        if _name not in ("search_emails", "read_email"):
-            server.add_tool(_make(_name), name=_name, description=_name)
+        server.add_tool(ALLOWED.get(_name) or _make(_name), name=_name)
 
     server.run("stdio")
     '''
 )
 
 
+def local_server_settings(
+    settings: Settings,
+    tmp_path: Path,
+    *,
+    tools: tuple[str, ...] = OFFERED_TOOLS,
+    search: str = SEARCH_SAMPLE,
+) -> Settings:
+    """Write the fake server script and point ``settings`` at it."""
+    script = tmp_path / "fake_gmail_server.py"
+    script.write_text(
+        FAKE_SERVER_SCRIPT.format(tools=tools, search=search, read=READ_SAMPLE_PLAIN)
+    )
+    return dataclasses.replace(
+        settings, gmail_mcp_command=sys.executable, gmail_mcp_args=(str(script),)
+    )
+
+
 @pytest.mark.anyio
 async def test_open_gmail_tools_against_local_stdio_server(
     settings: Settings, tmp_path: Path
 ) -> None:
-    script = tmp_path / "fake_gmail_server.py"
-    script.write_text(
-        FAKE_SERVER_SCRIPT.format(
-            tools=OFFERED_TOOLS, search=SEARCH_SAMPLE, read=READ_SAMPLE_PLAIN
-        )
-    )
-    local = dataclasses.replace(
-        settings, gmail_mcp_command=sys.executable, gmail_mcp_args=(str(script),)
-    )
+    local = local_server_settings(settings, tmp_path)
     with anyio.fail_after(60):
         async with open_gmail_tools(local) as tools:
             assert set(tools) == ALLOWLIST
@@ -634,6 +641,121 @@ async def test_open_gmail_tools_against_local_stdio_server(
                 await read_email_text(tools["read_email"], "nope")
     assert [ref.id for ref in refs] == ["18f1a", "18f1b", "18f1c"]
     assert "To: reader@example.com" in text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [GmailMCPError("raised in the block"), ValueError("caller failure")],
+    ids=["gmail-error", "value-error"],
+)
+@pytest.mark.anyio
+async def test_open_gmail_tools_local_server_reraises_block_error_unwrapped(
+    settings: Settings, tmp_path: Path, error: Exception
+) -> None:
+    # The real session's anyio task groups would wrap this in ExceptionGroups.
+    local = local_server_settings(settings, tmp_path)
+    with anyio.fail_after(60):
+        with pytest.raises(type(error)) as info:
+            async with open_gmail_tools(local):
+                raise error
+    assert info.value is error
+    assert not isinstance(info.value.__context__, BaseExceptionGroup)
+
+
+@pytest.mark.anyio
+async def test_open_gmail_tools_local_server_search_error_keeps_auth_hint(
+    settings: Settings, tmp_path: Path
+) -> None:
+    local = local_server_settings(settings, tmp_path, search="Error: invalid_grant")
+    with anyio.fail_after(60):
+        with pytest.raises(GmailMCPError, match="invalid_grant") as info:
+            async with open_gmail_tools(local) as tools:
+                await search_email_refs(tools["search_emails"], "label:News", 5)
+    message = str(info.value)
+    assert AUTH_COMMAND in message
+    assert message.endswith(README_POINTER)
+
+
+@pytest.mark.parametrize("missing", sorted(ALLOWLIST))
+@pytest.mark.anyio
+async def test_open_gmail_tools_local_server_lacking_allowlisted_tool(
+    settings: Settings, tmp_path: Path, missing: str
+) -> None:
+    offered = tuple(name for name in OFFERED_TOOLS if name != missing)
+    local = local_server_settings(settings, tmp_path, tools=offered)
+    with anyio.fail_after(60):
+        with pytest.raises(GmailMCPError, match=missing) as info:
+            async with open_gmail_tools(local):
+                pytest.fail("block must not run without the allowlisted tools")
+    assert str(info.value).endswith(README_POINTER)
+
+
+class GroupingClient:
+    """Client whose session wraps a block error like anyio task groups do."""
+
+    def __init__(self, extra: list[Exception]) -> None:
+        """Add ``extra`` leaves next to the block error (none: single leaf)."""
+        self.extra = extra
+        self.fake_session = FakeSession(OFFERED_TOOLS, {}, None)
+
+    @asynccontextmanager
+    async def session(self, server_name: str) -> AsyncGenerator[FakeSession, None]:
+        """Yield the fake session; re-raise block errors inside nested groups."""
+        try:
+            yield self.fake_session
+        except Exception as exc:
+            inner = ExceptionGroup("inner task group", [exc, *self.extra])
+            raise ExceptionGroup("outer task group", [inner]) from None
+
+
+@pytest.mark.anyio
+async def test_open_gmail_tools_unwraps_nested_single_leaf_group(
+    settings: Settings, npx_on_path: None
+) -> None:
+    error = GmailMCPError("raised in the block")
+    with pytest.raises(GmailMCPError) as info:
+        async with open_gmail_tools(
+            settings, client_factory=lambda _: GroupingClient([])
+        ):
+            raise error
+    assert info.value is error
+
+
+@pytest.mark.anyio
+async def test_open_gmail_tools_keeps_group_with_other_leaves(
+    settings: Settings, npx_on_path: None
+) -> None:
+    error = GmailMCPError("raised in the block")
+    other = ConnectionError("server exited")
+    with pytest.raises(ExceptionGroup) as info:
+        async with open_gmail_tools(
+            settings, client_factory=lambda _: GroupingClient([other])
+        ):
+            raise error
+    (inner,) = info.value.exceptions
+    assert isinstance(inner, ExceptionGroup)
+    assert list(inner.exceptions) == [error, other]
+
+
+@pytest.mark.anyio
+async def test_open_gmail_tools_keeps_group_wrapping_unrelated_error(
+    settings: Settings, npx_on_path: None
+) -> None:
+    # The session failed on its own (block finished cleanly): nothing to unwrap.
+    group = ExceptionGroup("task group", [ConnectionError("server exited")])
+
+    class ClosingFailsClient(GroupingClient):
+        @asynccontextmanager
+        async def session(self, server_name: str) -> AsyncGenerator[FakeSession, None]:
+            yield self.fake_session
+            raise group
+
+    with pytest.raises(ExceptionGroup) as info:
+        async with open_gmail_tools(
+            settings, client_factory=lambda _: ClosingFailsClient([])
+        ):
+            pass
+    assert info.value is group
 
 
 @pytest.mark.anyio
