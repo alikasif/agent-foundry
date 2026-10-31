@@ -728,3 +728,44 @@ Results:
   offline against a real `write_reading_list` output, ranked and unranked, and against a
   real `filter_read_only` log. **No live run:** no OpenRouter key or Gmail credentials are
   configured in this environment.
+
+### T016 — tests for cli.py
+
+- **File:** `tests/test_cli.py`, 45 test functions (77 cases plus 1 strict xfail), all
+  offline, 100% line coverage of `cli.py`. `newsletter_digest.cli.run_digest` is replaced
+  by a recording async fake (`FakeRunDigest`), which `anyio.run` drives. The real
+  `write_reading_list` writes into `tmp_path`, so the file name, overwrite and directory
+  creation are real. One test patches `cli.write_reading_list` to check that it gets
+  `settings.out_dir`. `webbrowser.open` is patched through `cli.webbrowser`.
+- **Isolation:** an autouse fixture chdirs to `tmp_path`, deletes all seven tool env
+  vars (a real `.env` may already be in `os.environ` because `load_dotenv()` runs at
+  import), and restores the `newsletter_digest` logger's handlers and level.
+- **Stream assertions:** stdout must be exactly one line holding the path. Rich wraps
+  stderr at 80 columns, so stderr checks collapse whitespace first. The key-leak checks
+  also remove all whitespace, so a key that rich folded across lines is still found. The
+  fake logs `safe_summary()` at INFO and the full `Settings` repr at DEBUG, like the real
+  agent. The key is checked in stdout, stderr and the HTML for exit codes 0, 1 and 2,
+  including DEBUG tracebacks.
+- **Covered beyond the task list:** `-h`, `main()` prog name, `--max-emails` bounds
+  (0/1/200/201/non-int), bad `--log-level`, `--out` pointing at a file, unparsable
+  `GMAIL_MCP_ARGS` (exit 2), and generic runtime errors (exit 1, hint, traceback only at
+  DEBUG). Also no file and no browser on failure, the empty run with a custom query, the
+  unranked list with no items (no warning), env-only `OPENAI_API_BASE` /
+  `GMAIL_MCP_COMMAND` / `GMAIL_MCP_ARGS`, the `--label` ignored note (it checks that
+  logging is set up before `Settings.build`), and no duplicate handlers across runs.
+- **`.env` at import:** `importlib.reload(cli)` with `dotenv.load_dotenv` patched checks
+  the import-time call. It reloads again while the patch is still active, so the real
+  loader never runs.
+- **Bug found (strict xfail, review_feedback for T009):** `load_dotenv()` with no
+  arguments uses `find_dotenv()`, which searches upward from the *caller's file*
+  (`src/newsletter_digest/`), not the cwd. It only uses the cwd for a REPL, `python -c`,
+  or when a trace function is active (debugger or coverage). So the `newsletter-digest`
+  console script ignores `./.env` when run from another directory. With a non-editable
+  install it never finds one at all, and it could pick up an unrelated `.env` in a parent
+  of the package. README says `.env` is "loaded from the current directory". Confirmed by
+  running the console script from a scratch dir with a `.env` holding the key: it exits 2
+  with "OPENROUTER_API_KEY is not set". Suggested fix:
+  `load_dotenv(find_dotenv(usecwd=True))`.
+  `test_dotenv_in_current_directory_is_loaded_by_a_script` covers this (subprocess,
+  coverage env vars stripped). It turns into a strict-xfail failure once the bug is
+  fixed, and then the marker should be removed.

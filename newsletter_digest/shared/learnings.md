@@ -105,3 +105,11 @@
   fixtures, so it can gate a live test before anything expensive (`Settings.build`, MCP
   start) is built. Import `newsletter_digest.cli` inside the test: it runs
   `load_dotenv()` at import time.
+- (T016) python-dotenv's bare `load_dotenv()` searches upward from the calling module's
+  file, not the cwd, unless it is in a REPL, `python -c`, or a trace function is active.
+  So it behaves differently under `pytest --cov` (cwd) than in the console script
+  (package dir). A subprocess test of `.env` discovery must drop `COV_CORE_*` /
+  `COVERAGE_*` from the child env, and it must run a script file, not `python -c`.
+- (T016) Rich stderr output under `CliRunner` wraps at 80 columns, and long tokens are
+  folded mid-word. Collapse whitespace (`" ".join(s.split())`) before substring checks,
+  and remove all whitespace before a "secret not in output" check.
