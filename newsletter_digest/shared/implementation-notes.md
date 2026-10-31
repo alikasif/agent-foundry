@@ -528,3 +528,29 @@ Results:
   the tracker-host check, `utm_*` stripping or the store lock each makes at least one
   test fail.
 - No bugs found in models.py or store.py.
+
+### T014 — tests for tools.py and prompts.py
+
+- **Fake raw read tool:** a `StructuredTool` with a JSON-schema dict `args_schema` whose
+  only property is `GMAIL_ARG_MAP["read_id"]` (imported, not hard-coded) and a
+  `**kwargs` coroutine that records every call. It goes through the real
+  `gmail_mcp.read_email_text` path, so a server `Error:` text, an empty/`None` result and a
+  raised `ConnectionError` are all covered as failures.
+- **Real store, no mocks:** every test uses a real `ArticleStore` with three search
+  results (`m1`..`m3`) and drives tools with `await tool.ainvoke({...})`. Two tests also use
+  the `ToolCall` path to check that schema errors come back as a `ToolMessage` with
+  `status="error"` and valid calls as `status="success"`.
+- **Row bounds (FR-013):** the 120/160/200 title/summary/url limits and the 50-id
+  `unranked_remaining` cap are restated as test constants, not imported from `store.py`,
+  so the tests check the contract values.
+- **Non-string topic:** `test_finalize_non_string_topic_never_raises` (7, None, list,
+  dict, float) passes with the `coerce_topic` fix that is in the working tree but not
+  committed yet (models.py, T003 review fix). A scratch mutation run with the pre-fix
+  `coerce_topic` patched back in fails 4 of its 5 cases with `AttributeError`, so the test
+  guards the bug. A non-string `topic_hint` in `record_articles` is rejected per item
+  (`ArticleIn.topic_hint` is `str | None`) and does not raise.
+- **Observed (documented, not a bug):** a read failure followed by `record_articles([])`
+  leaves the email failed (not processed). The store only clears the failure when the
+  email adds or merges at least one article. The test pins this behaviour.
+- **Coverage:** tools.py 99% (the only line not hit is the non-`ValidationError` branch
+  of `_handle_args_error`), prompts.py 100%.

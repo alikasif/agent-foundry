@@ -72,3 +72,7 @@
   `contextlib.nullcontext()` in a scratch script) shows whether the threading smoke test
   can catch a race. A Barrier plus single-article `add_articles` calls from 8 threads
   caught it here.
+- (T014) A fake raw MCP tool for wrapper tests: `StructuredTool.from_function(
+  coroutine=<async def f(**kwargs)>, args_schema=<JSON-schema dict>)`. With a dict schema
+  langchain-core passes the input dict straight through as kwargs, so the fake does not
+  need its own pydantic model and the test can key it by `GMAIL_ARG_MAP["read_id"]`.
