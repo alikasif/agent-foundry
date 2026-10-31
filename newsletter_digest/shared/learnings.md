@@ -54,3 +54,13 @@
   args without relying on ToolNode error handling.
 - (T007) `requires-python >= 3.11`: ruff rejects PEP 695 `def f[T: X](...)` as invalid
   syntax; use `typing.TypeVar`.
+- (T012) To test code that calls `langchain_mcp_adapters.tools.load_mcp_tools(session)`
+  without patching it, a fake session only needs `async list_tools(cursor=None)`
+  returning `mcp.types.ListToolsResult(tools=[mcp.types.Tool(name=..., inputSchema=
+  {"type": "object", "properties": {}})])` and `async call_tool(name, arguments, **kw)`
+  returning `mcp.types.CallToolResult(content=[TextContent(...)])`. A FastMCP stdio
+  script run with `sys.executable` starts in well under a second, so a real-subprocess
+  test is cheap. Wrap it in `anyio.fail_after` so a hang fails the test.
+- (T012) A minimal `BaseTool` fake for `ainvoke(dict)`: subclass `BaseTool` without
+  `args_schema`, implement `async _arun(self, **kwargs)`. The dict is passed through
+  as kwargs, so you can record the exact argument names.

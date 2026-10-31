@@ -464,3 +464,35 @@ Reviewer notes:
   unknown id and an invalid priority (remapped indices, `unranked_remaining`, `finalized`
   True). `ruff format`/`ruff check` are clean on both files, `pyrefly check` reports 0
   errors, and `pytest` passes 307 tests. Tests for these files belong to T014.
+
+### T012 — tests for gmail_mcp.py
+
+- **No patching of the adapter:** `open_gmail_tools` is tested through `client_factory`
+  only. The fake client's `session()` yields a fake `ClientSession` with `list_tools()`
+  (returns real `mcp.types.Tool` objects) and `call_tool()`, so the real
+  `langchain_mcp_adapters.tools.load_mcp_tools` builds the tools. This also proves that
+  tool calls go through the one session opened at startup, with the mapped argument
+  names (`query`/`maxResults`/`messageId`).
+- **One real-subprocess test (offline):** a FastMCP stdio script written to `tmp_path`
+  and run with `sys.executable` offers all 19 server tools plus an unknown one, in the
+  verified V8/V9 output formats. It goes through the real `MultiServerMCPClient`. A
+  second script exits with status 1 to check the launch-failure path. Both are wrapped in
+  `anyio.fail_after(60)` so a hang fails the test instead of blocking the suite. No npx,
+  Gmail or network is used.
+- **`shutil.which`** is monkeypatched (via `gmail_mcp.shutil`) to return a path for the
+  fake-client tests and `None` for the not-on-PATH test.
+- **Beyond the task text:** pass-through env vars and the absence of `OPENROUTER_API_KEY`
+  in `build_connections`; single-exception `ExceptionGroup` unwrapping in the message
+  with `__cause__` kept; caller exceptions passing through unchanged with the session
+  closed; `Error:` text results from the server; read transport errors propagating
+  unchanged (documented T005 behaviour); embedded `<<<END EMAIL` delimiters neutralised;
+  CRLF input.
+- **Results:** 108 tests, all passing, coverage of `gmail_mcp.py` 99% (only the
+  `str(result)` fallback in `tool_result_text` is not run). A scratch mutation check
+  (not committed) showed that adding `send_email` to `GMAIL_TOOL_MAP` fails 5 tests,
+  emptying `SKIP_TAGS` fails 7, allowing `javascript:`/`mailto:` links fails 3, and
+  keeping `To:` fails 3. `ruff format`/`ruff check` and `pyrefly check` are clean on the
+  file. The 4 pyrefly errors in the project come from `tests/test_store.py`, another
+  agent's file that is still in progress.
+- **Bugs found in T005:** none. One expectation of mine was wrong: a link with no text
+  between `A` and `B` gives `AB`, not `A B`. The test now asserts `AB`.
