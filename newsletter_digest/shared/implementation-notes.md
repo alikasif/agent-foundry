@@ -698,3 +698,33 @@ Results:
   subagent is listed as a known residual risk.
 - **Not verified live:** the Gmail console click path and filter steps are written from
   general knowledge of the Google UI, not exercised in this session.
+
+## T017 — integration test
+
+- **File name:** the lead's dispatch named `tests/test_integration.py`; plan.md and the task
+  list said `tests/test_e2e_integration.py`. I followed the dispatch and updated the task's
+  `output_files`.
+- **Two gates:** the existing `pyproject.toml` marker plus `addopts = "-m 'not integration'"`
+  deselects the module in a plain `uv run pytest`, so pyproject was not changed. With
+  `-m integration` an autouse fixture still skips with the list of missing prerequisites
+  unless all of these are present: `NEWSLETTER_DIGEST_INTEGRATION=1`, `OPENROUTER_API_KEY`,
+  `NEWSLETTER_MODEL`, `npx` on PATH, and the credentials file. Not in the spec: I added the
+  explicit opt-in variable so an exported key alone never triggers paid or Gmail calls. The
+  autouse skip runs before `Settings.build`, so nothing is built when the test is skipped.
+- **Credentials:** the test checks that `GMAIL_CREDENTIALS_PATH` (or
+  `~/.gmail-mcp/credentials.json`) exists. It never opens or reads the file.
+- **Assertions:** the output file starts with `<!doctype html>` and contains `</html>`. Every
+  non-fragment `href` is http(s), and none of them is duplicated after `url_key`. The same
+  two checks run on `ReadingList.items`. The INFO log "Gmail MCP tools exposed (read-only)"
+  appears exactly once, with `['read_email', 'search_emails']`. The CLI variant
+  (`--window 1w --max-emails 3 --out <tmp>`) asserts exit 0 and that the printed path is in
+  `--out`. Template fragment links (`#must-read`, topic anchors) are excluded from the
+  http(s) check.
+- **cli import:** `cli.py` runs `load_dotenv()` at import time, so the CLI test imports
+  `digest` inside the test body. Collecting the module has no `.env` side effect.
+- **Verification:** `uv run pytest -q` gives 746 passed, 2 deselected.
+  `uv run pytest -m integration --collect-only -q` collects 2 tests. With
+  `-m integration` both skip, with a clear reason. The helper assertions were checked
+  offline against a real `write_reading_list` output, ranked and unranked, and against a
+  real `filter_read_only` log. **No live run:** no OpenRouter key or Gmail credentials are
+  configured in this environment.

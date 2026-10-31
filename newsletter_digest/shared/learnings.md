@@ -100,3 +100,8 @@
   `sha1(url or id)[:16]` under a prefix, not per file path; `--query`, `--window`,
   `--max-emails`, `--out`, `--log-level` have no env var). `uv run newsletter-digest
   --help` lists all nine options plus `-h`.
+- (T017) This repo's `pyproject.toml` already deselects the `integration` marker via
+  `addopts`. An autouse fixture that calls `pytest.skip` runs before the test's other
+  fixtures, so it can gate a live test before anything expensive (`Settings.build`, MCP
+  start) is built. Import `newsletter_digest.cli` inside the test: it runs
+  `load_dotenv()` at import time.
