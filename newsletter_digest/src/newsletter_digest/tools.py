@@ -5,7 +5,9 @@ Every tool is an async ``StructuredTool`` built from a closure over the run's
 validated inside the tool, so one bad article or ranking item never rejects the
 whole batch. Tools always return a compact JSON string (or, for ``read_email``,
 delimited email text / an ``ERROR:`` line) and never raise to the agent: argument
-schema errors are turned into the same ``{"ok": false, "errors": [...]}`` shape.
+schema errors are turned into the same ``{"ok": false, "errors": [...]}`` shape, and
+any other ``Exception`` from a tool body is caught in ``_make_tool`` and returned as
+an ``internal error`` result. Cancellation and other ``BaseException``s propagate.
 
 Raw MCP tools are never handed to an agent; ``search_emails`` and ``read_email``
 here are wrappers that keep the logical names used by the prompts.
@@ -13,7 +15,9 @@ here are wrappers that keep the logical names used by the prompts.
 
 import json
 import logging
+import traceback
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import Any, TypeVar
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -27,6 +31,7 @@ from newsletter_digest.store import ArticleStore
 logger = logging.getLogger(__name__)
 
 M = TypeVar("M", bound=BaseModel)
+ErrorResult = Callable[[dict[str, Any], str], str]
 
 MAX_ARTICLES_PER_CALL = 60
 MAX_ROWS_PER_PAGE = 150
@@ -259,17 +264,34 @@ def make_read_email_tool(
             reason = _clip(f"{type(exc).__name__}: {exc}")
             store.mark_email_failed(email_id, reason)
             logger.warning("Could not read email %s: %s", email_id, reason)
-            return (
-                f"ERROR: could not read email {email_id} ({reason}). Call "
-                "record_articles with an empty list and stop."
-            )
+            return _read_error(email_id, reason)
         text = prepare_email_text(raw, settings.max_email_chars, email_id=email_id)
         logger.debug(
             "Email %s: %d raw chars -> %d prepared chars", email_id, len(raw), len(text)
         )
         return text
 
-    return _make_tool(read_email, "read_email", READ_EMAIL_DESCRIPTION, _ReadEmailArgs)
+    def handle_unexpected(kwargs: dict[str, Any], reason: str) -> str:
+        email_id = _clip(str(kwargs.get("email_id", "")))
+        with suppress(Exception):  # the store itself may be what failed
+            store.mark_email_failed(email_id, reason)
+        return _read_error(email_id, reason)
+
+    return _make_tool(
+        read_email,
+        "read_email",
+        READ_EMAIL_DESCRIPTION,
+        _ReadEmailArgs,
+        on_error=handle_unexpected,
+    )
+
+
+def _read_error(email_id: str, reason: str) -> str:
+    """The ``read_email`` ERROR line telling the reader to record nothing."""
+    return (
+        f"ERROR: could not read email {email_id} ({reason}). Call "
+        "record_articles with an empty list and stop."
+    )
 
 
 def _make_tool(
@@ -277,10 +299,32 @@ def _make_tool(
     name: str,
     description: str,
     args_schema: type[BaseModel],
+    on_error: ErrorResult | None = None,
 ) -> StructuredTool:
-    """Async-only ``StructuredTool`` whose argument errors come back as JSON."""
+    """Async-only ``StructuredTool`` that never raises an ``Exception``.
+
+    Argument errors come back as JSON. Any other ``Exception`` from the body is
+    logged by tool name and exception type only (never arguments or email text)
+    and turned into ``on_error(kwargs, "internal error: <Type>")``, by default an
+    ``ok: false`` result.
+    """
+
+    async def guarded(**kwargs: Any) -> str:
+        try:
+            return await coroutine(**kwargs)
+        except Exception as exc:
+            kind = type(exc).__name__
+            logger.error("Tool %s failed unexpectedly (%s)", name, kind)
+            logger.debug(
+                "Traceback:\n%s", "".join(traceback.format_tb(exc.__traceback__))
+            )
+            reason = f"internal error: {kind}"
+            if on_error is None:
+                return _failure([reason], hint=None)
+            return on_error(kwargs, reason)
+
     return StructuredTool.from_function(
-        coroutine=coroutine,
+        coroutine=guarded,
         name=name,
         description=description,
         args_schema=args_schema,

@@ -849,3 +849,128 @@ async def test_non_ascii_text_is_kept_in_json(
     result = await list_collected.ainvoke({})
     assert isinstance(result, str)
     assert "Überblick" in result
+
+
+# --- unexpected exceptions never escape a tool --------------------------------------
+
+SECRET_TEXT = "PRIVATE-EMAIL-BODY-TEXT"
+INTERNAL_ERROR = "internal error: RuntimeError"
+
+
+class _Abort(BaseException):
+    """A non-``Exception`` (like cancellation) that the guard must not swallow."""
+
+
+def _raiser(exc: BaseException) -> Callable[..., Any]:
+    """A drop-in for any function or method that raises ``exc`` when called."""
+
+    def raise_it(*_args: Any, **_kwargs: Any) -> Any:
+        raise exc
+
+    return raise_it
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "method", "args"),
+    [
+        (
+            "record_articles",
+            "add_articles",
+            {"email_id": "m1", "newsletter": "N", "articles": [article(1)]},
+        ),
+        (
+            "record_articles",
+            "known_email_ids",
+            {"email_id": "m1", "newsletter": "N", "articles": []},
+        ),
+        ("list_collected", "list_rows", {}),
+        ("finalize_reading_list", "apply_ranking", {"items": [ranked("a1")]}),
+    ],
+)
+async def test_store_tool_unexpected_exception_returns_ok_false(
+    store_tools: dict[str, BaseTool],
+    store: ArticleStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tool_name: str,
+    method: str,
+    args: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(store, method, _raiser(RuntimeError(SECRET_TEXT)))
+    with caplog.at_level(logging.DEBUG, logger="newsletter_digest.tools"):
+        payload = loads(await store_tools[tool_name].ainvoke(args))
+    assert payload == {"ok": False, "errors": [INTERNAL_ERROR]}
+    assert any(
+        tool_name in r.getMessage() and "RuntimeError" in r.getMessage()
+        for r in caplog.records
+    )
+    assert SECRET_TEXT not in caplog.text
+
+
+async def test_search_unexpected_exception_returns_ok_false(
+    search: BaseTool, store: ArticleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store, "search_results", _raiser(AttributeError("x")))
+    payload = loads(await search.ainvoke({}))
+    assert payload == {"ok": False, "errors": ["internal error: AttributeError"]}
+
+
+async def test_read_email_prepare_failure_returns_error_and_marks_failed(
+    make_reader: Callable[[RawReadBehaviour], tuple[BaseTool, FakeRawRead]],
+    store: ArticleStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "newsletter_digest.tools.prepare_email_text",
+        _raiser(RuntimeError(SECRET_TEXT)),
+    )
+    reader, raw = make_reader(lambda _id: f"Subject: x\n\n{SECRET_TEXT}")
+    with caplog.at_level(logging.DEBUG, logger="newsletter_digest.tools"):
+        result = await reader.ainvoke({"email_id": "m2"})
+    assert result == (
+        f"ERROR: could not read email m2 ({INTERNAL_ERROR}). Call "
+        "record_articles with an empty list and stop."
+    )
+    assert len(raw.calls) == 1
+    assert store.failed_email_ids == {"m2"}
+    assert any("read_email" in r.getMessage() for r in caplog.records)
+    assert SECRET_TEXT not in caplog.text
+
+
+async def test_read_email_store_failure_still_returns_error_line(
+    make_reader: Callable[[RawReadBehaviour], tuple[BaseTool, FakeRawRead]],
+    store: ArticleStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broken = _raiser(RuntimeError("store broken"))
+    monkeypatch.setattr(store, "known_email_ids", broken)
+    monkeypatch.setattr(store, "mark_email_failed", broken)
+    reader, raw = make_reader(lambda _id: "body")
+    result = await reader.ainvoke({"email_id": "m1"})
+    assert isinstance(result, str)
+    assert result.startswith(f"ERROR: could not read email m1 ({INTERNAL_ERROR})")
+    assert raw.calls == []
+
+
+async def test_unexpected_exception_via_tool_call_returns_tool_message(
+    list_collected: BaseTool, store: ArticleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store, "list_rows", _raiser(KeyError("rows")))
+    message = await list_collected.ainvoke(
+        {"type": "tool_call", "id": "call-3", "name": "list_collected", "args": {}}
+    )
+    assert isinstance(message, ToolMessage)
+    assert message.tool_call_id == "call-3"
+    assert loads(message.content) == {
+        "ok": False,
+        "errors": ["internal error: KeyError"],
+    }
+
+
+async def test_base_exception_is_not_swallowed(
+    list_collected: BaseTool, store: ArticleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store, "list_rows", _raiser(_Abort()))
+    with pytest.raises(_Abort):
+        await list_collected.ainvoke({})

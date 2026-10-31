@@ -819,3 +819,24 @@ Results:
   passes now. `test_load_dotenv_is_called_at_import` needed no change (one call).
 - Manual check: the console script run from a scratch dir whose `.env` sets only
   `OPENROUTER_API_KEY` now fails on the missing model, not on the missing key.
+
+## T007 review fix (T020 M2, m1, m2)
+
+- **M2:** `_make_tool` now wraps every tool coroutine in `guarded(**kwargs)`. Any
+  `Exception` from a tool body becomes `{"ok": false, "errors": ["internal error:
+  <Type>"]}` (no retry hint). `BaseException`s such as cancellation still propagate.
+  `read_email` passes an `on_error` callback instead. It returns the usual `ERROR:
+  could not read email <id> (internal error: <Type>) ...` line and marks the email
+  failed, so `emails_failed` stays accurate when `prepare_email_text` raises. Marking
+  is wrapped in `suppress(Exception)` because the store itself may be what failed.
+- The guard logs at ERROR with only the tool name and the exception type. It does not
+  use `logger.exception`, as the reviewer suggested, because the message of an
+  exception can carry email text. A DEBUG line logs `traceback.format_tb` instead:
+  frames and source lines only, without the exception message.
+- **m1:** the main prompt's untrusted-data rule now names email subjects and
+  senders. The reader prompt says the subject in its task message is untrusted.
+- **m2:** the main system prompt no longer contains a number. It says to stay
+  within "the limit given in the user message", and `build_user_message` supplies
+  that limit from `settings.reader_parallelism`. I did not add a shared constant,
+  because config.py is outside this task. A test asserts that no `at most <n>
+  tasks` text is left in the system prompt.

@@ -127,3 +127,9 @@
 - (T009 fix) On this machine `env` on PATH is uv's `~/.local/bin/env`, a shell snippet
   meant to be sourced. Run as a command it ignores its args and exits 0 with no output,
   so `env -u VAR cmd` silently runs nothing. Use `/usr/bin/env -u VAR cmd`.
+- (T007 fix) Wrapping a `StructuredTool` coroutine in `async def guarded(**kwargs)`
+  is safe when `args_schema` is explicit: langchain-core only passes the keys the
+  caller supplied, so the inner coroutine's defaults still apply, and with `**kwargs`
+  it injects no `callbacks`/`config`. `traceback.format_tb(exc.__traceback__)` gives a
+  traceback without the exception message, which helps when that message may hold
+  email text.
