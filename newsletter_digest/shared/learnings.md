@@ -91,3 +91,7 @@
 - (T008) pyrefly rejects `FilesystemMiddleware` inside a `SubAgent["middleware"]` list
   (invariant `list[AgentMiddleware]` vs `FilesystemState`). A targeted
   `# pyrefly: ignore[bad-assignment]` on that key is the least-bad fix.
+- (T009) `rich.console.Console(stderr=True)` resolves `sys.stderr` on every print, so a
+  module-level console (and a RichHandler bound to it) is captured by click's
+  `CliRunner` in `result.stderr` (click 8.5 always separates stderr). Configure logging
+  before `Settings.build`, or its INFO notes (e.g. "--label ignored") are dropped.

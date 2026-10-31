@@ -616,3 +616,68 @@ Results:
   recorded email fell back to ranked=False with 1 item. context7 is not available in this
   session, so the installed 0.7.32 source plus runtime probes are the evidence. Tests for
   agent.py belong to T015.
+
+### T009 — cli.py
+
+- **Heading level:** `###` under "Task notes", like the other sections (the task text
+  says `##`).
+- **Command / entry point:** the click command is `digest`; `main()` (the
+  `newsletter_digest.cli:main` console script in pyproject, unchanged) calls
+  `digest(prog_name="newsletter-digest")`. `-h` is added as an alias of `--help`.
+  `run_digest`, `write_reading_list` and `webbrowser` are module-level names, so tests can
+  patch `newsletter_digest.cli.run_digest`, `.write_reading_list` and
+  `.webbrowser.open`, and invoke `cli.digest` with `CliRunner`.
+- **Options:** as designs.md. `--label`/`--model`/`--reader-model` have `envvar=` and
+  `show_envvar=True`; `--query` has no env var. `--max-emails` is `IntRange(1, 200)`
+  built from the config constants. `--out` is `click.Path(file_okay=False,
+  path_type=Path)`. `--log-level` is `Choice(DEBUG/INFO/WARNING/ERROR,
+  case_sensitive=False)`; click 8.5 lists the choices in lower case in `--help`.
+  `OPENROUTER_API_KEY`, `OPENAI_API_BASE`, `GMAIL_MCP_COMMAND` and `GMAIL_MCP_ARGS` come
+  from `os.environ` only. Precedence: CLI flag > shell env > `.env`, because
+  `load_dotenv()` (at import) does not override variables that are already set.
+- **Deviation: logging is set up before `Settings.build`** (designs.md step 1 puts it
+  after). `Settings.build` logs the D1 INFO notes ("--label ... is ignored ..."), and these
+  would be lost if the handler did not exist yet. The click Choice has already validated
+  the level.
+- **Logging:** only the `newsletter_digest` logger gets a `RichHandler` (`show_path=False`,
+  `rich_tracebacks=True`, `markup=False`, so `[...]` in queries and titles is printed as
+  is). No `basicConfig`: third-party loggers stay at Python's default (WARNING and above
+  via the last-resort handler), so INFO does not show httpx/langchain noise. The handler
+  list is replaced on each call (no duplicates across repeated `CliRunner` invocations).
+  `propagate` stays True, so pytest `caplog` still captures. Tracebacks never show locals
+  (rich default), and nothing in cli.py logs the key (the run log is
+  `settings.safe_summary()` in agent.py).
+- **Streams (not in spec):** logs, the summary line and warnings go to a stderr rich
+  `Console`. stdout carries only the output path (`click.echo`), so
+  `xdg-open "$(newsletter-digest)"` works. The rich console resolves `sys.stderr` when it
+  prints, so `CliRunner` captures it in `result.stderr`.
+- **Exit codes:**
+  - 2: `ConfigError` from `Settings.build` -> `click.UsageError(str(exc))` (click prints
+    usage + `Error: <actionable message>`). Click's own bad-option errors (e.g.
+    `--max-emails 0`) are also 2.
+  - 1: `GmailMCPError` -> `click.ClickException(str(exc))`, so stderr shows
+    `Error: <message> See README: Gmail MCP setup.` Any other exception from `run_digest`
+    (an agent failure with an empty store) -> `ClickException("Digest run failed (<Type>:
+    <msg>). Re-run with --log-level DEBUG for the traceback.")`. In both cases the
+    traceback is logged with `logger.debug(..., exc_info=exc)`, so it appears only at
+    DEBUG. Ctrl-C is left to click (`Aborted!`, exit 1).
+  - 0: success, the empty list and the unranked fallback.
+- **Output:** after `write_reading_list`, the CLI prints to stderr `No newsletter emails
+  matched <effective_query>` for 0 emails, otherwise `<n> articles from <processed> of
+  <found> emails`, plus `Warning: the agent did not finish ranking; the list is
+  unranked.` when `ranked` is False and there are items. The path goes to stdout. With
+  `--open` it calls `webbrowser.open(path.resolve().as_uri())`. A `write_reading_list`
+  OSError is not caught (it would show a traceback). That case was judged rare enough
+  for a local tool.
+- **`anyio.run(run_digest, settings)`:** no kwargs are needed, so no `partial`. The
+  default asyncio backend is used.
+- **Verification:** `ruff format --check .`, `ruff check .`, `pyrefly check` (0 errors)
+  and `pytest` (710 passed) are clean. `uv run newsletter-digest --help` lists all nine
+  options. A scratchpad CliRunner probe (not committed; CLI tests belong to a test task)
+  with a patched `run_digest` checked the following. Bad window, missing key and missing
+  model exit 2 with the config message. `--max-emails 0` exits 2. GmailMCPError exits 1
+  with the README pointer and no traceback, and shows a traceback at DEBUG. A generic
+  error exits 1. The empty run writes `reading-list-YYYY-MM-DD.html`, prints the path and
+  the no-match message, and exits 0. The unranked warning appears. `--model`/`--label`
+  flags beat env. `--open` calls a `file://` URI. The API key never appears in
+  stdout/stderr. A patched `write_reading_list` is used.
