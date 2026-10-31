@@ -227,3 +227,73 @@
   `write_reading_list` (nested mkdir, `reading-list-2026-10-30.html`, same-day
   overwrite). `ruff format --check .`, `ruff check .`, `pyrefly check` (0 errors, 0
   warnings for render.py) and `pytest` (99 passed) are clean.
+
+### T004 — store.py
+
+Decisions not covered by the spec:
+- **Heading level**: this section uses `###` under "Task notes" like the other task
+  sections (the task text says `##`).
+- **`TRACKER_HOSTS`** (exact host or parent domain): `list-manage.com`, `mailchi.mp`,
+  `flight.beehiiv.net`, `convertkit-mail.com`, `convertkit-mail2.com`, `sendgrid.net`,
+  `mandrillapp.com`, `hubspotlinks.com`, `mlsend.com`, `rs6.net`, `t.co`, `lnkd.in`,
+  `bit.ly`, `tinyurl.com`, `ow.ly`, `buff.ly`. Host prefixes (`TRACKER_HOST_PREFIXES`):
+  `link.`, `links.`, `click.`, `clicks.`, `email.`, `track.`, `tracking.` (designs.md
+  names `link.`/`click.`/`email.`; the plural/`track` variants are common ESP hosts).
+- **Tracker hosts are not "same host" evidence**: the relaxed 0.85 threshold applies only
+  when the shared host is not a tracker. Every link in one beehiiv/Mailchimp issue can
+  share e.g. `link.mail.beehiiv.com`, so treating that as same-host would loosen matching
+  between distinct articles of one newsletter (verified: "Meta open-sources new vision
+  model for robots" vs "... speech model ..." has ratio 0.889 and merges on a real
+  shared host, but not on a tracker host).
+- **`normalize_title`** replaces punctuation/symbols with a space (not deletion) so
+  "GPT-4" becomes tokens `gpt 4` and the digit-token guard sees the version number;
+  letters, digits and combining marks (Unicode categories L/N/M) are kept. `&` becomes
+  ` and `.
+- **`titles_match` prefilters**: the length-only bound is computed inline (identical to
+  `SequenceMatcher.real_quick_ratio()`) so no matcher is built for most of the O(n)
+  candidates; then `quick_ratio()` and `ratio()`. `autojunk=False` (titles are short).
+  Guards run cheapest-first: min chars, length bound, min tokens, digit-token sets.
+- **`normalize_url`**: an invalid port (`urlsplit(...).port` raising) is a `ValueError`
+  like a bad scheme; IPv6 hosts are re-bracketed; the slash collapse skips `//` preceded
+  by `:` so archive paths such as `/web/2024/https://x` keep their embedded URL; the
+  query is decoded with `parse_qsl(keep_blank_values=True)` and re-encoded with
+  `urlencode` (stable sort by name, so repeated params keep their relative order). The
+  path itself is not re-encoded.
+- **Merge bookkeeping**: every `url_key` seen for a merged article is indexed
+  (`setdefault`), so a later mention via any of its URLs merges by key. When the URL is
+  upgraded from a tracker to a real host, the stored host used for same-host checks is
+  updated too. `merged` in `AddResult` also counts an idempotent re-record.
+- **Failed vs processed**: `processed_email_ids` = recorded minus failed. An email marked
+  failed and then recorded with `[]` (what the reader is told to do) stays failed; one
+  that later contributes >= 1 article is un-failed. `emails_failed` in
+  `assemble_reading_list` = found minus processed, which equals "failed ids + found ids
+  never recorded" from designs.md, so processed + failed == found.
+- **Plan addition `rankings()`**: public accessor returning applied `RankedItem`s keyed by
+  article id; `assemble_reading_list` needs it and it keeps the lock encapsulated.
+- **Sorting**: `items` are built in display order (models.py never sorts). Ranked:
+  must-read first by `order`, then by topic (`Topic` enum order), ranked before
+  unranked-skim, priority, `order`, `mentioned_in` desc, `first_seen`. Unranked fallback:
+  topic order, `mentioned_in` desc, `first_seen`. A partial finalise logs a second
+  WARNING with the number of unranked articles.
+- **Earliest date**: parsed as RFC 2822 then ISO 8601 (naive -> UTC); the original
+  display string of the earliest parseable date is kept; if none parse, the first
+  non-empty date string, else "".
+- **`list_rows`** clamps `offset >= 0` and `limit >= 1`; any upper cap on `limit` belongs
+  to the tool layer. The truncated URL (<= 200 chars, ellipsis) is for the LLM only.
+
+Reviewer notes:
+- "Never finalised (or agent crashed with a non-empty store)": `assemble_reading_list`
+  decides only from `store.finalized`; a crash after a partial `finalize_reading_list`
+  therefore renders as partially ranked, which matches the FR-015 "partial" semantics.
+- store.py imports the private helper `models._truncate` so row truncation matches the
+  model's word-boundary/ellipsis rule exactly (one implementation).
+- The design's same-host 0.85 rule can merge distinct articles on one real site
+  (example above). Kept as specified; the digit-token guard and min-token/char guards
+  limit it.
+- Verified by a scratch smoke script (not committed; unit tests belong to the
+  python_test tasks) covering every acceptance criterion: URL normalisation and
+  rejection, cross-newsletter merge (`mentioned_in == 2`), tracker URL replacement, GPT-4
+  vs GPT-5 and "Introduction" not merging, idempotent re-record, pagination and
+  `+k more`, unknown ranking ids, partial and never-finalised assembly, and that the only
+  imports are stdlib + `newsletter_digest.models`. `ruff format --check .`,
+  `ruff check`, `pyrefly check` (0 errors) and `pytest` (99 passed) are clean.

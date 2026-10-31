@@ -31,3 +31,6 @@
   `git commit <path>` commits the whole working-tree file, so another agent's commit can
   carry your section (T006's notes landed in the T010 commit a737e72). Harmless, but
   check `git show --stat HEAD` before assuming your notes are still uncommitted.
+- (T004) When a dedupe rule relaxes thresholds for "same host", exclude click-tracker
+  hosts: every link in one newsletter issue can share the tracker host, so it is not
+  evidence that two articles share a destination.
