@@ -12,7 +12,7 @@ from pathlib import Path
 
 import anyio
 import click
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 from rich.logging import RichHandler
 
@@ -29,8 +29,9 @@ from newsletter_digest.models import ReadingList
 from newsletter_digest.render import write_reading_list
 
 # Load .env at import time so click's envvar resolution (and the os.environ reads
-# below) see it. Variables already set in the environment win over .env.
-load_dotenv()
+# below) see it. Variables already set in the environment win over .env. Search
+# from the cwd: a bare load_dotenv() searches from this file's directory instead.
+load_dotenv(find_dotenv(usecwd=True))
 
 # Logs and status lines go to stderr; stdout carries only the output path.
 console = Console(stderr=True)

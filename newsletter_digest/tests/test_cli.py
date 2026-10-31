@@ -853,15 +853,6 @@ def _env_without_tool_vars() -> dict[str, str]:
     }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (T009): load_dotenv() without find_dotenv(usecwd=True) searches upward "
-        "from cli.py's directory, so a script or the newsletter-digest console "
-        "script ignores ./.env, although README says .env is loaded from the "
-        "current directory."
-    ),
-)
 def test_dotenv_in_current_directory_is_loaded_by_a_script(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "NEWSLETTER_DIGEST_DOTENV_PROBE=from-cwd\n", encoding="utf-8"

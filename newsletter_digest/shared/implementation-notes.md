@@ -806,3 +806,16 @@ Results:
   raw read tool given to the reader, no file-tool trimming, agent built on zero results,
   main model used for the reader, and an off-by-one `start_date`.
 - **No bugs found in agent.py.**
+
+## T009 review fix (T016: .env from the cwd)
+
+- `cli.py` now calls `load_dotenv(find_dotenv(usecwd=True))`. A bare `load_dotenv()`
+  searched upward from `cli.py`'s directory, so the console script ignored `./.env`
+  outside the project dir, which contradicted the README. `find_dotenv(usecwd=True)`
+  still walks up from the cwd to parent directories, so running from a subdirectory of
+  the project keeps working. Variables already set in the environment still win.
+- Removed the strict xfail marker from
+  `tests/test_cli.py::test_dotenv_in_current_directory_is_loaded_by_a_script`; it
+  passes now. `test_load_dotenv_is_called_at_import` needed no change (one call).
+- Manual check: the console script run from a scratch dir whose `.env` sets only
+  `OPENROUTER_API_KEY` now fails on the missing model, not on the missing key.

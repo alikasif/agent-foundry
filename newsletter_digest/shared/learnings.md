@@ -124,3 +124,6 @@
   `str.replace` one line, `exec` it into a `types.ModuleType("newsletter_digest.agent")`
   registered in `sys.modules` (and as the package attribute) and call `pytest.main`.
   Tests that do `import newsletter_digest.agent as m` then see the mutant.
+- (T009 fix) On this machine `env` on PATH is uv's `~/.local/bin/env`, a shell snippet
+  meant to be sourced. Run as a command it ignores its args and exits 0 with no output,
+  so `env -u VAR cmd` silently runs nothing. Use `/usr/bin/env -u VAR cmd`.
