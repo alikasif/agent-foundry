@@ -5,11 +5,11 @@
 | ID | Item | Owner task | Version | How checked | Result/consequence |
 |---|---|---|---|---|---|
 | V0 | Versions pinned by `uv add` for every dependency | T001 | see Result column | `uv run python` + `importlib.metadata.version(...)` after `uv sync` | Pinned in uv.lock (Python 3.13.5 venv): deepagents 0.7.32, langchain-mcp-adapters 0.3.2, langchain-openai 1.7.3, langchain-core 1.7.3, langgraph 1.2.18, mcp 1.30.0, pydantic 2.14.2, jinja2 3.1.6, click 8.5.0, anyio 4.15.1, python-dotenv 1.2.4, rich 15.0.0. Dev: pytest 9.2.0, pytest-mock 3.17.0, ruff 0.17.3, pyrefly 1.4.0, trio 0.34.0. deepagents and langchain-mcp-adapters match shared/verified_facts.md |
-| V1 | `create_deep_agent` signature: `system_prompt` (not `instructions`), `model` accepts instance, `name` kwarg | T008 | TODO | TODO | TODO |
-| V2 | `SubAgent` keys; per-subagent `model` supported; `tools` accepts tool objects (not names) | T008 | TODO | TODO | TODO |
-| V3 | [re-verify] default backend is in-state/in-memory (never disk); pass state backend explicitly if not | T008 | TODO | TODO | TODO |
-| V4 | [re-verify] whether the default `general-purpose` subagent can be disabled; if not, prompt forbids it and risk is noted | T008 | TODO | TODO | TODO |
-| V5 | [re-verify] which built-in tools (filesystem, todos, task) the main agent and reader see | T008 | TODO | TODO | TODO |
+| V1 | `create_deep_agent` signature: `system_prompt` (not `instructions`), `model` accepts instance, `name` kwarg | T008 | deepagents 0.7.32 (langchain 1.4.7, langgraph 1.2.18) | `uv run python -c 'import inspect, deepagents; print(inspect.signature(deepagents.create_deep_agent))'` + read installed `deepagents/graph.py`; scripted fake-model run of the real `build_agent` (scratchpad) | Matches verified_facts.md: `create_deep_agent(model=None, tools=None, *, system_prompt: str | SystemMessage | None, middleware=(), subagents=None, skills, memory, permissions, backend: BackendProtocol | None, interrupt_on, response_format, state_schema, context_schema, checkpointer, store, debug, name: str | None, cache)`. `system_prompt` (no `instructions`); a `BaseChatModel` instance goes through `resolve_model` unchanged; `name` is passed to `create_agent` (seen as `lc_agent_name: newsletter-digest`). The result is `.with_config({'recursion_limit': 9_999})`, but a per-call `config={'recursion_limit': n}` wins (probe: `GraphRecursionError: Recursion limit of 100 reached` with max_emails=1). Code passes all three as planned |
+| V2 | `SubAgent` keys; per-subagent `model` supported; `tools` accepts tool objects (not names) | T008 | deepagents 0.7.32 | read `SubAgent` TypedDict in `deepagents/middleware/subagents.py` + subagent branch of `create_deep_agent`; fake-model run recording `bind_tools` per model | `SubAgent` keys: required `name`, `description`; NotRequired `tools`, `model` (str | BaseChatModel), `middleware`, `interrupt_on`, `skills`, `permissions`, `response_format`, `system_prompt`, `mode` ('isolated'/'fork'). `tools` takes `BaseTool | Callable | dict` objects (no names); a spec WITH `tools` uses only those (else it inherits the main tools). Per-subagent `model` is resolved separately (`spec.get('model', model)`). Probe: the reader model bound exactly `read_file, read_email, record_articles` and got READER_SYSTEM_PROMPT; the reader runs isolated (default mode). Spec built as a typed `SubAgent` dict |
+| V3 | [re-verify] default backend is in-state/in-memory (never disk); pass state backend explicitly if not | T008 | deepagents 0.7.32 | read `create_deep_agent` (`backend = backend if backend is not None else StateBackend()`) and `FilesystemMiddleware.__init__` | Default is already the in-state `StateBackend` (files live in graph state, nothing on disk); the main agent, every subagent stack and the summarization middleware share that one backend. `build_agent` still passes `backend=StateBackend()` explicitly and builds its `FilesystemMiddleware` overrides on the same instance, so a future default change cannot reach the disk |
+| V4 | [re-verify] whether the default `general-purpose` subagent can be disabled; if not, prompt forbids it and risk is noted | T008 | deepagents 0.7.32 | read `create_deep_agent` (GP auto-add block) and `profiles/harness/harness_profiles.py`; printed the `task` tool description of the built agent | No per-call switch. The default `general-purpose` subagent is skipped only if (a) a subagent named `general-purpose` is passed, or (b) the harness profile resolved for the model has `general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)`, set via the beta, process-global `register_harness_profile('<provider>:<model>', ...)` registry. Not done: it mutates global state keyed by the model's provider/identifier (derived through private `_get_ls_params`). So the GP subagent is still listed in the `task` tool (probe: `general-purpose` and `newsletter-reader`). Mitigation: MAIN_SYSTEM_PROMPT forbids every subagent except newsletter-reader. Residual risk: if the main model delegates to it anyway, GP gets only the main tools (search_emails, record_articles, list_collected, finalize_reading_list) plus `read_file`: no `read_email`, no raw Gmail tools, no write/execute tools. The cost is wasted tokens, with no extra privilege |
+| V5 | [re-verify] which built-in tools (filesystem, todos, task) the main agent and reader see | T008 | deepagents 0.7.32 | fake-model run recording the tools passed to `bind_tools` for each model; tool node of a default `create_deep_agent(model=fake)` for comparison; `FilesystemMiddleware(tools=...)` docstring and `_apply_custom_middleware` | Default deep agent tools: `ls, read_file, write_file, edit_file, delete, glob, grep, execute, task`, with no todo tool in 0.7.32 (`execute` is listed even with StateBackend and only returns an error). `build_agent` replaces the main and reader `FilesystemMiddleware` (by name, in place) with `FilesystemMiddleware(backend=..., tools=['read_file'])`. `read_file` is mandatory: it reads back tool results evicted to state for being over 20k tokens. The GP subagent inherits the main replacement. Observed: main `read_file, task, search_emails, record_articles, list_collected, finalize_reading_list`; reader `read_file, read_email, record_articles` |
 | V6 | `MultiServerMCPClient` constructor and methods; not an async context manager; [re-verify] whether `get_tools()` opens a session per call; exact import path of `load_mcp_tools` and `client.session(name)` | T005 | langchain-mcp-adapters 0.3.2, mcp 1.30.0 | `inspect.signature` via `uv run python` + read installed `client.py`, `tools.py`, `sessions.py` | `MultiServerMCPClient(connections=None, *, callbacks, tool_interceptors, tool_name_prefix=False, handle_tool_errors=True)`; methods `get_tools`, `session`, `get_prompt`, `get_resources`, `get_server_info`. `__aenter__` raises NotImplementedError (not a context manager). `get_tools()` calls `load_mcp_tools(None, connection=...)` and its docstring says a new session is created for each tool call, so the session form is required: `client.session(name, *, auto_initialize=True)` (async CM yielding an initialised `ClientSession`) + `from langchain_mcp_adapters.tools import load_mcp_tools` (`load_mcp_tools(session, *, server_name, handle_tool_errors, ...)`). Exercised end to end against a fake FastMCP stdio server: one spawn, tools listed, session closed on exit |
 | V7 | Gmail MCP server tool names (allowlist `search_emails`/`read_email` present) and argument names (`query`, `maxResults`, `messageId`) | T005 | @gongrzhe/server-gmail-autoauth-mcp 1.1.11 | `npm pack` of @gongrzhe/server-gmail-autoauth-mcp 1.1.11 into the session scratchpad, read `dist/index.js` (no live Gmail call: needs the user's OAuth) | 19 tools, same list as verified_facts.md; `search_emails` and `read_email` present. Zod schemas: `search_emails{query: string, maxResults?: number}` (default 10), `read_email{messageId: string}`. GMAIL_TOOL_MAP/GMAIL_ARG_MAP unchanged |
 | V8 | `search_emails` output format (`ID:/Subject:/From:/Date:` blocks), no pagination, `label:` query operator works | T005 | @gongrzhe/server-gmail-autoauth-mcp 1.1.11 | `npm pack` of @gongrzhe/server-gmail-autoauth-mcp 1.1.11 into the session scratchpad, read `dist/index.js` (no live Gmail call: needs the user's OAuth) | One text block: entries `ID: ..\nSubject: ..\nFrom: ..\nDate: ..\n` joined with `\n` (blank line between entries); zero hits give `""`. Only `users.messages.list(q, maxResults)`: no page token. `query` is passed to Gmail `q` verbatim, so `label:` works (Gmail-side; not live-tested) |
@@ -554,3 +554,65 @@ Results:
   email adds or merges at least one article. The test pins this behaviour.
 - **Coverage:** tools.py 99% (the only line not hit is the non-`ValidationError` branch
   of `_handle_args_error`), prompts.py 100%.
+
+### T008 — agent.py
+
+- **Heading level:** `###` under "Task notes", like the other sections (the task text
+  says `##`).
+- **build_agent:** `create_deep_agent(model=model_factory(settings.model, settings),
+  tools=[search_emails, record_articles, list_collected, finalize_reading_list],
+  system_prompt=MAIN_SYSTEM_PROMPT, subagents=[reader], middleware=[FilesystemMiddleware(
+  backend, tools=["read_file"])], backend=StateBackend(), name="newsletter-digest")`. The
+  reader is a typed `SubAgent` dict. Its name is `READER_NAME = "newsletter-reader"`
+  (same literal as prompts.py), its tools are only the `read_email` wrapper and
+  `record_articles`, and its model is `model_factory(settings.reader_model, settings)`.
+  The main and reader `record_articles` are the same tool object (one closure over the
+  store). `make_search_tool(store, query=settings.effective_query)` as T007 asked.
+  `gmail["read_email"]` is only handed to `make_read_email_tool`, and `gmail["search_emails"]`
+  only to the pre-flight `search_email_refs`. No raw MCP tool reaches `create_deep_agent`.
+- **Addition (not in the spec): built-in file tools trimmed.** `FilesystemMiddleware(tools=
+  ["read_file"])` replaces the default file middleware of the main agent (and so the GP
+  subagent) and of the reader. This hides ls/write_file/edit_file/delete/glob/grep/execute,
+  which the prompts tell the agents not to use anyway. `read_file` cannot be removed (see
+  V5). The reader's `"middleware"` entry carries a `# pyrefly: ignore[bad-assignment]`:
+  pyrefly rejects `FilesystemMiddleware` (state `FilesystemState`) for the invariant
+  `SubAgent.middleware: list[AgentMiddleware]`. deepagents builds its own stacks the same
+  way, and the main `middleware=` parameter (a `Sequence`) type-checks fine.
+- **Deviation: general-purpose subagent not disabled** (see V4). The only switch is a
+  global, beta harness-profile registry keyed by provider/model. The prompt bans GP, and GP
+  cannot reach Gmail. To disable it later: `register_harness_profile("openai:<model>",
+  HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)))`
+  before `create_deep_agent`.
+- **Return type:** `build_agent` returns `DigestAgent`, a Protocol with only `async
+  ainvoke(input, config=None)`. `AgentBuilder` is a Protocol for the injection point (same
+  signature as `build_agent`), and `GmailOpener` is
+  `Callable[[Settings], AbstractAsyncContextManager[dict[str, BaseTool]]]`. pyrefly accepts
+  the compiled graph as a `DigestAgent`, and test fakes need only `ainvoke`.
+- **run_digest:** logs `safe_summary()` and the window/days/effective query (INFO), then
+  `async with gmail_opener(settings)`, the pre-flight `search_email_refs(...,
+  settings.max_emails)`, `store.set_search_results` and an "Emails found" log. With 0 emails
+  neither `agent_builder` nor `model_factory` is called (probe: both raise if called). The
+  agent runs inside the `async with` block (the reader needs the live session). Assembly
+  happens after the block closes, so the MCP subprocess is already gone when the list is
+  built. GmailMCPError from the opener or the search propagates unchanged.
+- **Fallback:** `except Exception` around `ainvoke` only (CancelledError and
+  KeyboardInterrupt still propagate). If `store.all_articles()` is non-empty, it logs a WARNING
+  with the exception type and message and the article count, then assembles
+  (`assemble_reading_list` handles unranked and partial ranking). Otherwise it re-raises.
+  There is no special case for GmailMCPError inside the agent: the read wrapper already turns
+  every read failure into ERROR text, so it cannot surface there.
+- **DigestMeta:** `end_date` is the local date (`datetime.now().astimezone().date()`), and
+  `start_date = end_date - timedelta(days)`. `generated_at` is tz-aware local time.
+  `emails_found = len(emails)`. `emails_processed` and `emails_failed` are passed as 0
+  because `assemble_reading_list` recomputes them from the store.
+- **recursion_limit:** passed per call. It overrides the `9_999` that deepagents binds with
+  `.with_config` (verified, V1). Reader subagent runs keep their own bound limit.
+- **Verification:** `ruff format`, `ruff check` and `pyrefly check` (0 errors) are clean,
+  and the suite passes (710 tests). Scratchpad probes (not committed) ran the real
+  `build_agent`/`run_digest` with scripted fake chat models and a fake Gmail opener. The
+  happy path (2 emails, 2 parallel tasks, list, finalize) gave a ranked list with
+  processed=2. The empty search returned an empty list with no build. A looping model with
+  an empty store re-raised GraphRecursionError at limit 100. A looping model after one
+  recorded email fell back to ranked=False with 1 item. context7 is not available in this
+  session, so the installed 0.7.32 source plus runtime probes are the evidence. Tests for
+  agent.py belong to T015.

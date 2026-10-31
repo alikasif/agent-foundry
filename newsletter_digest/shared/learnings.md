@@ -76,3 +76,18 @@
   coroutine=<async def f(**kwargs)>, args_schema=<JSON-schema dict>)`. With a dict schema
   langchain-core passes the input dict straight through as kwargs, so the fake does not
   need its own pydantic model and the test can key it by `GMAIL_ARG_MAP["read_id"]`.
+- (T008) deepagents 0.7.32 binds `recursion_limit=9_999` via `.with_config`, but a
+  per-call `ainvoke(..., config={"recursion_limit": n})` overrides it. The default
+  general-purpose subagent can only be turned off with the global, beta
+  `register_harness_profile` registry (or by passing your own `general-purpose` spec).
+  Built-in file tools can be trimmed per agent by passing
+  `FilesystemMiddleware(backend=..., tools=["read_file"])` in `middleware` (it replaces
+  the default one by name). `read_file` is mandatory there.
+- (T008) To see exactly which tools each deepagents model gets, without an LLM: subclass
+  `BaseChatModel` with `bind_tools` that records the tool names and returns `self`, plus
+  a scripted `_generate`. The tools node of the built graph is
+  `graph.nodes["tools"].bound.tools_by_name`; the `task` tool description lists the
+  available subagents.
+- (T008) pyrefly rejects `FilesystemMiddleware` inside a `SubAgent["middleware"]` list
+  (invariant `list[AgentMiddleware]` vs `FilesystemState`). A targeted
+  `# pyrefly: ignore[bad-assignment]` on that key is the least-bad fix.
