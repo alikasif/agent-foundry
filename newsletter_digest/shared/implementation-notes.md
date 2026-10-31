@@ -681,3 +681,20 @@ Results:
   the no-match message, and exits 0. The unranked warning appears. `--model`/`--label`
   flags beat env. `--open` calls a `file://` URI. The API key never appears in
   stdout/stderr. A patched `write_reading_list` is used.
+
+### T018 — README.md
+
+- **Heading:** the Gmail section is titled exactly "Gmail MCP setup" (error messages end with
+  "See README: Gmail MCP setup."). Troubleshooting rows quote the real error texts.
+- **T005 quirk documented:** a `gcp-oauth.keys.json` in the working directory makes the
+  server print to stdout and break stdio; the README tells users to keep it only in
+  `~/.gmail-mcp/`. Also documented: the MCP subprocess does not inherit the environment
+  (only the mcp SDK defaults plus `GMAIL_OAUTH_PATH`, `GMAIL_CREDENTIALS_PATH`, proxy vars,
+  `NODE_EXTRA_CA_CERTS`).
+- **Not in the spec, stated anyway:** Testing-mode OAuth refresh tokens expire after about
+  7 days (Google behaviour, not verified here), so "re-run auth" is in troubleshooting.
+- **Honest safety wording:** prompt injection is described as mitigated, not eliminated; the
+  bound is the tool surface (read-only allowlist). The T008 default `general-purpose`
+  subagent is listed as a known residual risk.
+- **Not verified live:** the Gmail console click path and filter steps are written from
+  general knowledge of the Google UI, not exercised in this session.

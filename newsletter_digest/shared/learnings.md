@@ -95,3 +95,8 @@
   module-level console (and a RichHandler bound to it) is captured by click's
   `CliRunner` in `result.stderr` (click 8.5 always separates stderr). Configure logging
   before `Settings.build`, or its INFO notes (e.g. "--label ignored") are dropped.
+- (T018) README claims are cheap to get wrong: check each against source before writing
+  (e.g. the "mentioned in" badge only renders when `mentioned_in > 1`; mark-read keys are
+  `sha1(url or id)[:16]` under a prefix, not per file path; `--query`, `--window`,
+  `--max-emails`, `--out`, `--log-level` have no env var). `uv run newsletter-digest
+  --help` lists all nine options plus `-h`.
