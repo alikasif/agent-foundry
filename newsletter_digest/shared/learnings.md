@@ -40,3 +40,11 @@
   actually guard the property. Keep the script in the scratchpad.
 - (T013) `shared/task_list.json` usually carries other agents' uncommitted status edits;
   update your task's status in the working tree but do not commit the file unless asked.
+- (T005) langchain-mcp-adapters 0.3.2 `get_tools()` spawns a new stdio server per tool
+  call; use `client.session(name)` + `load_mcp_tools(session, ...)` for one process.
+  A tiny `mcp.server.fastmcp.FastMCP` stdio script run with the venv's python is a
+  quick way to exercise the real adapter path end to end without Gmail OAuth.
+- (T005) pyrefly warns (deprecated) on `@asynccontextmanager` functions annotated
+  `-> AsyncIterator[T]`; annotate `-> AsyncGenerator[T, None]` instead.
+- (T005) The Gmail MCP server reports handler failures as normal text `Error: ...`
+  (no `isError`), so `handle_tool_errors=False` alone does not catch them.

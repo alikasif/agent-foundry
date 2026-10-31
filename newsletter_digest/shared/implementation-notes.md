@@ -10,11 +10,11 @@
 | V3 | [re-verify] default backend is in-state/in-memory (never disk); pass state backend explicitly if not | T008 | TODO | TODO | TODO |
 | V4 | [re-verify] whether the default `general-purpose` subagent can be disabled; if not, prompt forbids it and risk is noted | T008 | TODO | TODO | TODO |
 | V5 | [re-verify] which built-in tools (filesystem, todos, task) the main agent and reader see | T008 | TODO | TODO | TODO |
-| V6 | `MultiServerMCPClient` constructor and methods; not an async context manager; [re-verify] whether `get_tools()` opens a session per call; exact import path of `load_mcp_tools` and `client.session(name)` | T005 | TODO | TODO | TODO |
-| V7 | Gmail MCP server tool names (allowlist `search_emails`/`read_email` present) and argument names (`query`, `maxResults`, `messageId`) | T005 | TODO | TODO | TODO |
-| V8 | `search_emails` output format (`ID:/Subject:/From:/Date:` blocks), no pagination, `label:` query operator works | T005 | TODO | TODO | TODO |
-| V9 | `read_email` output: headers + text/plain body, else raw HTML with the `[Note: This email is HTML-formatted...]` prefix | T005 | TODO | TODO | TODO |
-| V10 | Shape of MCP tool results returned by langchain-mcp-adapters (str vs content-block list vs tuple) | T005 | TODO | TODO | TODO |
+| V6 | `MultiServerMCPClient` constructor and methods; not an async context manager; [re-verify] whether `get_tools()` opens a session per call; exact import path of `load_mcp_tools` and `client.session(name)` | T005 | langchain-mcp-adapters 0.3.2, mcp 1.30.0 | `inspect.signature` via `uv run python` + read installed `client.py`, `tools.py`, `sessions.py` | `MultiServerMCPClient(connections=None, *, callbacks, tool_interceptors, tool_name_prefix=False, handle_tool_errors=True)`; methods `get_tools`, `session`, `get_prompt`, `get_resources`, `get_server_info`. `__aenter__` raises NotImplementedError (not a context manager). `get_tools()` calls `load_mcp_tools(None, connection=...)` and its docstring says a new session is created for each tool call, so the session form is required: `client.session(name, *, auto_initialize=True)` (async CM yielding an initialised `ClientSession`) + `from langchain_mcp_adapters.tools import load_mcp_tools` (`load_mcp_tools(session, *, server_name, handle_tool_errors, ...)`). Exercised end to end against a fake FastMCP stdio server: one spawn, tools listed, session closed on exit |
+| V7 | Gmail MCP server tool names (allowlist `search_emails`/`read_email` present) and argument names (`query`, `maxResults`, `messageId`) | T005 | @gongrzhe/server-gmail-autoauth-mcp 1.1.11 | `npm pack` of @gongrzhe/server-gmail-autoauth-mcp 1.1.11 into the session scratchpad, read `dist/index.js` (no live Gmail call: needs the user's OAuth) | 19 tools, same list as verified_facts.md; `search_emails` and `read_email` present. Zod schemas: `search_emails{query: string, maxResults?: number}` (default 10), `read_email{messageId: string}`. GMAIL_TOOL_MAP/GMAIL_ARG_MAP unchanged |
+| V8 | `search_emails` output format (`ID:/Subject:/From:/Date:` blocks), no pagination, `label:` query operator works | T005 | @gongrzhe/server-gmail-autoauth-mcp 1.1.11 | `npm pack` of @gongrzhe/server-gmail-autoauth-mcp 1.1.11 into the session scratchpad, read `dist/index.js` (no live Gmail call: needs the user's OAuth) | One text block: entries `ID: ..\nSubject: ..\nFrom: ..\nDate: ..\n` joined with `\n` (blank line between entries); zero hits give `""`. Only `users.messages.list(q, maxResults)`: no page token. `query` is passed to Gmail `q` verbatim, so `label:` works (Gmail-side; not live-tested) |
+| V9 | `read_email` output: headers + text/plain body, else raw HTML with the `[Note: This email is HTML-formatted...]` prefix | T005 | @gongrzhe/server-gmail-autoauth-mcp 1.1.11 | `npm pack` of @gongrzhe/server-gmail-autoauth-mcp 1.1.11 into the session scratchpad, read `dist/index.js` (no live Gmail call: needs the user's OAuth) | `Thread ID/Subject/From/To/Date` lines, blank line, then `[Note: This email is HTML-formatted. Plain text version not available.]\n\n` + raw HTML only when there is no text/plain part, then an optional `\n\nAttachments (n):\n- ...` list. Handler errors come back as normal text `Error: <message>` (no isError); missing OAuth keys make the process exit(1) at startup |
+| V10 | Shape of MCP tool results returned by langchain-mcp-adapters (str vs content-block list vs tuple) | T005 | langchain-mcp-adapters 0.3.2, mcp 1.30.0 | Read `_convert_call_tool_result` + live `ainvoke` on the fake server | Tools use `response_format="content_and_artifact"`; `tool.ainvoke(args)` returns the content only: a list of `{"type": "text", "text": ...}` dicts (observed live). `(content, artifact)` tuples / ToolMessage appear only via tool-call invocation; `tool_result_text` handles all of them. isError results raise ToolException when `handle_tool_errors=False` |
 
 ## Task notes
 
@@ -326,3 +326,69 @@ Reviewer notes:
   fails 23 tests, replacing the `safe_url` filter with identity fails 9, and a wrong
   `SCRIPT_HASH` fails the CSP test.
 - **Bugs found in T006:** none.
+
+### T005 — gmail_mcp.py
+
+- **Heading level:** `###` under "Task notes", like the other sections (the task text says `##`).
+- **Session form, not `get_tools()`:** V6 confirmed that `get_tools()` starts a new server
+  process for every tool call. `open_gmail_tools` uses `client.session("gmail")` +
+  `load_mcp_tools(session, server_name="gmail", handle_tool_errors=False)` inside an
+  `AsyncExitStack`, so `npx` starts once per run and the subprocess is closed on normal
+  exit, on a startup failure and when the caller's block raises. Exceptions from the
+  caller's block pass through unchanged. Only spawn/initialise/list failures become
+  `GmailMCPError` (chained `from exc`).
+- **`handle_tool_errors=False`:** an MCP `isError` result raises `ToolException` instead of
+  coming back as a normal-looking string. The callers (`search_email_refs`, and the
+  tools.py read wrapper) treat it as a failure.
+- **Server errors are plain text:** the server catches handler errors and returns
+  `Error: <message>` without `isError` (V9). `search_email_refs` and `read_email_text`
+  treat text starting with `Error:` as a failure (clipped to 300 chars in the message).
+- **Deviation (subprocess env):** the task says "subprocess inherits env". The connection
+  does NOT pass `os.environ`. The mcp SDK then gives the child only HOME/LOGNAME/PATH/
+  SHELL/TERM/USER, plus any of `PASSTHROUGH_ENV_VARS` that are set (`GMAIL_OAUTH_PATH`,
+  `GMAIL_CREDENTIALS_PATH`, proxy variables, `NODE_EXTRA_CA_CERTS`). So
+  `OPENROUTER_API_KEY` never reaches the Node process. Tradeoff: an unusual setup that
+  needs another variable (e.g. a custom `npm_config_*`) must be added to that tuple.
+- **Error message hints:** every `GmailMCPError` ends with "See README: Gmail MCP setup."
+  (added in `__init__`). Startup and search failures also name
+  `~/.gmail-mcp/gcp-oauth.keys.json` and `npx @gongrzhe/server-gmail-autoauth-mcp auth`.
+  A missing command names Node.js >= 18 and `GMAIL_MCP_COMMAND`. Single-exception
+  `ExceptionGroup`s (anyio task groups) are unwrapped for the message only;
+  `__cause__` keeps the original. Credentials are never read or logged.
+- **`read_email_text` errors:** it raises `GmailMCPError` for an `Error:` result and lets
+  transport exceptions propagate unchanged. The tools.py wrapper catches any exception,
+  calls `mark_email_failed` and keeps going (designs.md API sketch).
+- **`parse_search_results`:** blocks are split on blank lines. Only the first
+  `ID/Subject/From/Date` value per block is kept, and unknown lines are ignored. Empty
+  text gives `[]` (zero hits come back as `""`, V8). A "no results"-style message
+  (`^(no|0) (results|messages|emails)`) also gives `[]`. Any other non-empty text with no
+  ID logs a WARNING (first 200 chars) and raises.
+- **`html_to_text` details beyond the spec:** elements with the `hidden` attribute are
+  skipped like `display:none`. An unclosed `<head>` stops skipping at `<body>`. Zero-width
+  and soft-hyphen characters (common in preheaders) are removed. Link text is flattened
+  to one line, and a link with neither text nor image alt is dropped. Consecutive `<li>`
+  items are separated by one line break, not a blank line (fixed in this resume).
+- **`prepare_email_text`:** the header block is the text before the first blank line, and
+  only if every line looks like `Key: value` (otherwise the whole text is body). Kept:
+  Subject/From/Date. Dropped: Thread ID/To. The HTML note line is removed before
+  stripping. The truncation marker counts toward `max_chars` (headers included). Any
+  `<<<EMAIL`/`<<<END EMAIL` sequence inside the email is replaced with
+  `[delimiter removed]` so an email cannot close the untrusted-data wrapper early.
+- **Known limitation:** for HTML emails the server's `Attachments (n):` list is appended
+  after the HTML and goes through `html_to_text`, so its lines are merged into one.
+  Harmless for article extraction.
+- **Server quirk (not handled):** if the working directory contains `gcp-oauth.keys.json`,
+  the server copies it to `~/.gmail-mcp` and prints a line to stdout, which breaks the
+  stdio protocol. The README (T018) could mention it.
+- **Typing:** `open_gmail_tools` returns `AsyncGenerator[..., None]` because pyrefly warns
+  that `AsyncIterator` with `@asynccontextmanager` is deprecated. `client_factory` is
+  typed `Callable[[dict[str, Any]], Any]` so test fakes do not need to subclass the client.
+- **Verification:** there are no unit tests in this task (`test_gmail_mcp.py` belongs to
+  another task). A scratch script ran `open_gmail_tools` against a fake FastMCP stdio
+  server that offers search_emails/read_email/send_email/delete_email in the verified
+  output formats. It checked that only the two read tools are exposed and the
+  offered/exposed logs, search parsing with truncation to `max_results`, empty results,
+  the `Error:` result path, HTML stripping/truncation/delimiters, the command-not-on-PATH
+  error and a crashing server (`McpError: Connection closed` -> `GmailMCPError`).
+  `ruff format`/`ruff check` are clean, `pyrefly check` reports 0 diagnostics, and
+  `pytest` passes 186 tests.
