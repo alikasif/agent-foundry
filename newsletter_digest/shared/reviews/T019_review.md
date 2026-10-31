@@ -219,3 +219,54 @@ on model internals.
 1. T003: make `coerce_topic` total for non-str input (or let pydantic reject it) so that
    `RankedItem` and `StoredArticle` only ever raise `ValidationError`. Add the regression
    test in `tests/test_models.py`.
+
+---
+
+## Round 2 (re-review of commit 082c352)
+
+Reviewer: backend_reviewer · Date: 2026-10-31
+
+**Verdict: APPROVED.** T019 is done.
+
+## Review: T003 — models.py (round 2)
+
+**Status:** APPROVED
+
+**Issues Found:** None.
+
+How the fix was checked (no source changes):
+- `models.py:108-120`: `coerce_topic(value: object)` now covers every input. A `Topic`
+  passes through, any non-`str` gives `Topic.OTHER`, and strings go through the existing
+  lookup. Both `mode="before"` validators (`StoredArticle._coerce_topic_hint` at
+  `models.py:261-265` and `RankedItem._coerce_topic` at `models.py:288-292`) are now typed
+  `object`.
+- Scratch probe: `RankedItem(article_id="a1", topic=5, priority="skim", reason="x",
+  order=0)` gives `topic=Topic.OTHER` with no exception. `["LLMs"]`, `{}`, `None`,
+  `object()` and `b"llms"` all give `OTHER`. A `str` subclass, `" LLMs "` and a `Topic`
+  member still resolve correctly. No raw exception escapes `model_validate`.
+- `ArticleIn.topic_hint` (no before-validator) rejects non-str values with a pydantic
+  `string_type` `ValidationError`, so `tools._validate_items` still catches them.
+- `tests/test_coerce_topic.py` parametrises int, float, bool, list, dict and `None` over
+  `coerce_topic`, `RankedItem.model_validate` and `StoredArticle.model_validate`, and also
+  checks the `Topic` passthrough. On the old code each non-str case would raise
+  `AttributeError`, so these tests guard the regression. The tests are in a new file
+  rather than `tests/test_models.py`, which is fine.
+- MINOR resolved: `_truncate` is renamed to the public `truncate_text`
+  (`models.py:128`). `store.py:37` and `store.py:471-473` use the new name, and no
+  references to `_truncate` remain.
+- `uv run pytest -q`: 579 passed. `ruff check` and `ruff format --check`
+  (src, tests): clean. `uv run pyrefly check`: 0 errors (the 1 suppressed is the existing
+  `# type: ignore` at `tests/test_config.py:417`). No line is longer than 88 in the
+  changed files.
+
+**Security Notes:** None identified. The validators no longer raise a raw exception on
+malformed LLM tool payloads, which restores the "tools never raise to the agent"
+contract for this path.
+
+**Positive Notes:** The fix is the smallest one that works. The leniency lives in one
+helper, the validators were not touched beyond their annotations, and the docstring
+explains why non-strings are accepted. The learning was also recorded in
+`shared/learnings.md`.
+
+The round-1 T004 MINORs (query re-encoding, root-URL merge, non-atomic snapshot) are
+still open as non-blocking hardening ideas.
