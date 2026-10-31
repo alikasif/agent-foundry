@@ -48,3 +48,9 @@
   `-> AsyncIterator[T]`; annotate `-> AsyncGenerator[T, None]` instead.
 - (T005) The Gmail MCP server reports handler failures as normal text `Error: ...`
   (no `isError`), so `handle_tool_errors=False` alone does not catch them.
+- (T007) langchain-core 1.7.3 `StructuredTool(handle_validation_error=<callable>)` turns
+  argument-schema `ValidationError`s into the callable's string on both `ainvoke(dict)`
+  and `ToolCall` paths (ToolMessage status "error"), so a tool can "never raise" on bad
+  args without relying on ToolNode error handling.
+- (T007) `requires-python >= 3.11`: ruff rejects PEP 695 `def f[T: X](...)` as invalid
+  syntax; use `typing.TypeVar`.

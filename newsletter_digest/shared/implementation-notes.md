@@ -392,3 +392,75 @@ Reviewer notes:
   error and a crashing server (`McpError: Connection closed` -> `GmailMCPError`).
   `ruff format`/`ruff check` are clean, `pyrefly check` reports 0 diagnostics, and
   `pytest` passes 186 tests.
+
+### T007 — tools.py and prompts.py
+
+- **Heading level:** `###` under "Task notes", like the other sections (the task text says `##`).
+- **StructuredTool construction (langchain-core 1.7.3):** each tool is
+  `StructuredTool.from_function(coroutine=<closure>, name=..., description=...,
+  args_schema=<private pydantic model>, handle_validation_error=<callable>)`. No sync
+  `func`, so the tools are async-only (sync `invoke` raises `NotImplementedError`).
+  Explicit `args_schema` models (not schema inference) so each argument carries a
+  `Field(description=...)` for the LLM.
+- **Never raise, also for schema errors:** `handle_validation_error` turns an
+  argument-schema `ValidationError` (missing field, `articles` not a list, `offset` not an
+  int) into `{"ok":false,"errors":["field: msg"],"hint":"Fix ... and call the tool again."}`.
+  langchain-core applies it on both paths: `ainvoke(dict)` returns the string, a
+  `ToolCall` returns a `ToolMessage` with `status="error"`. So it does not depend on how
+  deepagents' ToolNode handles exceptions. Per-item validation (`ArticleIn`, `RankedItem`)
+  happens inside the tool, so one bad item never rejects the batch. Tradeoff: `articles`
+  and `items` are typed `list[dict[str, Any]]` (as the task says), so a non-object entry
+  (e.g. a bare string) fails the whole call at schema level. It still comes back as an
+  `ok:false` message, not an exception.
+- **Index remapping:** only valid items go to `store.add_articles` / `apply_ranking`, so
+  the store's `rejected` / `errors` indices refer to the filtered list. The tool maps them
+  back to positions in the agent's original list and sorts all entries by index.
+- **`search_emails` query text:** `make_search_tool(store, *, query: str = "")`. The query
+  is not in the store, so the caller passes `settings.effective_query` (T008). It is only
+  echoed in the result. The email list comes from `store.search_results()`.
+- **`record_articles`:** `date` defaults to `""` (`EmailSource.date` is optional). An
+  unknown `email_id` returns `{"ok":false,"errors":["email id not in this digest's search
+  results; do not retry."]}` with no retry hint. Beyond 60 articles the extra ones are
+  dropped before validation, and the result gets `"ignored": n` plus a `note`. Both keys
+  are present only when n > 0 (additions to the designs.md shape).
+- **`finalize_reading_list`:** returns `ok: true` whenever the call was processed (as in
+  designs.md), even with item errors. When `errors` is non-empty, a `hint` asks to resend
+  only those items. `unranked_remaining` is the store's (first 50 ids).
+- **`list_collected`:** `limit` is clamped to 1..150 in the tool, so the model cannot ask
+  for an unbounded page. Returns `store.list_rows(...).model_dump()`.
+- **`read_email` wrapper:** the id is stripped and checked against
+  `store.known_email_ids()` before the raw tool is called. Any `Exception` from
+  `gmail_mcp.read_email_text` (ToolException, transport errors, `GmailMCPError` for
+  `Error:` text), plus an empty/whitespace result, counts as a failure:
+  `store.mark_email_failed(id, reason)` and the designs.md `ERROR: could not read email
+  <id> (<reason>). Call record_articles with an empty list and stop.` The reason is
+  `Type: message`, one line, at most 200 chars. `CancelledError` is not caught. Success
+  returns `prepare_email_text(raw, settings.max_email_chars, email_id=id)`.
+- **Logging:** INFO for each `record_articles` (email id, newsletter name, added/merged/
+  rejected counts) and each `finalize_reading_list` (applied/errors/unranked). WARNING for
+  refused ids and read failures (reason only). DEBUG for raw vs prepared text sizes. Email
+  bodies are never logged.
+- **Tool names vs the MCP rule:** `search_emails` / `read_email` in tools.py are the
+  *logical* wrapper names from designs.md, not server names. tools.py never touches
+  `GMAIL_TOOL_MAP` or argument names: it reaches the raw tool only through
+  `gmail_mcp.read_email_text`.
+- **prompts.py:** `TOPICS = tuple(t.value for t in Topic)`, rendered as a list into the
+  main prompt and inline into the reader prompt. `MAX_MUST_READ = 10`. The main prompt
+  hard-codes "at most 5 in parallel" (acceptance criterion). `build_user_message` uses
+  `settings.reader_parallelism` (default 5) and also gives the day count, window,
+  effective query and email count. The main prompt also tells the agent not to read
+  emails itself and treats titles/summaries as untrusted, in addition to the designs.md
+  list. The subagent name `newsletter-reader` is a literal in the prompts. T008's
+  `READER_NAME` must match it.
+- **Python 3.11 compatibility:** `requires-python >= 3.11`, so `_validate_items` uses a
+  `TypeVar`, not PEP 695 syntax (ruff flags `def f[M]` as invalid syntax for 3.11).
+- **Verification:** a scratch script (session scratchpad, not committed) ran every tool
+  with a fake raw read tool. It covered: the names, async-only, an empty args schema for
+  search_emails, the refused id (raw tool not called), the success path with delimiter
+  scrubbing, `ToolException` and `Error:` failures (both marked failed), a mixed
+  valid/invalid article batch (indices 1 and 2 reported, 2 stored), an unknown email id,
+  an empty newsletter, 65 articles (60 kept, 5 reported), schema errors via `ainvoke` and
+  via `ToolCall` (a ToolMessage with status `error`), list paging, and finalize with an
+  unknown id and an invalid priority (remapped indices, `unranked_remaining`, `finalized`
+  True). `ruff format`/`ruff check` are clean on both files, `pyrefly check` reports 0
+  errors, and `pytest` passes 307 tests. Tests for these files belong to T014.
