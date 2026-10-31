@@ -33,8 +33,8 @@ from newsletter_digest.models import (
     ReadingList,
     StoredArticle,
     Topic,
-    _truncate,
     coerce_topic,
+    truncate_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -468,9 +468,9 @@ def _collected_row(article: StoredArticle) -> CollectedRow:
         sources.append(f"+{len(names) - ROW_MAX_SOURCES} more")
     return CollectedRow(
         id=article.id,
-        title=_truncate(article.title, ROW_TITLE_CHARS),
-        url=_truncate(article.url, ROW_URL_CHARS),
-        summary=_truncate(article.summary, ROW_SUMMARY_CHARS),
+        title=truncate_text(article.title, ROW_TITLE_CHARS),
+        url=truncate_text(article.url, ROW_URL_CHARS),
+        summary=truncate_text(article.summary, ROW_SUMMARY_CHARS),
         topic_hint=article.topic_hint.value,
         sources=sources,
         mentioned_in=article.mentioned_in,

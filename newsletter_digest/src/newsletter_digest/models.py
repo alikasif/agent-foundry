@@ -105,16 +105,18 @@ _TOPIC_LOOKUP: dict[str, Topic] = {
 }
 
 
-def coerce_topic(value: str | None) -> Topic:
+def coerce_topic(value: object) -> Topic:
     """Map a free-form topic label to a ``Topic``; anything unknown becomes ``OTHER``.
 
     Matches enum values and names case-insensitively (ignoring punctuation, '&' ==
-    'and'), then the ``TOPIC_ALIASES`` table.
+    'and'), then the ``TOPIC_ALIASES`` table. Non-string input (``None``, numbers,
+    lists, dicts from a malformed LLM payload) also becomes ``OTHER``, so the
+    ``mode="before"`` validators never raise.
     """
-    if value is None:
-        return Topic.OTHER
     if isinstance(value, Topic):
         return value
+    if not isinstance(value, str):
+        return Topic.OTHER
     return _TOPIC_LOOKUP.get(_topic_key(value), Topic.OTHER)
 
 
@@ -123,7 +125,7 @@ def _collapse(text: str) -> str:
     return " ".join(text.split())
 
 
-def _truncate(text: str, limit: int) -> str:
+def truncate_text(text: str, limit: int) -> str:
     """Shorten ``text`` to at most ``limit`` chars, ending with an ellipsis.
 
     Cuts at the last word boundary when that keeps at least half of the budget,
@@ -144,7 +146,7 @@ def _clean_required(value: str, limit: int, field: str) -> str:
     text = _collapse(value)
     if not text:
         raise ValueError(f"{field} must not be empty")
-    return _truncate(text, limit)
+    return truncate_text(text, limit)
 
 
 def _strip_required(value: str, field: str) -> str:
@@ -233,7 +235,7 @@ class ArticleIn(BaseModel):
             return ""
         if not isinstance(value, str):
             return value
-        return _truncate(_collapse(value), MAX_SUMMARY_CHARS)
+        return truncate_text(_collapse(value), MAX_SUMMARY_CHARS)
 
     @field_validator("topic_hint")
     @classmethod
@@ -258,7 +260,7 @@ class StoredArticle(BaseModel):
 
     @field_validator("topic_hint", mode="before")
     @classmethod
-    def _coerce_topic_hint(cls, value: str | None) -> Topic:
+    def _coerce_topic_hint(cls, value: object) -> Topic:
         """Unknown hints map to ``Topic.OTHER``."""
         return coerce_topic(value)
 
@@ -285,7 +287,7 @@ class RankedItem(BaseModel):
 
     @field_validator("topic", mode="before")
     @classmethod
-    def _coerce_topic(cls, value: str | None) -> Topic:
+    def _coerce_topic(cls, value: object) -> Topic:
         """Unknown topics map to ``Topic.OTHER`` instead of failing."""
         return coerce_topic(value)
 
