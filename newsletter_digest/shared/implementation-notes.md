@@ -496,3 +496,35 @@ Reviewer notes:
   agent's file that is still in progress.
 - **Bugs found in T005:** none. One expectation of mine was wrong: a link with no text
   between `A` and `B` gives `AB`, not `A B`. The test now asserts `AB`.
+
+### T011 — tests for models.py and store.py
+
+Decisions not covered by the spec:
+- **Heading level**: `###` under "Task notes", like the other task sections.
+- **Contract-level assertions**: the tests pin the documented thresholds and constants
+  (0.92 / 0.85 / 4 tokens / 20 chars, `TRACKING_PARAMS` superset) and the documented
+  T004 decisions (tracker hosts are not same-host evidence; a failed email recorded with
+  `[]` stays failed; `merged` counts idempotent re-records; `list_rows` clamps
+  `offset >= 0` and `limit >= 1`; earliest date falls back to the first non-empty
+  string). If those decisions change, update the tests with them.
+- **Fuzzy examples** were chosen by measuring ratios first: "Meta open-sources new
+  vision/speech model for robots" (0.889) exercises the same-host 0.85 rule; "vector
+  database" / "vector store" / "vector datastore" (A-B below 0.92, C-A 0.951, C-B 0.96)
+  exercises "highest ratio candidate wins".
+- **Thread-safety smoke test**: 8 threads (one email each) behind a `threading.Barrier`
+  add 40 distinct articles plus one shared URL one at a time; asserts total count,
+  gap-free sequential ids, `mentioned_in == 8` on the shared article and all emails
+  processed. Distinct titles carry distinct digit tokens so the O(n) fuzzy scan exits
+  early and the test stays fast (about 0.3 s).
+- **Unnormalisable URL path**: `rejected` in `AddResult` is reached with
+  `https://example.com:99999/x`, which passes `ArticleIn` (no port check) but makes
+  `normalize_url` raise.
+
+Results:
+- `tests/test_models.py` (121 tests) and `tests/test_store.py` (145 tests): 266 passed
+  offline. Coverage: store.py 100%, models.py 99% (the only miss is the non-str
+  passthrough in `ArticleIn._clean_summary`).
+- Mutation check from a scratch script (not committed): disabling the digit guard,
+  the tracker-host check, `utm_*` stripping or the store lock each makes at least one
+  test fail.
+- No bugs found in models.py or store.py.

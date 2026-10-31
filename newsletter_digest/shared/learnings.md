@@ -64,3 +64,11 @@
 - (T012) A minimal `BaseTool` fake for `ainvoke(dict)`: subclass `BaseTool` without
   `args_schema`, implement `async _arun(self, **kwargs)`. The dict is passed through
   as kwargs, so you can record the exact argument names.
+- (T011) Before writing fuzzy-dedupe tests, measure the candidate titles with
+  `titles_match(normalize_title(a), normalize_title(b), same_host=...)` in a one-off
+  `uv run python -` snippet. Intuitive "near-duplicate" pairs often fall below 0.92,
+  and two stored titles can both match a new one only if they are below 0.92 to each other.
+- (T011) Mutation-testing the store lock (swap `self._lock` for
+  `contextlib.nullcontext()` in a scratch script) shows whether the threading smoke test
+  can catch a race. A Barrier plus single-article `add_articles` calls from 8 threads
+  caught it here.
