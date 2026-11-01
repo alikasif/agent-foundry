@@ -278,3 +278,125 @@ session (M1).
    with a test.
 
 MINOR items m1-m4 are recommended but do not block.
+
+---
+
+# Round 2 (re-review of fixes)
+
+Reviewer: backend_reviewer · Date: 2026-11-01 · Commits reviewed: `124fdf2` (T005, M1),
+`fb0a01f` (T007, M2 + m1 + m2), `3f1bb8c` (T009, `.env` from the cwd)
+
+**Verdict: APPROVED.** M1 and M2 are fixed, and the regression tests reproduce the
+real failure modes. I found no regressions. The security checklist S1-S11 still passes.
+One new MINOR item (m5) does not block.
+
+## Checks run (no source changes)
+
+- `uv run pytest -q`: **844 passed**, 2 deselected (the `integration` marker, by design).
+- `uv run ruff check src tests`: clean. `ruff format --check src`: clean.
+  `uv run pyrefly check`: 0 errors. The 2 suppressed are pre-existing
+  (`agent.py:104`). No source line is longer than 88 characters.
+- Scratch probes (session scratchpad, not committed). I ran `CliRunner` on `cli.digest`
+  with `GMAIL_MCP_COMMAND=sys.executable`, pointed at the T012 FastMCP stdio fake:
+
+| Probe | Round 1 | Round 2 |
+|-------|---------|---------|
+| Search returns `Error: invalid_grant` | exit 1, `ExceptionGroup: unhandled errors in a TaskGroup`, no hint | exit 1, `Gmail search failed: Error: invalid_grant.` + auth hint + README pointer |
+| Server lacks `read_email` | exit 1, ExceptionGroup message | exit 1, `does not offer the required read-only tool(s) ['read_email'] ... See README` |
+| Server exits at startup | exit 1, clean `GmailMCPError` | unchanged (exit 1, README pointer) |
+| `run_digest` with a `model_factory` that raises a custom `RuntimeError` subclass | ExceptionGroup | the original type, not a group |
+| `anyio.fail_after` timeout inside the block | (not probed) | `TimeoutError` |
+| asyncio `task.cancel()` inside the block | (not probed) | `CancelledError` |
+| `KeyboardInterrupt` inside the block | (not probed) | `KeyboardInterrupt` |
+| `OPENROUTER_API_KEY` in CLI output | absent | absent (all three CLI probes) |
+
+## M1 (T005, `gmail_mcp.py:173-208`): FIXED
+
+- `raised` holds whatever leaves the `yield` and also the startup and
+  `filter_read_only` conversions, because the inner `try` wraps all three. The outer
+  `except BaseExceptionGroup` re-raises `raised` only when `_sole_leaf(group, raised)`
+  is that exact object. Every other case re-raises the group unchanged: other leaves,
+  or a group from session teardown when the block finished cleanly. Using an identity
+  check rather than a type match is the right choice, because it never hides a second
+  failure.
+- `_sole_leaf(..., stop=raised)` covers a caller that itself raises a single-member
+  `ExceptionGroup`: unwrapping stops at the caller's group. `_describe` reuses the same
+  helper, so there is one unwrapping rule (DRY).
+- `raise raised` sits outside the `except` block, so the group does not become
+  `__context__`. The test asserts this. `contextlib`'s `__aexit__` then sees the
+  identical object and returns `False`, so the caller's own frame gets back its
+  original exception.
+- `BaseException` handling is sound. Cancellation, `KeyboardInterrupt` and
+  `GeneratorExit` (from `aclose`) are recorded and re-raised the same way, so anyio
+  cancel scopes still work (probes above). `requires-python >= 3.11` provides the
+  builtin `BaseExceptionGroup`.
+- Tests: real-stdio tests for a body-raised `GmailMCPError` and `ValueError` (identity
+  and no group `__context__`), `invalid_grant` keeping the auth hint, and a missing
+  allowlisted tool (parametrised over both tools). There are also fake grouping-client
+  tests for a single leaf, a multi-leaf group, and an unrelated teardown group. All of
+  this matches the Round 1 request.
+- Comment `:173-177` and the implementation-notes T005 text (`:340`, plus the new
+  "T005 review fix (T020 M1)" section) are corrected.
+- The optional T009 `except*` hardening was not done. That is acceptable now that the
+  root cause is fixed and tested end to end.
+
+## M2 (T007, `tools.py:297-332`): FIXED
+
+- `_make_tool` now wraps every coroutine in `guarded(**kwargs)`. Any `Exception` is
+  logged as `Tool <name> failed unexpectedly (<Type>)` at ERROR, with
+  `traceback.format_tb` at DEBUG. That logs frames only, never the exception message,
+  arguments or email text. The tool returns `{"ok": false, "errors": ["internal error:
+  <Type>"]}`. `BaseException` (cancellation) propagates. One guard covers all five
+  tools, including `read_email`'s `prepare_email_text` path.
+- `read_email` uses `on_error=handle_unexpected`. It returns the same `ERROR:` line
+  through `_read_error`, which is now shared with the read-failure path (DRY), and it
+  marks the email failed. `suppress(Exception)` around `mark_email_failed` is justified
+  rather than defensive noise: the store may be what failed, and `_require_known`
+  raises `ValueError` for an id that is not known, so unknown ids can never pollute
+  the failed list.
+- `guarded(**kwargs)` is safe with an explicit `args_schema`. langchain-core injects no
+  `callbacks`/`config` into a bare `**kwargs` signature, and the
+  `handle_validation_error` path is unchanged.
+- Tests: each store-backed tool with a raising store method, plus `search_emails`,
+  `prepare_email_text` failure, store failure in `read_email`, the `ToolCall` →
+  `ToolMessage` path, a `BaseException` that passes through, and a check that
+  `SECRET_TEXT` is absent from logs.
+- m1 and m2 from Round 1 are also addressed (`prompts.py`):
+  - m1: subjects and senders are named as untrusted, and the reader is told its task
+    subject is untrusted.
+  - m2: the parallel limit now comes only from `build_user_message`
+    (`settings.reader_parallelism`).
+
+## 3f1bb8c (T009, `cli.py:31-34`): FIXED
+
+- `load_dotenv(find_dotenv(usecwd=True))`. When no `.env` exists, `find_dotenv`
+  returns `""`. python-dotenv 1.2.4 checks `dotenv_path is None`, so `""` does not
+  trigger a second search from the module's directory: it is a no-op. Existing env
+  vars still win (`override=False`). The strict xfail was removed, and the test passes.
+- Informational: `find_dotenv` walks up from the cwd to parent directories. That
+  behaviour is documented in implementation-notes and in python-dotenv. It loads only
+  files on the user's own filesystem, so it is not a security concern.
+
+## New findings
+
+- **[MINOR] m5** `tools.py:274-278` (`handle_unexpected`). The read body strips
+  `email_id` (`:256`), but the handler uses the raw `kwargs["email_id"]`. If the model
+  passes a padded id (`" m2 "`) and `prepare_email_text` then raises,
+  `mark_email_failed(" m2 ")` raises `ValueError`, which is suppressed. The email is
+  then not marked failed, and the ERROR line echoes the padded id. Impact is
+  negligible: the reader still records an empty list, so the email counts as
+  processed with no articles. Fix if convenient:
+  `_clip(str(kwargs.get("email_id", "")).strip())`.
+- m3 (`prepare_email_text` truncation versus delimiter substitution) and m4
+  (`write_reading_list` `OSError` → traceback) from Round 1 remain open. Both are MINOR
+  and do not block.
+
+## Security re-check
+
+S1-S11 unchanged; all PASS. The new code adds no logging of arguments or email text
+(verified by test and by reading the code), no new subprocess env, and no new tool
+surface. The ERROR line for `read_email` includes only the exception type name.
+
+## Result
+
+T005 (M1) and T007 (M2) are resolved. T020 is **APPROVED** and set to `done`.

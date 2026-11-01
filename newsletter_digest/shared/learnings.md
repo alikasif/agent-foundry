@@ -154,3 +154,16 @@
   it injects no `callbacks`/`config`. `traceback.format_tb(exc.__traceback__)` gives a
   traceback without the exception message, which helps when that message may hold
   email text.
+- (T020 round 2) To get the caller's exception back out of an `@asynccontextmanager` that
+  wraps mcp/anyio task groups: record the exception at the `yield`, catch
+  `BaseExceptionGroup` around the stack, and re-raise the recorded object only if it is
+  the identical sole leaf. Do the re-raise outside the `except` block so the group does
+  not become `__context__`. contextlib then sees the same object and returns False, so
+  the caller keeps its own traceback. Probe timeout, `task.cancel()` and
+  `KeyboardInterrupt` too: they must come out as themselves.
+- (T020 round 2) `load_dotenv(find_dotenv(usecwd=True))` with no `.env` is a no-op:
+  `find_dotenv` returns `""`, and python-dotenv 1.2.x only falls back to its own search
+  when `dotenv_path is None`.
+- (T020 round 2) `shared/task_list.json` is written with `json.dumps(indent=2,
+  ensure_ascii=True)` and no trailing newline. Match that exactly, or a status edit
+  rewrites every line containing non-ASCII text.
