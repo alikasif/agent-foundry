@@ -218,3 +218,7 @@
 - (T035) A pydantic `mode="before"` validator that only handles `isinstance(value, list)`
   is bypassed by tuples and sets: lax mode coerces them into `list[str]` after the
   validator returned them unchanged. Test sequence validators with a tuple too.
+- (T034) pytest-cov is not installed here (`--cov` is "unrecognized arguments"). During a
+  parallel batch, measure one module's line coverage without touching `pyproject.toml`:
+  `sys.settrace` before the first import, run `pytest.main`, and compare the hit lines
+  with the `co_lines()` of the module's compiled code objects, walked recursively.

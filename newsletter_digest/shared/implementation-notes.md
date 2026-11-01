@@ -1448,3 +1448,47 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   during a parallel batch.
 - Verified: ruff format/check and pyrefly clean (0 errors); full suite 1396 passed,
   1 xfailed, including `tests/test_flag_off_identity.py`.
+
+## T034 — Tests for links.py and the store re-export
+
+- **File.** `tests/test_links.py` (289 tests, all offline). One URL table per `LinkKind`
+  (unsubscribe incl. list-unsubscribe/opt-out/`disable_email`/percent-encoded forms,
+  preferences, view-in-browser, social share intents and profiles, pixels, sponsor hosts,
+  paths and utm values, every `TRACKER_HOSTS` entry and subdomain, every prefix, plain
+  articles), plus a check that the tables together hit all eight kinds.
+- **Precedence.** Each case is a URL matching two rules, the winner, and the same URL
+  without the winner's marker, asserted to be the lower kind, so no precedence case
+  passes trivially. A guard test requires a case for every adjacent pair of
+  UNSUBSCRIBE > PREFERENCES > VIEW_IN_BROWSER > PIXEL > SPONSOR > SOCIAL > TRACKER >
+  ARTICLE; seven non-adjacent pairs are added (e.g. a `list-manage.com` unsubscribe is
+  UNSUBSCRIBE, not TRACKER).
+- **Contract vs T025 choices.** Beyond AF-P5 the tests also pin T025's documented
+  decisions: the fragment is ignored (`/a#unsubscribe` is ARTICLE; the fragment is never
+  sent), split-before-decode (`%23`/`%3F` keep the keyword in the path), trailing-dot
+  hosts, `ledger_key` dropping userinfo, mapping an empty path to `/`, re-bracketing IPv6
+  and returning unparseable input (`[`-broken host, port 99999) unchanged. Unparseable
+  input falls back to the keyword kinds (`http://[unsubscribe` is UNSUBSCRIBE).
+- **AF-13 false-positive policy.** `test_known_false_positives_are_skipped_not_fetched`
+  records that slugs such as `/why-users-opt-out` and `/developer-preferences-survey`
+  are skipped (the kind is not in `FETCHABLE_KINDS`). Near-miss slugs that must stay
+  ARTICLE: `google-pixel-10-review`, `adventures-in-rust`, `headlines`, `/downloads/`,
+  `address-book`, `utm_campaign=ad-regulation`, `utm_content=sponsor`, `open-source-*`.
+- **Parity.** The bb16231 tracker tables and `store._is_tracker_host` body are copied into
+  the test as an oracle. The tests check the tables are equal and that `is_tracker_host`
+  agrees with the oracle on each entry, subdomain, `not<host>`, `<host>.evil.example`,
+  upper-case input (False in both, because the input must already be lower-case) and on
+  prefix variants. The store identity checks use `is` for all three names.
+- **Totality.** 27 fixed garbage inputs (empty, NUL, broken IPv6, bad ports, an NFKC netloc
+  that makes `urlsplit` raise, mailto/javascript/data/file, a 10k-char path, a 2k-param
+  query), plus 9,000 seeded random strings for both `classify_link` and `ledger_key`.
+- **Mutation check** (scratch `t034_mutate.py`: the mutated source is exec'd into a module
+  registered as `newsletter_digest.links`). All 7 mutants were killed: dropping the
+  opt-out pattern (6 failures), pixel checked before the keyword rules (1), tracker
+  checked before social (1), fragment kept in `ledger_key` (2), decoding before
+  `urlsplit` (1), default port kept (4), no parent-domain match (48).
+- **Coverage.** pytest-cov is not a project dependency and adding it would change the
+  shared `pyproject.toml`/`uv.lock`, so line coverage came from a `sys.settrace` scratch
+  harness: 119/119 executable lines of `links.py`.
+- Verified: ruff and pyrefly clean (0 errors). `tests/test_links.py`, `test_store.py` and
+  `test_flag_off_identity.py`: 447 passed. The full suite's only failures were 2 in
+  `tests/test_netguard.py`, which belongs to T036 and was in progress at the time.
