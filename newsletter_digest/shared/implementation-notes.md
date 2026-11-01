@@ -2294,3 +2294,75 @@ OpenRouter).** For the user, from the project dir with a filled `.env`:
 ```
 uv run newsletter-digest --window 1w --max-emails 5 --fetch-articles --max-fetch 5 --open
 ```
+
+## F002 — Follow click-tracker interstitial pages (ad-hoc fix, not in task_list.json)
+
+User's first real run: `fetched 1, summarised 1, failed {TOO_SHORT: 4}`. Towards Data
+Science links are HubSpot click trackers that answer 200 text/html (~8 KB) with a JS
+bot-check page ("You're being redirected" + one `click here` fallback anchor) instead of
+a 3xx. trafilatura got 81 chars, so TOO_SHORT.
+
+**What changed (fetch.py)**
+- New pure helper `interstitial_target(body, base_url) -> str | None`. Kept in fetch.py,
+  not links.py: links.py is URL-only classification, and parsing a response body is
+  response classification, which fetch.py owns. It uses stdlib `html.parser`, so
+  attribute order, quoting and HTML entities (`&amp;`, `&#39;`, `&rsquo;`) are handled
+  by the parser, and `<script>` contents are CDATA (an `<a href>` string inside the
+  fingerprinting script is not counted as an anchor).
+- Patterns: (a) the first `<meta http-equiv="refresh">` whose content is
+  `N; url=...` (also `N, url=`, quoted or not, any case); (b) visible text (outside
+  script/style) containing "You're being redirected" (straight or curly apostrophe,
+  after entity decoding) AND exactly one `<a>` tag, which must have an href. The target
+  is `urljoin(page_url, value)` and must be http/https with a host, otherwise None.
+- Gate in `PageFetcher.fetch`: only after `_extract` returned TOO_SHORT or BLOCKED (the
+  existing "too little text" branch) for a body of at most CHALLENGE_MAX_BYTES. A body
+  only exists after `_classify_head` passed, so it is already 2xx and HTML (or sniffed
+  HTML). The onward page is downloaded with the same `_download` (same client, request
+  hook, guarded transport, body cap) and classified by `_extract` as usual; it is never
+  checked for another interstitial, so at most one interstitial hop per fetch and a
+  chain falls through to TOO_SHORT/BLOCKED.
+
+**Decisions not in the instructions**
+- Deadline: `fetch` now computes one absolute deadline and wraps both downloads in
+  `anyio.fail_at(deadline)` instead of one `fail_after`. Extraction stays outside the
+  deadline (the T030 decision, still pinned by
+  `test_extraction_runs_after_the_fetch_deadline`). Consequence: if extracting the first
+  page used up the rest of the deadline, the onward hop is TIMED_OUT rather than the
+  first page's TOO_SHORT. Pages here are <= 64 KB, so this is unlikely.
+- Redirect budget: httpx counts `max_redirects` per `client.stream` call, so the second
+  download would get a fresh budget. The request hook now also refuses a hop when the
+  fetch's `chain_hops` set already holds `max_redirects + 1` URLs (TOO_MANY_REDIRECTS).
+  For a plain redirect chain httpx raises first, so nothing changes there; across an
+  interstitial it caps the whole fetch at `max_redirects + 1` requests. An exhausted
+  budget at the interstitial is TOO_MANY_REDIRECTS (not TOO_SHORT), and the onward URL
+  is not requested. `max_redirects=0` therefore allows no interstitial hop.
+- `chain_hops` is created in `fetch` and passed to `_download` (it used to be local to
+  `_download`), so an onward URL equal to any earlier hop is TOO_MANY_REDIRECTS before
+  the ledger sees it.
+- An interstitial whose onward URL another fetch already claimed is DUPLICATE (ledger),
+  like a converging redirect.
+- One DEBUG log line names the two hosts (via `log_host`); no URL path, query or body.
+
+**Tradeoffs**
+- The "exactly one anchor" rule fails closed: a HubSpot variant with a second link
+  (a footer, a privacy link) stays TOO_SHORT. Preferred over guessing which link is
+  the onward one.
+- Pattern (b) needs the redirect text and one anchor; any short, small page with that
+  text and one link would be followed. All hop guards still apply to the target, so the
+  worst case is one extra guarded request inside the same budgets.
+- No JS is run and HubSpot's `_jss=0` fallback is what we follow; if HubSpot changes the
+  page shape, the result degrades to the old TOO_SHORT, not to an error.
+
+**Tests**: tests/test_fetch_interstitial.py (56 tests, offline). HubSpot fixture to a
+real article with the real extractor; heading/entity forms; meta-refresh forms;
+non-interstitials (no URL, javascript:/data:/ftp:/mailto:, two anchors, no href, no
+text, binary); 500 and text/plain interstitials not followed; >64 KB page with the
+text not followed; article-length page with the text kept; private IP / metadata /
+private-resolving host through the real guarded transport -> UNSAFE with one dial;
+URL-policy targets never requested; unsubscribe/preferences/view-in-browser targets ->
+NOT_ARTICLE, never requested; interstitial chain -> TOO_SHORT after one hop; target =
+first URL and onward redirect back -> TOO_MANY_REDIRECTS; DUPLICATE; budget fits at 3,
+fails at 2 and 1 and 0; shared deadline -> TIMED_OUT; onward body cap -> TOO_LARGE.
+Mutation check (scratch copy of fetch.py, restored afterwards): dropping the budget
+check, the size gate, the short-text gate, the one-hop limit, the shared chain set or
+the shared deadline each fails at least one test.

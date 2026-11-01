@@ -299,6 +299,11 @@ links.
 - Links that are not articles (unsubscribe, manage preferences, view in browser, social,
   tracking pixels, sponsor and ad links) are never requested. Click-tracking redirect
   links are followed.
+- Some click trackers (HubSpot, used by Towards Data Science, for example) answer with a
+  small "You're being redirected" page instead of a redirect. When a small HTML page gives
+  almost no text and is such a page (or a `<meta http-equiv="refresh">` page), its single
+  onward link is followed once, with the same safety checks as any redirect. That hop
+  counts towards the redirect limit and the per-page time limit.
 - If ranking did not finish (the unranked fallback), nothing is fetched and the page header
   says "Article fetching was skipped: ranking was not completed."
 - Each URL is requested once per run; a second item that resolves to the same page keeps
@@ -336,7 +341,7 @@ reads `Couldn't summarise the article: <reason>`.
 | `no readable article text` | No main text could be extracted, or under 400 characters (often a JavaScript-only page). |
 | `address not allowed` | The link failed the safety checks (see [Safety model](#safety-model)). |
 | `not an article page` | A redirect landed on an unsubscribe, preferences or view-in-browser page. |
-| `too many redirects` | More than `NEWSLETTER_FETCH_MAX_REDIRECTS` redirects. |
+| `too many redirects` | More than `NEWSLETTER_FETCH_MAX_REDIRECTS` redirects (a followed tracker page counts as one), or a redirect loop. |
 | `couldn't summarise` | The model call failed (not a rate limit) or returned unusable output. Shown as "Couldn't summarise the article". |
 | `model rate limit reached` | The model returned HTTP 429 after retries, so remaining items were not tried. Shown as "Couldn't summarise the article". |
 | `couldn't fetch` | Any other unexpected error. |
