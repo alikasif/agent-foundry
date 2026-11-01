@@ -2006,3 +2006,10 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   (unreachable for selected items), `build_user_message` (not T039).
 - Results: 242 new tests pass + 1 xfail; full suite 2223 passed, 2 deselected, 2 xfailed;
   ruff and pyrefly clean.
+
+## T043 — README: article fetching, privacy, free-tier limits
+
+- Every claim was checked against `--help`, `config.py` (defaults and ranges), `models.FetchFailure`, the template wording, `enrich.py` (selection order, unranked skip reason, 429 breaker) and `netguard.py`/`fetch.py` (ports, userinfo, cookies, proxies).
+- Beyond the task text: the doc states that fetch env values are validated even with the flag off (T027), the `:free` default interval of 3.1 s applies only when the reader model name ends in `:free`, and the extracted full text is written into the HTML (so the file is larger and holds page text).
+- The free-tier figures (20 requests/minute, 50/day under 10 credits, 1000/day at 10 or more) come from the task description, not from a source file; they should be re-checked against OpenRouter's current docs.
+- "Startup import cost" is documented as verified: `agent.py` imports `enrich`, which imports `fetch` and `extract`, which import trafilatura at module load.

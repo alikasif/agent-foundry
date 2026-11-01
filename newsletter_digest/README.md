@@ -8,6 +8,10 @@ You run it, open the file and triage: a "Must read" section comes first, followe
 topic groups (LLMs, Agents, RAG/Retrieval, Data Engineering, MLOps/Infra, Research
 Papers, Industry/Funding, Tools & Libraries, Other).
 
+Optionally (`--fetch-articles`, off by default) it also fetches the linked pages of your
+top items and summarises them; see
+[Fetching article pages](#fetching-article-pages---fetch-articles).
+
 Under the hood a LangChain deep agent searches Gmail through a Gmail MCP server
 (read-only tools only), reads each email with a reader subagent, and ranks the
 collected articles with an OpenRouter model.
@@ -159,8 +163,19 @@ is already set in your shell wins over the same variable in `.env`.
 | `NEWSLETTER_LABEL` | `Newsletters` | Gmail label to search. |
 | `GMAIL_MCP_COMMAND` | `npx` | Command that launches the Gmail MCP server. Environment only. |
 | `GMAIL_MCP_ARGS` | `@gongrzhe/server-gmail-autoauth-mcp@1.1.11` | Arguments for that command, parsed with shell-style quoting. Environment only. |
+| `NEWSLETTER_FETCH_ARTICLES` | off | Turns on article fetching, same as `--fetch-articles`. |
+| `NEWSLETTER_MAX_FETCH` | `15` | Same as `--max-fetch`, 1 to 50. |
+| `NEWSLETTER_FETCH_TIMEOUT` | `15` | Overall seconds per page, 1 to 120. Environment only. |
+| `NEWSLETTER_FETCH_CONNECT_TIMEOUT` | `5` (or the fetch timeout if that is lower) | Connect seconds, 0.5 up to the fetch timeout. Environment only. |
+| `NEWSLETTER_FETCH_MAX_REDIRECTS` | `5` | Redirects followed per page, 0 to 10. Environment only. |
+| `NEWSLETTER_FETCH_MAX_BYTES` | `2097152` (2 MiB) | Maximum page size read, 65536 to 20971520. Environment only. |
+| `NEWSLETTER_FETCH_MAX_CHARS` | `20000` | Maximum characters of extracted text kept per page, 1000 to 100000. Environment only. |
+| `NEWSLETTER_FETCH_CONCURRENCY` | `4` | Concurrent page fetches, 1 to 16. Environment only. |
+| `NEWSLETTER_FETCH_LLM_CONCURRENCY` | `2` | Concurrent summary calls, 1 to 8. Environment only. |
+| `NEWSLETTER_FETCH_LLM_INTERVAL` | `3.1` if the reader model name ends in `:free`, otherwise `0` | Minimum seconds between the starts of summary calls, 0 to 60. An explicit value, including `0`, wins. Environment only. |
 
-Blank values count as unset. `GMAIL_OAUTH_PATH`, `GMAIL_CREDENTIALS_PATH`, proxy
+Blank values count as unset. The fetch variables are validated on every run, even with
+fetching off; an invalid value exits with code 2. `GMAIL_OAUTH_PATH`, `GMAIL_CREDENTIALS_PATH`, proxy
 variables and `NODE_EXTRA_CA_CERTS` are forwarded to the MCP server if set (see
 [Gmail MCP setup](#gmail-mcp-setup)).
 
@@ -180,6 +195,8 @@ uv run newsletter-digest [OPTIONS]
 | `--reader-model TEXT` | `NEWSLETTER_READER_MODEL` | same as `--model` | OpenRouter model for the per-email reader. |
 | `--out DIRECTORY` | none | `out` | Output directory for `reading-list-YYYY-MM-DD.html` (created if needed). |
 | `--open` | none | off | Open the reading list in the default browser. |
+| `--fetch-articles` | `NEWSLETTER_FETCH_ARTICLES` | off | Also fetch the linked pages of must-read and worth-reading items and summarise them. See [Privacy](#privacy). |
+| `--max-fetch INTEGER` | `NEWSLETTER_MAX_FETCH` | `15` | Maximum number of article pages to fetch, 1 to 50. Only used with `--fetch-articles`. |
 | `--log-level [debug\|info\|warning\|error]` | none | `INFO` | Logging verbosity. `DEBUG` also prints tracebacks on failure. |
 | `-h`, `--help` | none | none | Show help and exit. |
 
@@ -256,6 +273,103 @@ no external requests. It supports light and dark mode. It contains:
 - **Empty state:** if no emails match, a short page says so and shows the query that was
   used. No model call is made, and the exit code is 0.
 
+## Fetching article pages (`--fetch-articles`)
+
+By default the summaries in the list come from the newsletter emails and no linked page is
+opened. With `--fetch-articles` the tool also downloads the page behind each top item,
+extracts its text and asks the reader model for a short summary. With the flag off nothing
+changes: no extra network or model calls, and the same HTML as before.
+
+```bash
+# Fetch up to 15 pages (the default) for the must-read and worth-reading items
+uv run newsletter-digest --fetch-articles
+
+# A small first run, as suggested for free-tier models
+uv run newsletter-digest --max-emails 5 --fetch-articles --max-fetch 5 --open
+```
+
+Read [Privacy](#privacy) first: fetching contacts third-party sites and follows tracking
+links.
+
+### Which items are fetched
+
+- Only items ranked **must read** or **worth reading**; **skim** items are never fetched.
+- At most `--max-fetch` pages (default 15, range 1 to 50), taking must-read items first,
+  then by ranking order and how many newsletters mentioned the item.
+- Links that are not articles (unsubscribe, manage preferences, view in browser, social,
+  tracking pixels, sponsor and ad links) are never requested. Click-tracking redirect
+  links are followed.
+- If ranking did not finish (the unranked fallback), nothing is fetched and the page header
+  says "Article fetching was skipped: ranking was not completed."
+- Each URL is requested once per run; a second item that resolves to the same page keeps
+  its newsletter summary without a note.
+
+### What the output shows
+
+For a successfully fetched item:
+
+- the title link is unchanged (it still points at the original link);
+- a summary of about 3 to 5 sentences and 3 to 5 key points from the model, **replacing**
+  the newsletter blurb;
+- a collapsed **Read here** section with the extracted page text, up to 20,000 characters
+  (`NEWSLETTER_FETCH_MAX_CHARS`). Longer text ends with a `[…truncated]` marker.
+
+The newsletter blurb is dropped only when the fetch **and** the summary both succeed. If
+either fails, the blurb stays and a note explains why. The header gains an "Article pages"
+line (fetched and summarised of selected, how many were eligible, how many could not be
+fetched) and the footer explains that items with key points were summarised from the page.
+
+### Notes on items that could not be fetched
+
+The note reads `Couldn't fetch the article: <reason>`. For the two model-side reasons it
+reads `Couldn't summarise the article: <reason>`.
+
+| Note text | Meaning |
+| --- | --- |
+| `paywalled or login required` | HTTP 401 or 402, a redirect to a login or subscribe path, or a page marked as not free with almost no text. |
+| `blocked by the site` | HTTP 403, 429 or 451, or a bot-protection challenge page. |
+| `timed out` | The page did not answer within `NEWSLETTER_FETCH_TIMEOUT`. |
+| `network or TLS error` | DNS, connection, TLS or protocol failure. |
+| `page unavailable` | Any other non-success HTTP status (404, 410, 5xx). |
+| `not a web page` | Not HTML (PDF, image, JSON) or an unsupported content encoding. |
+| `too large` | The page exceeded `NEWSLETTER_FETCH_MAX_BYTES`. |
+| `no readable article text` | No main text could be extracted, or under 400 characters (often a JavaScript-only page). |
+| `address not allowed` | The link failed the safety checks (see [Safety model](#safety-model)). |
+| `not an article page` | A redirect landed on an unsubscribe, preferences or view-in-browser page. |
+| `too many redirects` | More than `NEWSLETTER_FETCH_MAX_REDIRECTS` redirects. |
+| `couldn't summarise` | The model call failed (not a rate limit) or returned unusable output. Shown as "Couldn't summarise the article". |
+| `model rate limit reached` | The model returned HTTP 429 after retries, so remaining items were not tried. Shown as "Couldn't summarise the article". |
+| `couldn't fetch` | Any other unexpected error. |
+
+### Cost and free-tier limits
+
+- One reader-model call per fetched page, at most `--max-fetch` in total, using
+  `--reader-model` (or `--model` if unset).
+- Defaults: 4 page fetches at a time and 2 model calls at a time
+  (`NEWSLETTER_FETCH_CONCURRENCY`, `NEWSLETTER_FETCH_LLM_CONCURRENCY`).
+- OpenRouter `:free` models (for example `xingchen-agi/xing4.0-29b-a4b:free`) allow 20
+  requests per minute, and 50 requests per day for accounts that have bought fewer than 10
+  credits (1000 per day with 10 or more). The agent run itself (one reader call per email
+  plus the ranking calls) can use up the daily allowance before fetching starts.
+- When the reader model name ends in `:free`, summary calls are paced at least 3.1 seconds
+  apart (`NEWSLETTER_FETCH_LLM_INTERVAL`, which also applies to other models if you set it).
+- After a 429 that survives the client's retries (3), a circuit breaker stops further
+  summary calls: the remaining items show `model rate limit reached` and keep their blurbs.
+  The run still finishes with exit code 0.
+- On a free tier start small, for example `--max-emails 5 --max-fetch 5`.
+
+### Limitations of fetching
+
+- No JavaScript rendering: pages that build their text in the browser give `no readable
+  article text`.
+- No PDFs or other non-HTML content.
+- No login, paywall or bot-protection bypass, and no cookies are kept or sent.
+- No cache across runs: every run fetches again.
+- Proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`) are ignored by the fetcher, so
+  fetching does not work where a proxy is mandatory.
+- The extraction library (trafilatura) is imported when the tool starts, which adds a
+  little start-up time even with the flag off.
+
 ## Safety model
 
 The tool is designed so that a run can read your newsletters and nothing else.
@@ -291,6 +405,19 @@ The tool is designed so that a run can read your newsletters and nothing else.
 - **The HTML output is escaped.** All dynamic content is HTML-escaped, links are limited to
   `http` and `https`, and the page has a Content-Security-Policy that blocks external
   resources and permits only its own inline script.
+- **Article fetching (only with `--fetch-articles`).**
+  - Only public internet addresses are contacted. Every address a name resolves to, and
+    every redirect hop, is checked; loopback, private, link-local, metadata and other
+    reserved ranges are refused, as are `localhost`-style and non-canonical numeric hosts.
+  - Only `http` and `https` on the default ports; no credentials in the URL.
+  - Caps: 15 seconds per page, 5 redirects, 2 MiB per page (compressed data is decoded
+    with a bound), 20,000 characters kept (all adjustable, see
+    [Environment variables](#environment-variables)).
+  - No cookies or credentials are sent, and environment proxies are ignored.
+  - The summariser model has no tools. Page text is treated as untrusted data, wrapped in
+    markers, and the model's output and the page text are HTML-escaped in the output.
+  - These checks reduce the risk of a hostile newsletter link reaching your local network;
+    they do not make unknown sites trustworthy.
 - **Known residual risk.** The agent framework also adds a default `general-purpose`
   subagent that this tool cannot switch off. The system prompt forbids using it. If a
   model delegates to it anyway it gets no Gmail access beyond the same listing and
@@ -307,6 +434,20 @@ The tool is designed so that a run can read your newsletters and nothing else.
 - **The output contains only derived data:** article titles, links, summaries, newsletter
   names and dates. It does not contain full email bodies.
 - **Credentials** stay in `~/.gmail-mcp/` and are never read or logged by this tool.
+- **With `--fetch-articles`, more leaves your machine:**
+  - **Publisher sites see your IP address** and a `User-Agent` of the form
+    `newsletter-digest/<version> (personal reading-list tool)`.
+  - **Tracking links are followed.** Newsletter links often go through the sender's click
+    tracker. Following one registers a click with the sender and can reveal that you opened
+    the newsletter. This is deliberate: without it many links cannot be resolved.
+  - **Page text is sent to the configured OpenRouter reader model** (and on to its
+    provider), as the email text already is.
+  - `robots.txt` is **not** checked. The tool sends a descriptive User-Agent, caps the work
+    (`--max-fetch`) and requests each URL once per run.
+  - The final URLs after redirects are not written to the HTML; the title link keeps the
+    original newsletter link. The extracted page text is written into the HTML ("Read
+    here"), so treat the file accordingly.
+  - Leave the flag off to avoid all of this.
 - The tool keeps no database or history. The only persisted state is the HTML file and
   the mark-read flags in your browser.
 
@@ -332,6 +473,11 @@ Source lives in `src/newsletter_digest/`:
 | `agent.py`, `prompts.py`, `llm.py` | Deep agent assembly, prompts, model factory |
 | `models.py`, `store.py` | Pydantic models, in-memory article store and de-duplication |
 | `render.py`, `templates/` | HTML reading list rendering |
+| `links.py` | Link classification (article, tracker, unsubscribe, social, ...) |
+| `netguard.py` | URL policy and guarded transport that refuses non-public addresses |
+| `fetch.py` | `PageFetcher`: capped, classified page downloads |
+| `extract.py` | Main-text extraction (trafilatura) and truncation |
+| `enrich.py` | Fetch-and-summarise pass: item selection, pacing, 429 breaker |
 
 ## Limitations
 
@@ -346,4 +492,7 @@ Source lives in `src/newsletter_digest/`:
 - Extraction, de-duplication and ranking depend on the model, so results can vary between
   runs and models.
 - Testing-mode OAuth tokens expire after about 7 days (see Troubleshooting).
+- Article fetching has its own limits: see
+  [Limitations of fetching](#limitations-of-fetching). Summaries of fetched pages come from
+  a free or cheap model and can be wrong; the full text is in "Read here".
 - Mark-read state is stored per browser (keyed by article URL) and is not synced.
