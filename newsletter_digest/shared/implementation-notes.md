@@ -21,10 +21,10 @@
 | ID | Item | Owner task | Version | How checked | Result/consequence |
 |---|---|---|---|---|---|
 | V11 | Versions pinned by `uv add` (httpx, httpcore, trafilatura, lxml, lxml_html_clean, charset-normalizer) and `uv lock --check` | T024 | httpx 0.28.1, httpcore 1.0.9, trafilatura 2.3.1, lxml 6.1.3, lxml-html-clean 0.4.6, charset-normalizer 3.5.2 | `uv add 'httpx>=0.28.1,<0.29' 'httpcore>=1.0.9,<2' 'trafilatura>=2.3.1'`, `uv lock --check`, `uv run python -c 'import httpx, httpcore, trafilatura'` and `uv pip list` | Resolved and imports cleanly; `uv lock --check` passes (109 packages). charset-normalizer 3.5.2 was already in the lock (not newly added); lxml and lxml-html-clean arrive transitively via trafilatura |
-| V12 | httpx `AsyncHTTPTransport` still stores its pool in `_pool` and delegates `handle_async_request` to it; `httpcore.AsyncConnectionPool(network_backend=..., ssl_context=..., retries=...)` signature | T028 | TODO | TODO | TODO |
-| V13 | httpcore `start_tls` uses the origin host as `server_hostname` when the dialled host is an IP literal (cert verified against the hostname) | T028 | TODO | TODO | TODO |
-| V14 | `AnyIOBackend` stream `get_extra_info("server_addr")` shape (tuple vs None) | T028 | TODO | TODO | TODO |
-| V15 | `ipaddress` `is_global`/`is_reserved` results for the AF-3.2 matrix on the venv's Python 3.13.5 | T028 | TODO | TODO | TODO |
+| V12 | httpx `AsyncHTTPTransport` still stores its pool in `_pool` and delegates `handle_async_request` to it; `httpcore.AsyncConnectionPool(network_backend=..., ssl_context=..., retries=...)` signature | T028 | httpx 0.28.1, httpcore 1.0.9 | Read `.venv/.../httpx/_transports/default.py` and `httpcore/_async/connection_pool.py`; scratch probe built `build_guarded_transport()` and ran `httpx.AsyncClient` requests through it with a recording resolver and a scripted inner backend | Confirmed. `__init__` assigns `self._pool`; `handle_async_request`, `__aenter__`, `__aexit__` and `aclose` all use `self._pool`; the request is wrapped in `map_httpcore_exceptions()`. `AsyncConnectionPool(ssl_context, proxy, max_connections, max_keepalive_connections, keepalive_expiry, http1, http2, retries, local_address, uds, network_backend, socket_options)`. Probe: the recording resolver was called for every new origin, so option (a) works and R-F1 option (b) is not needed |
+| V13 | httpcore `start_tls` uses the origin host as `server_hostname` when the dialled host is an IP literal (cert verified against the hostname) | T028 | httpcore 1.0.9 | Read `httpcore/_async/connection.py` `_connect`; probe with a stream that records `start_tls` arguments for `https://a.com/` resolved to `93.184.215.14` | Confirmed. `server_hostname = sni_hostname or self._origin.host`; the origin is the request URL host, not the IP the backend dials. Probe recorded `connect_tcp('93.184.215.14', 443)` then `start_tls(server_hostname='a.com')`. `httpx.create_ssl_context()` gives `CERT_REQUIRED` + `check_hostname=True` |
+| V14 | `AnyIOBackend` stream `get_extra_info("server_addr")` shape (tuple vs None) | T028 | httpcore 1.0.9, anyio 4.x (venv) | Read `httpcore/_backends/anyio.py` (`AnyIOStream.get_extra_info`) and `anyio/abc/_sockets.py` + `anyio/_core/_sockets.py` (`convert_ipv6_sockaddr`); no real socket opened | `server_addr` -> `SocketAttribute.remote_address` = `convert_ipv6_sockaddr(sock.getpeername())`: a 2-tuple `(host, port)` for IPv4 and IPv6 (IPv6 host gets `%<scope>` only when the scope id is non-zero), or `None` if getpeername fails. `AsyncMockStream` returns `None`. netguard uses `server_addr[0]`, strips any scope, and skips the check only when the value is `None` |
+| V15 | `ipaddress` `is_global`/`is_reserved` results for the AF-3.2 matrix on the venv's Python 3.13.5 | T028 | CPython 3.13.5 | Scratch probe printed every flag for 43 addresses, then `is_public_address` for the same matrix | `is_global` is True for addresses the policy must still block: `192.0.0.9`, `192.88.99.1`, `224.0.0.1` (multicast), `fec0::1`, `ff02::1`, `2001:3::1`, `2001:20::1`, `::ffff:8.8.8.8`, `::8.8.8.8`, and NAT64 `64:ff9b::a00:1` (embeds 10.0.0.1). `BLOCKED_NETWORKS`, the flag checks and the embedded-IPv4 unwrap reject all of them. Every embedded form is not public in the end: mapped (`::ffff:0:0/96` entry), compatible and NAT64 (`is_reserved`, inside `::/8`), 6to4 (`is_global` False), Teredo (`2001::/23`). Only true public unicast (8.8.8.8, 1.1.1.1, 2606:4700:4700::1111, 2001:4860:4860::8888) passes |
 | V16 | httpx request event hooks run for every redirect hop; `TooManyRedirects` raised above `max_redirects` | T030 | TODO | TODO | TODO |
 | V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 | TODO | TODO | TODO |
 | V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 | trafilatura 2.3.1, lxml 6.1.3, Python 3.13.5 | `inspect.signature`, read `core.py`/`settings.py`/`settings.cfg` in `.venv`, offline probes with `socket.socket.connect`/`create_connection`/`getaddrinfo` patched to raise | Signature matches AF-4 (all AF-4 kwargs exist). **Deviation:** any truthy `max_tree_size=` kwarg raises `ValueError("\"max_tree_size\" will be removed, use settings.cfg instead")` in `_check_deprecation`, so `extract.py` passes `config=` (a copy of `DEFAULT_CONFIG` with `MAX_TREE_SIZE = 100000`) instead. Semantics: checked after extraction on `len(postbody)` = number of top-level output elements (not total nodes); over the limit, `hi` tags are stripped, then the page is discarded (None): 100,100 `<p>` -> None, 99,000 -> text. No network I/O in `extract()` (probes pass with sockets blocked). Empty/garbage/UTF-16/random bytes return None (trafilatura catches its own `ValueError`/`TypeError`). Logs `WARNING trafilatura.core: discarding data: None` per rejected page |
@@ -1308,3 +1308,68 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   empty, random, UTF-16 and deeply nested bytes return None; 5 of 5 escaped delimiter
   look-alikes scrubbed; 64 parallel calls in 8 threads equal the sequential results.
   Suite 858 passed; ruff and pyrefly clean.
+
+## T028 — netguard.py: URL policy, address policy, guarded httpcore backend and transport
+
+- **R-F1 option (a) kept.** V12 confirms httpx 0.28.1 routes every request and the
+  lifecycle calls through `self._pool`. `GuardedTransport` subclasses
+  `AsyncHTTPTransport`, calls `super().__init__(trust_env=False, http1=True,
+  http2=False)` and replaces `_pool`. The pool the base class builds is discarded
+  without ever opening a socket. The R-F1 comment sits at the assignment.
+- **Embedded IPv4 (deviation risk; reviewer please confirm).** AF-3.2 is read
+  literally: every embedded IPv4 must pass, and then the outer IPv6 address must pass
+  the flags and `BLOCKED_NETWORKS` too. On 3.13.5 that blocks every embedded form, even
+  when the embedded IPv4 is public. NAT64 `64:ff9b::/96` is the one with a real-world
+  use: on an IPv6-only network with DNS64 the resolver returns a public A record plus a
+  synthesised `64:ff9b::` AAAA record. The whole answer is then rejected, so
+  `--fetch-articles` reports every IPv4-only site as UNSAFE there. I accepted this
+  (safe side, personal tool, no DNS64 on the target setup). To allow it later, judge
+  NAT64 by its embedded IPv4 only.
+- **`connect_timeout` dropped from `GuardedTransport`.** The AF-3.3 sketch has the
+  parameter, but the binding AF-P5 signature of `build_guarded_transport` does not.
+  httpcore takes the connect timeout from the request's `timeout` extension
+  (`httpx.Timeout(connect=...)` on the client), and the probe saw `timeout=1` reach
+  the inner `connect_tcp`. So the transport needs no copy of it.
+- **SSL context uses `httpx.create_ssl_context(trust_env=False)`**, not the sketch's
+  bare `create_ssl_context()`. That keeps certifi and verify on, and also ignores
+  `SSL_CERT_FILE` / `SSL_CERT_DIR`, in line with "never trust_env".
+- **Additions to the AF-3.1 host checks:**
+  - a host containing `%` (a percent-encoded host or an IPv6 zone id such as
+    `[fe80::1%25eth0]`) is rejected;
+  - numeric hosts use the WHATWG "ends in a number" rule: if the last label is all
+    digits or `0x`-hex and the host is not a canonical dotted quad, it is rejected.
+    This covers `2130706433`, `0x7f.1`, `017700000001`, `127.1`, `0x7f000001` and
+    `foo.123`;
+  - httpx itself raises `InvalidURL` for `0177.0.0.1` and for full-width digits, which
+    become `UrlPolicyError("invalid url")`;
+  - IPv6 literals skip the numeric rule (the address policy decides);
+  - a trailing dot is stripped before the suffix checks (`localhost.`).
+- **Port rule relies on httpx normalisation:** `httpx.URL` turns an explicit default
+  port (`http :80`, `https :443`) into `port=None`, so any non-None port is non-default.
+- **`UrlPolicyError.reason` values** (short, fixed, never the URL): `url too long`,
+  `invalid url`, `scheme not allowed`, `userinfo not allowed`, `port not allowed`,
+  `empty host`, `host not allowed`, `non-canonical numeric host`.
+- **`GuardedNetworkBackend.connect_tcp` details:**
+  - an empty resolver answer raises `httpcore.ConnectError` (surfaces as
+    `httpx.ConnectError`, i.e. NETWORK);
+  - failover to the next validated IP happens only on `httpcore.ConnectError` /
+    `ConnectTimeout`; the last IP's error propagates as is. A `server_addr` mismatch
+    never fails over: it closes the stream and raises at once;
+  - dialled IPs are normalised with `str(ip_address(...))` with any scope dropped, and
+    the `server_addr` comparison is done on parsed addresses.
+- **Exception surface, for fetch.py (T030):** `BlockedAddressError` comes out of
+  `client.get` unwrapped (probe: redirect to `169.254.169.254`, a redirect to a private
+  IP literal, a mixed answer, a mapped `::ffff:127.0.0.1`, a `server_addr` mismatch).
+  It **is an `OSError`**, and so is a raw `socket.gaierror` from `default_resolver`,
+  which httpx does not map either. So fetch.py must test `BlockedAddressError` (UNSAFE)
+  before a generic `OSError` (NETWORK).
+- **`default_resolver` has no IP-literal shortcut:** `getaddrinfo` already returns a
+  numeric host as itself without DNS (probe: `8.8.8.8`, `2606:4700::1111`).
+- **pyrefly:** httpcore defines a stub `AnyIOBackend` (not an `AsyncNetworkBackend`)
+  when anyio is missing, so pyrefly sees a union. One targeted
+  `# pyrefly: ignore[bad-assignment]` covers the default backend line.
+- Helpers `_check_host`, `_is_canonical_ipv4`, `_parse_ip` and `_embedded_ipv4` are
+  private. Public extras beyond AF-P5: `ALLOWED_SCHEMES` and `BLOCKED_HOST_SUFFIXES`
+  (handy for T036).
+- No tests were added (T036 owns `tests/test_netguard.py`). The scratch probes made no
+  real sockets: a fake resolver plus a scripted `httpcore.AsyncMockStream` backend.

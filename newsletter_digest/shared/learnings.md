@@ -201,3 +201,12 @@
   disappears before extraction, so a delimiter-scrub test built with it passes
   trivially. Use `&lt;&lt;&lt;END ARTICLE&gt;&gt;&gt;` to get the look-alike into the
   extracted text.
+- (T028) pyrefly types `httpcore.AnyIOBackend()` as a union with httpcore's fallback
+  stub class (defined when anyio is missing, not an `AsyncNetworkBackend`), so passing it
+  where an `AsyncNetworkBackend` is expected fails. Assign it to an annotated local with
+  `# pyrefly: ignore[bad-assignment]` on the line above.
+- (T028) `httpx.URL` keeps inet_aton-style hosts (`2130706433`, `0x7f.1`, `127.1`)
+  unchanged and only rejects some (`0177.0.0.1`), so URL-level numeric-host checks must
+  be our own. It also turns an explicit default port into `port=None`. Netguard's
+  `BlockedAddressError` and a raw `socket.gaierror` from the resolver both reach
+  `client.get` callers unmapped as `OSError`s; check the specific class first.
