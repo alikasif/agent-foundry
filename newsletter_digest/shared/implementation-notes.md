@@ -28,7 +28,7 @@
 | V16 | httpx request event hooks run for every redirect hop; `TooManyRedirects` raised above `max_redirects` | T030 | httpx 0.28.1 | Read `AsyncClient._send_handling_redirects`; scratch probe: `PageFetcher` over `httpx.MockTransport` with a 301/302 chain and a recording wrapper around the request hook | Confirmed. The loop checks `len(history) > max_redirects` first, then runs every request hook, then sends. 5 redirects (6 requests) with `max_redirects=5`: hook ran 6 times, page returned. 6 redirects: `TooManyRedirects` before the 7th hop, whose hook never ran (so it is never claimed in the ledger) -> TOO_MANY_REDIRECTS. Hook exceptions propagate unwrapped. **Found:** with `follow_redirects=True` httpx calls `response.aread()` on every redirect response, which reads and decodes (gzip/br/zstd) the body with no size bound; fetch.py drops redirect bodies in a response hook (see T030 notes) |
 | V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 | httpx 0.28.1, httpcore 1.0.9, stdlib `http.cookiejar` (3.13.5) | Scratch probe: real `PageFetcher` (real `GuardedTransport`), fake resolver, scripted `httpcore` backend recording every byte written; hop 1 `302` with two `Set-Cookie` (one with `Domain=`), hop 2 `200` with `Set-Cookie`; `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` set to `10.9.9.9:3128`; read `_client.py` | Confirmed. No `Cookie` header on either hop and the jar stayed empty (`DefaultCookiePolicy(allowed_domains=[])` rejects every cookie in `set_ok` and `return_ok`). Requests went to the resolved origin IPs (resolver saw `a.example`, `b.example`), `_client._mounts == {}`. Headers sent per hop: Host, Connection, User-Agent, Accept, Accept-Language, `Accept-Encoding: identity`; no Authorization/Referer. **Correction to AF-3.4:** in 0.28.1 env proxies are mounted only when `trust_env and transport is None`, so with our custom transport they are ignored even with `trust_env=True`; there is no `.netrc` support any more. `trust_env=False` is kept as defence in depth (it also matters if `transport` were ever None). Same probe: redirect hop to a host resolving to 169.254.169.254 -> UNSAFE |
 | V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 | trafilatura 2.3.1, lxml 6.1.3, Python 3.13.5 | `inspect.signature`, read `core.py`/`settings.py`/`settings.cfg` in `.venv`, offline probes with `socket.socket.connect`/`create_connection`/`getaddrinfo` patched to raise | Signature matches AF-4 (all AF-4 kwargs exist). **Deviation:** any truthy `max_tree_size=` kwarg raises `ValueError("\"max_tree_size\" will be removed, use settings.cfg instead")` in `_check_deprecation`, so `extract.py` passes `config=` (a copy of `DEFAULT_CONFIG` with `MAX_TREE_SIZE = 100000`) instead. Semantics: checked after extraction on `len(postbody)` = number of top-level output elements (not total nodes); over the limit, `hi` tags are stripped, then the page is discarded (None): 100,100 `<p>` -> None, 99,000 -> text. No network I/O in `extract()` (probes pass with sockets blocked). Empty/garbage/UTF-16/random bytes return None (trafilatura catches its own `ValueError`/`TypeError`). Logs `WARNING trafilatura.core: discarding data: None` per rejected page |
-| V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 | TODO | TODO | TODO |
+| V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 | langchain-openai 1.7.3, openai 3.41.0, langchain-core 1.7.3 | Read `langchain_openai/chat_models/base.py` (`_handle_openai_api_error`) and `openai/_exceptions.py`; offline probe: `ChatOpenAI(max_retries=3, http_async_client=httpx2.AsyncClient(transport=httpx2.MockTransport(...)))` answering every request with 429 | Confirmed. After 4 requests (1 + 3 retries) `ainvoke` raises `langchain_openai...OpenAIRateLimitError`, a subclass of both `openai.RateLimitError` (`APIStatusError`) and `langchain_core.exceptions.ModelRateLimitError`; `exc.status_code == 429` and `exc.response.status_code == 429`. enrich checks both attributes duck-typed (no openai import). Note: openai 3.x uses its own `httpx2` package, not `httpx`; and its client stops retrying early when `Retry-After` exceeds its maximum delay, which only makes the 429 arrive sooner |
 | V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 | TODO | TODO | TODO |
 
 ## Task notes
@@ -1747,3 +1747,70 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   2 xfailed (with other agents' in-progress edits in the tree); render.py line+branch
   coverage from this file alone 85% (misses are `write_reading_list` and a `safe_url`
   branch covered by `tests/test_render.py`). ruff and pyrefly clean. No source bugs found.
+
+## T031 — enrich.py pipeline and summary prompts
+
+- **prompts.py**: `ARTICLE_DELIMITER_RE` is the same pattern as extract's private
+  `_DELIMITER_RE` (`<<<\s*(?:END[\s_-]*)?(?:ARTICLE|EMAIL)`, case-insensitive), defined
+  again rather than imported, so prompts keeps its imports (config, models) and the
+  T039 parity test compares two independent definitions. Replacement text
+  `DELIMITER_REPLACEMENT = "[delimiter removed]"` (public, same text as gmail_mcp and
+  extract). `build_summary_message` also collapses whitespace in the title and URL
+  (not in the text), so an untrusted title cannot add `URL:`-style header lines.
+- **`RatePacer` has an extra `sleep` kwarg** (default `anyio.sleep`) beside AF-P5's
+  `clock`: with only a fake clock the pacer would still sleep for real, so a fake-clock
+  test needs both. It spaces call *starts*: under the lock it sleeps
+  `last_start + min_interval - now` if positive, then records `clock()`. The pacer wait
+  runs inside the LLM limiter slot, per AF-1 step 2.3.
+- **Breaker also skips the fetch (addition).** Once a 429 has opened the breaker, an item
+  that has not started its request yet gets `RATE_LIMITED` without fetching the page,
+  since its page could never be summarised (saves publisher requests and time). Items
+  already waiting for an LLM slot re-check the breaker before and after the pacer wait.
+  Calls already in flight when the first 429 arrives still finish (with the default LLM
+  concurrency 2, at most one extra call).
+- **429 detection**: duck-typed `exc.status_code == 429` or
+  `exc.response.status_code == 429` (V19). Every other summariser exception, empty
+  content and unparseable output give `SUMMARY_FAILED`. The reply text is
+  `str(reply.text)` (langchain-core 1.x property; joins text blocks, ignores reasoning
+  blocks). No `bind_tools`, `with_structured_output` or `max_tokens`.
+- **`parse_summary`**: removes closed `<think ...>…</think>` blocks, then keeps only the
+  text after an unmatched `</think>` (providers that drop the opening tag), removes code
+  fences, takes `find("{")..rfind("}")`, `json.loads`, `ArticleSummary.model_validate`.
+  `ValueError` (covers `JSONDecodeError` and `ValidationError`) and `RecursionError`
+  (deeply nested JSON) become `SummaryError(SUMMARY_FAILED)`.
+- **Counting (not fully specified):** `eligible` = must-read + worth-reading items
+  (AF-5 comment), *including* the ones then `excluded` for their link class, so the
+  header reads "S selected (E eligible, X skipped as non-article links)". An item with
+  `url=None` counts as excluded. `fetched` = pages that came back extracted (also when
+  the summary then failed). `merge_results` recomputes `summarised`, `skipped` and
+  `failed` (keys `FetchFailure.name`, in display order) from the outcomes and keeps the
+  other counters of the `stats` it is given, so the counts cannot drift apart.
+- **Unranked list**: `select_candidates` returns an empty `Candidates` (eligible 0);
+  `enrich_reading_list` logs `INFO Article fetching skipped: ranking was not completed`
+  and sets `skipped_reason`. The stats line is still logged.
+- **Nothing selected** (unranked, 0 eligible, all excluded): no fetcher (no HTTP client)
+  is built, no UA line is logged, no model is built; `fetch` is still set.
+- **Ordering**: a must-read/worth-reading item missing from `rankings` (cannot happen
+  with `assemble_reading_list`) sorts after the ranked ones of its tier instead of
+  raising `KeyError`.
+- **Public extras beyond AF-P5**: `Fetcher` Protocol (`fetch(url)`), `FetcherFactory`
+  alias (`Callable[[FetchConfig], AbstractAsyncContextManager[Fetcher]]`, the type of
+  `fetcher_factory`; `PageFetcher` satisfies it), `ItemOutcome`, `PRIORITY_ORDER`,
+  `UNRANKED_SKIP_REASON`, `RATE_LIMIT_STATUS`.
+- **Logs**: INFO UA line once when at least one item is selected; DEBUG per selected item
+  `Article <id> from <host>: <summarised|CATEGORY>, <bytes> bytes, <chars> chars`;
+  WARNING `Unexpected error enriching item <id>: <TypeName>` for the `ERROR` case; DEBUG
+  `Summary call failed: <TypeName>` for non-429 LLM errors; the final INFO stats line
+  `... failed {NAME: n, ...}`. No page text, summaries, URLs beyond the host, or keys.
+- **models.py fix (T035 bug)**: `ArticleSummary._clean_key_points` now cleans tuples like
+  lists (`isinstance(value, (list, tuple))`), so a tuple gets bullet stripping,
+  truncation and the at-least-one rule. The strict xfail marker on
+  `tests/test_models_fetch.py::test_article_summary_cleans_tuple_key_points_like_a_list`
+  is removed (that file is a new T035 file, not a bb16231 test). Sets still pass through
+  and are coerced by pydantic (unordered input; JSON never produces them).
+- context7 was not available; langchain-core/openai/anyio behaviour was read from the
+  installed sources and probed offline (fake fetcher and fake chat model in a scratch
+  script: selection order and cap, peak HTTP in-flight 4, one ainvoke per extracted
+  page, model built once, breaker after the first 429, ERROR isolation, pacer sleeps with
+  a fake clock, parse tolerance). No tests added (tests/test_enrich.py is T039). Suite:
+  1795 passed, 2 deselected, 1 xfailed; ruff and pyrefly clean.

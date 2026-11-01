@@ -248,14 +248,6 @@ def test_article_summary_parses_llm_json() -> None:
     assert result.key_points == ["one", "two"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "models.py bug (reported by T035): the key_points before-validator only "
-        "cleans `list` input, so a tuple is coerced to a list by pydantic without "
-        "bullet stripping or the at-least-one check."
-    ),
-)
 def test_article_summary_cleans_tuple_key_points_like_a_list() -> None:
     result = ArticleSummary.model_validate({"summary": "s", "key_points": ("- a",)})
     assert result.key_points == ["a"]

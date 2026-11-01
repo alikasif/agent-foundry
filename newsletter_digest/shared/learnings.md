@@ -252,3 +252,8 @@
   set `render.ENVIRONMENT.loader = DictLoader({render.TEMPLATE_NAME: mutated_src})`
   before `pytest.main([...])`. Hostile text that renders escaped still contains `url(`
   as plain text, like `src=` (T033): match it inside real tags or within `<style>` only.
+- (T031) openai 3.x ships its own `httpx2` package; `ChatOpenAI(http_async_client=...)`
+  needs an `httpx2.AsyncClient`. `httpx2.MockTransport` gives an offline probe of the real
+  ChatOpenAI error path (e.g. a 429 after `max_retries`) without any network.
+- (T031) A pacer with only an injectable clock still sleeps for real; inject the sleep
+  function too, or a fake-clock test waits the full interval.

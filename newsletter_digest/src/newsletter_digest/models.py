@@ -358,10 +358,11 @@ class ArticleSummary(BaseModel):
         """Tidy each point, drop blanks, keep the first 5; at least one required.
 
         Each string is whitespace-collapsed, loses leading bullet characters
-        ("-", "*", "\u2022", spaces) and is truncated to 240 chars. A non-list
-        value or a non-string point is passed through for pydantic to reject.
+        ("-", "*", "\u2022", spaces) and is truncated to 240 chars. A tuple is
+        cleaned like a list; any other value or a non-string point is passed
+        through for pydantic to reject.
         """
-        if not isinstance(value, list):
+        if not isinstance(value, (list, tuple)):
             return value
         points = [
             truncate_text(
