@@ -2075,3 +2075,62 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
 - **Bugs found**: none in agent.py/cli.py wiring.
 - Verified: ruff format/check and pyrefly clean; full suite 2395 passed, 2 deselected,
   2 xfailed. No existing test file edited.
+
+## T042 — Architecture guard tests: import-graph layer order, Gmail isolation, trafilatura downloader ban
+
+- **Shape**: `tests/test_architecture.py` parses every `src/newsletter_digest/**/*.py` with
+  `ast` (nothing imported). Each rule is a pure checker over parsed modules that returns
+  violation strings (`fetch.py:24: fetch (tier 5) -> store (tier 5) does not point to a
+  strictly lower tier`). One parametrized test runs every checker on the real tree.
+  Self-tests (48 violation cases, 17 allowed cases) feed synthetic sources to each checker,
+  so every rule is proven able to fail in the permanent suite as well.
+- **Import resolution**: imports at any depth (function bodies, `TYPE_CHECKING`) count.
+  Relative imports are resolved against the package. `from newsletter_digest import x` is
+  an edge to submodule `x` when `x` is a module, else an edge to the package root (allowed,
+  for `__version__`). The package root itself may import no submodule (that would make the
+  `__version__` imports cyclic). Unknown `newsletter_digest.<m>` targets are reported.
+- **Not in the spec, added**:
+  - every module must have a tier (a new module fails until `TIER_RANKS` is extended);
+  - a cycle check independent of the ranks (DFS, prints the cycle path), including the
+    package-root node;
+  - no dynamic imports (`importlib.import_module`, `__import__`), since they would hide
+    edges;
+  - the new modules take no parameter named `*gmail*` (AF-2 "or receives the `gmail`
+    dict");
+  - `enrich` may import only `langchain_core` from the LangChain family, and only `llm`
+    imports `langchain_openai`;
+  - trafilatura ban widened from `fetch_url`/`fetch_response`/`downloads`/`spider` to
+    every fetching helper in 2.3.1: submodules `downloads`, `spider`, `sitemaps`, `feeds`,
+    `cli`, `cli_utils` and names `buffered_downloads`, `load_download_buffer`,
+    `add_to_compressed_dict`, `focused_crawler`, `sitemap_search`, `find_feed_urls`;
+  - `trust_env` must be a literal `False` wherever it is passed (keyword, `dict(...)` or a
+    dict-literal key), not just "not `True`";
+  - every `httpx.AsyncClient(...)` must pass `trust_env=False` explicitly (httpx defaults
+    to `True`), and `httpx.Client` and the module-level helpers (`httpx.get`, `stream`,
+    ...) are banned everywhere because each builds its own client with env proxies.
+- **"References"**: code references only (names, attributes, imported names, aliases), so
+  docstrings that mention `ChatOpenAI` (enrich.py) or `trafilatura.fetch_url` (extract.py)
+  pass. For the trafilatura ban, string constants that exactly equal a banned name or
+  submodule path also fail (catches `getattr(trafilatura, "fetch_url")`).
+- **"extract calls only trafilatura.extract"**: calls are resolved through import
+  bindings (aliases, `from trafilatura import extract as e`, `from trafilatura.settings
+  import use_config`). Any call that resolves into `trafilatura.*` other than
+  `trafilatura.extract` fails. Importing `trafilatura.settings.DEFAULT_CONFIG` and passing
+  it as data is allowed. Local rebinding/shadowing is not tracked (accepted limit).
+- **Non-vacuity**: `test_detector_sees_the_known_project_edges` and
+  `test_detector_sees_the_allowed_usages` assert that the detector does see real edges,
+  `ChatOpenAI` in llm, the `trafilatura.extract` call, and exactly one `AsyncClient` site
+  (fetch).
+- **Scratch mutation** (source untouched): a `-p` plugin repoints the module's
+  `SOURCE_DIR` at a mutated copy of the package. Baseline copy: all green. 23 mutants, each
+  failing exactly the expected checkers: fetch->store, models->agent (layer + cycle), new
+  unranked module, root->fetch (layer + cycle), enrich->tools / store / gmail_mcp,
+  store->fetch, netguard->root, links->httpx, enrich `gmail` parameter, render->langchain_core,
+  enrich->langgraph, agent->ChatOpenAI, extract `fetch_url` import, extract
+  `trafilatura.downloads`, fetch->trafilatura, extract `bare_extraction` call, netguard
+  `trust_env=True`, fetch `trust_env=False` removed, enrich builds an AsyncClient (also
+  the detector test), fetch `httpx.get`, agent `importlib.import_module`.
+- **Real tree**: no violations found. Results: 82 tests pass; full suite 2395 passed,
+  2 deselected, 2 xfailed; flag-off identity green; ruff and pyrefly clean for this file
+  (a pyrefly error seen during the run is in T041's in-progress `test_wiring_fetch.py`).
+  Coverage of the test module 99 % (only the failure-message formatter is unhit).

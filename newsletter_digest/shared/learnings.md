@@ -282,3 +282,9 @@
 - (T041) `logger.info("Settings: %s", some_dict)` stores the dict itself in
   `record.args` (logging unwraps a lone mapping argument), not a 1-tuple. Read it with
   `isinstance(record.args, dict)` when a test needs the logged object.
+- (T042) An AST "only X references Y" rule must skip docstrings and comments: enrich.py's
+  docstring names `ChatOpenAI` and extract.py's names `trafilatura.fetch_url`. Match
+  names, attributes and import aliases, plus string constants only on exact equality.
+- (T042) To mutation-test an AST guard without touching `src/`, read the source dir from a
+  module global in a module-scoped fixture and let a scratch `-p` plugin overwrite it in
+  `pytest_collection_modifyitems` (`item.module.SOURCE_DIR = Path(copy)`).
