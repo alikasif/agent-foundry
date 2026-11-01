@@ -182,3 +182,105 @@ is optional. Re-review scope for round 2:
 - the xfail marker removed;
 - the new pacer-gap test;
 - the corrected T031 note.
+
+---
+
+# T045 Review (round 2 of 3)
+
+Reviewer: backend_reviewer · Date: 2026-11-01 · Code at HEAD `ce98d1a` (fixes in `9949728`;
+`ce98d1a` touches only `test_fetch.py` / `test_netguard.py`)
+
+Scope: the round-1 re-review list. That is the `_Run._process` diff, the removed xfail, the
+new pacer-gap test, the corrected T031 note, and `links.log_host` (which replaces
+`enrich._host`). I re-read all of `enrich.py` with these changes in place.
+
+## Review: Enrichment pipeline, untrusted text, output safety, settings and wiring
+
+**Status:** APPROVED
+
+**Round-1 issues:**
+
+1. **[MAJOR] Breaker checked before the HTTP limiter: FIXED.** The check now sits inside
+   `async with self._http_limiter` (`enrich.py:361-366`). The comment explains why it
+   has to be there. The strict xfail is gone, and
+   `test_open_breaker_skips_requests_of_items_queued_for_http` now asserts exactly
+   `len(fetchers.calls) == 2` (round 1 asserted `<= 2`).
+2. **[MINOR] No re-check after `pacer.wait()`: FIXED.** It is now re-checked at
+   `enrich.py:375-377`, and `test_breaker_rechecked_after_pacer_wait` uses a real
+   `RatePacer(0.25)`, LLM concurrency 2, and a 429 on the first call, and asserts
+   exactly one model call.
+3. **[MINOR] Timing-dependent test: FIXED.** Both tests are now driven by an
+   `anyio.Event`: the `FakeFetcherFactory.gate`, and `rate_limit_first(..., raised)`
+   (which sets the event in the same step that hands out the error, so no checkpoint
+   comes before the breaker opens). Sleeps no longer decide the outcome.
+
+**Probe evidence** (scratch copies of the package made with `git archive`, run with
+`PYTHONPATH=<copy>/src`, with the round-1 fakes from `tests/test_enrich.py`; source untouched):
+
+Pacer-gap probe: LLM concurrency 2, real `RatePacer(0.25)`, model delay 0.1 s, first call
+429. Queued-HTTP probe: HTTP and LLM concurrency 1, 6 items, fetch delay 0.03 s, model
+delay 0.01 s.
+
+| code | pacer-gap: model calls / failed | queued-HTTP: page fetches |
+|---|---|---|
+| round-1 `6b4782d` | 2 / `{RATE_LIMITED: 3}` | 6 |
+| HEAD minus the post-pacer re-check | 2 / `{RATE_LIMITED: 3}` | 2 |
+| HEAD minus the limiter move | 1 / `{RATE_LIMITED: 4}` | 6 |
+| **HEAD** | **1 / `{RATE_LIMITED: 4}`** | **2** |
+
+Mutation check of the new tests (the same variants, run under pytest):
+- round-1 code fails both new tests;
+- "minus the limiter move" fails only the queued-HTTP test;
+- "minus the post-pacer re-check" fails only the pacer test;
+- HEAD passes all of them, including `test_first_429_opens_breaker_for_all_queued_items`.
+
+So each fix has a test that fails without it.
+
+**Flakiness:** none observed.
+- The two new tests, as separate pytest runs: 15/15 passed on an idle machine and 15/15
+  under sustained load (44 busy-loop processes on 22 cores, 291 s).
+- The full `test_enrich.py` under the same load: 3/3 passed.
+- Calling both test functions directly in a loop: 300/300 passed each.
+
+**Issues Found:** None blocking.
+- **[MINOR, optional]** `tests/test_enrich.py` `test_breaker_rechecked_after_pacer_wait`
+  still uses the pacer's real `time.monotonic`. The test needs the second task to reach
+  `pacer.wait()` within 250 ms of the first. If it does not, no sleep happens, the
+  re-check is not exercised, and the `len(pacer_sleeps) == 1` assertion fails. The margin
+  is about 250 ms against microseconds of scheduling, and the test never failed in more
+  than 330 runs, including under load. Passing the file's existing `FakeClock` as `clock=`
+  would remove the dependence completely. Owner: python-test-runner, if anyone wants it.
+- **[Informational]** No test reaches the `"unknown host"` branches of `links.log_host`
+  (None and `ValueError`). They are unreachable for selected items, and this is T046 #3
+  territory. Not a T045 finding.
+
+**Security Notes:** None identified. The round-1 security conclusions still hold: the diff
+touches only breaker placement and the log-host helper, and `log_host` still logs only the
+hostname. **`.env.example`:** the dispatcher says the user confirmed restoring the file, and
+that it is restored and tracked. I treat this as resolved. I cannot independently verify the
+user's confirmation. I can confirm that the file is tracked, unmodified in the working tree,
+and last changed in `0a64c8d`, with the content I checked in round 1.
+
+**Checklist evidence (HEAD):**
+- `pytest`: 2409 passed, 2 deselected, 0 xfailed (both round-1 xfails are resolved).
+- `ruff check` and `ruff format --check src tests` are clean.
+- pyrefly reports 0 errors.
+- No line over 88 characters in `enrich.py`, `links.py` or `test_enrich.py`.
+- The `urlsplit` import was removed with `_host`, so nothing unused is left behind.
+- The T031 note is corrected in place (with a "Corrected in T045 round 1" marker). It
+  matches the code: the check after the HTTP slot, then after the LLM slot, then after
+  the pacer wait. Its "at most one extra call in flight" bound matches the probe.
+- The `fetch_env=None` vs `{}` decision is now recorded.
+
+**Positive Notes:**
+- The fix is small and touches only the right place: one check moved, one re-check added,
+  and comments that say why.
+- The test rewrite does more than asked. The tests are now ordered by events rather than
+  sleeps, and the queued-HTTP assertion was tightened from `<= 2` to `== 2`.
+- The implementation notes state that both tests fail against the old code, and my
+  mutation run confirms it.
+
+## Verdict (round 2)
+
+**APPROVED.** All three round-1 issues are fixed and verified by before/after probes and
+mutation runs. The one remaining note is optional and does not block.
