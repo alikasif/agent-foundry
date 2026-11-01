@@ -228,3 +228,11 @@
 - (T036) `str(IPv6Network("::ffff:0:0/96"))` renders as `::ffff:0.0.0.0/96`, so compare
   network lists as parsed `ip_network` objects, not strings. `network_address + 1` on a
   `/32` or `/128` raises `AddressValueError`; guard it with `num_addresses > 1`.
+- (T037) lxml drops raw C0 control bytes in HTML before trafilatura returns, so a
+  fixture page cannot prove that our own control-character strip works. Test
+  post-processing by monkeypatching `trafilatura.extract` to return exact raw text.
+  Numeric entities for C0 controls (`&#7;`) make trafilatura 2.3.1 return None for the
+  whole page.
+- (T037) Check a `Callable[...]` alias against its default implementation with pyrefly
+  in a scratch file (`x: Alias = func`). AF-P5's positional `Extractor` alias does not
+  accept the keyword-only `extract_article_text`.

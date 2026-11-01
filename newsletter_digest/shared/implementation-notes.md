@@ -1544,3 +1544,66 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   `uv run --with coverage coverage run --branch`: `netguard.py` is at 100% of
   statements and branches (114 statements, 38 branches).
 - I found no bugs in `netguard.py`.
+
+## T037 — Tests for extract.py
+
+- **Fixtures** (`tests/fixtures/pages/`): `typical_article.html`,
+  `boilerplate_heavy.html` (nav, sponsor block, head and body scripts, style, iframe,
+  table, comments, footer, injection sentence; every boilerplate item has a unique
+  `*-MARKER` string), `spa_shell.html`, `empty_body.html`, `long_article.html` (120
+  paragraphs plus h2 sections, about 33 KB), `delimiter_lookalikes.html` (five
+  entity-escaped look-alikes, as T029 advised, plus escaped `&lt;script&gt;`),
+  `latin1_charset.html` (ISO-8859-1 bytes with a `http-equiv` charset) and
+  `malformed.bin` (NUL bytes, invalid UTF-8, broken tags, all 256 byte values). The
+  long, latin-1 and malformed files were generated once by a scratch script and
+  committed as static files; the tests do not regenerate them.
+- **Two layers of tests.** Fixture pages go through the real trafilatura. The
+  post-processing rules (control characters, whitespace, `MIN_TEXT_CHARS` boundary,
+  truncation boundaries, scrub order) are tested with `trafilatura.extract`
+  monkeypatched to return exact raw text. lxml already deletes raw control bytes
+  before our code sees them, so a fixture alone cannot prove that `extract.py` strips
+  them. Mutation check (scratch exec of nine one-line mutants: scrub removed, `<`/`<=`
+  flips, half-budget rule, blank-line collapse, control strip, `include_tables=True`,
+  narrowed `except`, wrong `chars`): all nine are caught.
+- **Pinned T029 decisions** (not in AF-4, but recorded in T029 notes): tab, VT and FF
+  become a space; U+0085/U+2028/U+2029 and CR become newlines; scrubbing runs before
+  the length check; a paragraph break is used only if it keeps at least half the
+  budget; text of exactly `max_chars` is not truncated. If one of these changes on
+  purpose, update the matching parametrized case.
+- **Call contract test** checks the AF-4 kwargs passed to `trafilatura.extract`, that
+  no truthy `max_tree_size=` is passed, and that `config=` carries
+  `MAX_TREE_SIZE = 100000` (the V18 deviation). A separate test checks that
+  `trafilatura.settings.DEFAULT_CONFIG` is not mutated.
+- **Malformed input:** the contract is "never raises", not "always None". Garbled
+  bytes that still decode to 400+ replacement or mojibake characters (for example a
+  UTF-16 fragment after an ASCII `<p>`) return text. Those cases are in
+  `test_garbled_bytes_never_raise`, which accepts None or tidy text. Clearly unusable
+  inputs (empty, whitespace, NUL bytes, random bytes, lone or truncated tags, 5,000
+  nested `<div>`) must return None.
+- **No-network test:** patches `socket.socket.connect`, `connect_ex`,
+  `socket.create_connection` and `socket.getaddrinfo` to raise, checks that the patch
+  works, then runs every fixture page.
+- **Threads:** one `anyio.to_thread.run_sync` test and one that runs 21 extractions
+  in parallel (limiter 6, `fail_after(120)`) and compares them with the sequential
+  results.
+- **Contract conflict found (strict xfail, not a bug in extract.py alone):** AF-P5
+  declares `Extractor = Callable[[bytes, int], ExtractedText | None]` (positional) and
+  `PageFetcher(..., extractor: Extractor = extract_article_text)`, but
+  `extract_article_text(html, *, max_chars)` takes `max_chars` keyword-only.
+  pyrefly reports `bad-assignment` for `x: Extractor = extract_article_text`, and a
+  positional call `extractor(body, max_chars)` raises `TypeError`. T030 (fetch.py)
+  has to change either the alias (a `Protocol` with keyword `max_chars`) or the
+  signature. `test_extract_article_text_satisfies_extractor_alias` is
+  `xfail(strict=True)`, so it fails loudly once the conflict is fixed and the marker
+  should be removed.
+- **Observation (third-party, not asserted):** a numeric entity for a C0 control
+  character (`&#7;`, `&#1;`, `&#x1b;`) anywhere in a page makes trafilatura 2.3.1
+  return None for the whole page, which becomes `TOO_SHORT`. `&#0;` becomes U+FFFD and
+  `&#127;` is stripped by `extract.py`. It is rare and safe (fails closed), so no test
+  pins it.
+- **Coverage:** pytest-cov is not in the dev deps and I did not add it (shared
+  `pyproject.toml`/`uv.lock` in a parallel batch). Measured with `uv run --with
+  coverage coverage run --branch`: `extract.py` is at 100% of statements and branches
+  (57 statements, 10 branches).
+- Results: `tests/test_extract.py` 131 passed, 1 xfailed (strict); full suite 1721
+  passed, 2 deselected, 2 xfailed; ruff and pyrefly clean.
