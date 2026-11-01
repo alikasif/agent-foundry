@@ -13,7 +13,14 @@
       {{ item.title }}
       {%- endif -%}
     </h3>
-    {% if item.summary %}
+    {% if item.fetched %}
+    <p class="summary">{{ item.fetched.summary }}</p>
+    <ul class="key-points">
+      {% for point in item.fetched.key_points %}
+      <li>{{ point }}</li>
+      {% endfor %}
+    </ul>
+    {% elif item.summary %}
     <p class="summary">{{ item.summary }}</p>
     {% endif %}
     <p class="meta">
@@ -22,8 +29,18 @@
       {%- if item.mentioned_in > 1 %}<span class="badge">mentioned in {{ item.mentioned_in }}</span>{% endif %}
       {%- if item.priority %}<span class="prio prio-{{ item.priority }}">{{ item.priority | replace("-", " ") }}</span>{% endif -%}
     </p>
+    {% if item.fetch_failure and item.fetch_failure.name != "DUPLICATE" %}
+    {% set fetch_note = {"SUMMARY_FAILED": "summarise", "RATE_LIMITED": "summarise"} %}
+    <p class="fetch-note">Couldn't {{ fetch_note.get(item.fetch_failure.name, "fetch") }} the article: {{ item.fetch_failure.value }}</p>
+    {% endif %}
     {% if item.reason %}
     <p class="reason">Why: {{ item.reason }}</p>
+    {% endif %}
+    {% if item.fetched %}
+    <details class="read-here">
+      <summary>Read here</summary>
+      <div class="full-text">{{ item.fetched.full_text }}</div>
+    </details>
     {% endif %}
   </div>
 </article>
@@ -149,6 +166,28 @@ footer p { margin: .2rem 0; }
   header h1 { font-size: 1.35rem; }
   .item { padding: .75rem .8rem; }
 }
+{% if reading_list.fetch %}
+.item .key-points { margin: .35rem 0 0; padding-left: 1.25rem; overflow-wrap: anywhere; }
+.item .key-points li { margin: .1rem 0; }
+.item .fetch-note {
+  background: var(--note-bg);
+  color: var(--note-text);
+  border-radius: .4rem;
+  padding: .25rem .6rem;
+  margin: .4rem 0 0;
+  font-size: .85rem;
+}
+.item details.read-here { margin: .5rem 0 0; }
+.item details.read-here > summary { cursor: pointer; color: var(--accent); font-size: .9rem; }
+.item .full-text {
+  white-space: pre-line;
+  margin: .5rem 0 0;
+  padding: .25rem 0 .25rem .85rem;
+  border-left: 3px solid var(--border);
+  font-size: .95rem;
+  overflow-wrap: anywhere;
+}
+{% endif %}
 </style>
 </head>
 <body>
@@ -165,6 +204,17 @@ footer p { margin: .2rem 0; }
     <strong>{{ meta.emails_failed }}</strong> failed
     · Articles: <strong>{{ reading_list.article_count }}</strong>
   </p>
+  {% if reading_list.fetch %}
+  {% set f = reading_list.fetch %}
+  <p class="stats">
+    Article pages: <strong>{{ f.summarised }}</strong> fetched and summarised of
+    <strong>{{ f.selected }}</strong> selected ({{ f.eligible }} eligible{% if f.excluded %}, {{ f.excluded }} skipped as non-article links{% endif %})
+    · <strong>{{ f.failed_total }}</strong> couldn't be fetched
+  </p>
+  {% if f.skipped_reason %}
+  <p class="note">Article fetching was skipped: {{ f.skipped_reason }}.</p>
+  {% endif %}
+  {% endif %}
   {% if items and not reading_list.ranked %}
   <p class="note">Ranking was not completed, so this list is unranked: articles are grouped by their suggested topic and there is no Must read section.</p>
   {% endif %}
@@ -212,7 +262,11 @@ footer p { margin: .2rem 0; }
 </main>
 <footer>
   <p>Generated {{ meta.generated_at.isoformat(sep=" ", timespec="minutes") }}.</p>
+  {% if not reading_list.fetch %}
   <p>Summaries come from newsletter emails; links not fetched.</p>
+  {% else %}
+  <p>Items with key points were summarised from the linked article page; the others use the newsletter's summary.</p>
+  {% endif %}
 </footer>
 </div>
 <script>{{ script_body | safe }}</script>

@@ -210,3 +210,8 @@
   be our own. It also turns an explicit default port into `port=None`. Netguard's
   `BlockedAddressError` and a raw `socket.gaierror` from the resolver both reach
   `client.get` callers unmapped as `OSError`s; check the specific class first.
+- (T033) A "no `src=` in the page" assertion fails on hostile fixtures that contain the
+  text `<img src=x ...>`: autoescape renders `&lt;img src=x`, so the substring is still
+  there. Match attributes inside real tags (`re.search(r"<[^>]*\ssrc=", html)`).
+- (T033) `tests.flag_off_fixture` is importable from a scratch script only with the
+  project dir on the path: `PYTHONPATH=. uv run python <scratch>.py`.

@@ -1373,3 +1373,41 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   (handy for T036).
 - No tests were added (T036 owns `tests/test_netguard.py`). The scratch probes made no
   real sockets: a fake resolver plus a scripted `httpcore.AsyncMockStream` backend.
+
+## T033 — Template changes for fetched content (render stays models-only)
+
+- Only `templates/reading_list.html.j2` changed; `render.py` needed no change (it still
+  imports only models, jinja2 and the stdlib; CSP meta, `SCRIPT_BODY` and its hash are
+  untouched; no `|safe` or `Markup` on any new field). `tests/test_flag_off_identity.py`
+  and `tests/test_render.py` were run after each of the five edits and stayed green.
+- Key points: written as a multi-line `<ul>` with one `<li>` per line instead of the
+  one-line form in AF-8, for readable output. Same elements and escaping.
+- Fetch note: the "fetch"/"summarise" verb comes from a `{% set fetch_note = {...} %}`
+  dict inside the macro, keyed by the enum member *name* (`SUMMARY_FAILED`,
+  `RATE_LIMITED`), default "fetch". DUPLICATE is skipped by name too. Names, not values,
+  so a later wording change in `FetchFailure` cannot change the routing. The dict is
+  inside the `{% if item.fetch_failure %}` block, so flag-off never evaluates it.
+- Spec-as-written wording: `SUMMARY_FAILED` and `ERROR` give the repetitive
+  "Couldn't summarise the article: couldn't summarise" and "Couldn't fetch the article:
+  couldn't fetch". Kept as AF-3.7 says; easy to change in the enum later. The value's
+  apostrophe is autoescaped (`couldn&#39;t`); the template's own "Couldn't" is literal.
+- Header: the article-pages stats line sits right after the emails stats line and before
+  the existing unranked/failed-email notes, as AF-8 says. When `skipped_reason` is set
+  the stats line still renders (all zeros) above the "Article fetching was skipped: …."
+  note; AF-8 puts both under `{% if reading_list.fetch %}` and does not exclude it.
+- Footer: written as `{% if not reading_list.fetch %}` old line `{% else %}` flag-on line.
+- Read here: `<details class="read-here">` (no `open`), `<summary>Read here</summary>`,
+  then `<div class="full-text">{{ full_text }}</div>` with the expression tight against
+  the div tags so `white-space: pre-line` shows only the extracted text's line breaks.
+- CSS: the new rules (`.key-points`, `.fetch-note`, `details.read-here`, `.full-text`)
+  are appended at the end of `<style>` inside `{% if reading_list.fetch %}`, reusing the
+  existing colour variables (so dark mode works) and no `url(`.
+- For T040 (render tests): AF-8's "no `src=`" check cannot be a plain substring test,
+  because the hostile fixtures (including the flag-off golden ones) contain the text
+  `<img src=x ...>`, which renders escaped as `&lt;img src=x`. Check for `src=` inside a
+  real tag instead (`re.search(r"<[^>]*\ssrc=", html)` is None). A scratch probe
+  (flag-on fixture with every `FetchFailure`, hostile summary/key points/full text) passed
+  that check plus no `<link`/`url(`/`<iframe`, exactly one `<script`, every `href`
+  `#…` or `safe_url`-clean, and no raw `{%` in the output.
+- Probe counts: 15 `FetchFailure` members, DUPLICATE not rendered, so 14 notes (2 of
+  them "summarise"). Full suite: 954 passed, 1 xfailed; ruff and pyrefly clean.
