@@ -1814,3 +1814,78 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   page, model built once, breaker after the first 429, ERROR isolation, pacer sleeps with
   a fake clock, parse tolerance). No tests added (tests/test_enrich.py is T039). Suite:
   1795 passed, 2 deselected, 1 xfailed; ruff and pyrefly clean.
+
+## T038 — Tests for fetch.py: failure classes, caps, headers, ledger, SSRF through PageFetcher
+
+- **File:** tests/test_fetch.py (186 tests, offline, about 1.5 s). HTTP behaviour runs
+  through `httpx.MockTransport` with an async `Site` handler that routes by exact URL
+  and records every request URL and its headers (unknown URLs answer 418, so a stray
+  request shows up). SSRF cases run through the real guarded transport: a dict
+  `FakeResolver` plus a `ScriptedBackend` that returns one canned HTTP/1.1 response per
+  dial and records `dials`. These fakes are copied from tests/test_netguard.py (T036),
+  trimmed, not imported, so the two test files stay independent.
+- **Encoded and streamed bodies** use `ChunkedBody`, an async generator passed as
+  `content=`. It records `started`/`yielded`, and with `forever=True` it never ends, so
+  only a working cap or deadline can stop the read. This makes "rejected unread"
+  (Content-Length over the cap, non-HTML type, unsupported encoding, redirect bodies)
+  a direct assertion (`yielded == 0`) instead of an inference (T030 note).
+- **Gzip bomb:** 32 MiB of zeros compressed under 64 KiB (gzip and deflate, in 256-byte
+  chunks and in one chunk). Besides TOO_LARGE, `tracemalloc` peak during the fetch must
+  stay under 4 MiB. Without the peak check, an unbounded decoder would still return
+  TOO_LARGE; the mutation run below showed the one-chunk variant catches it.
+- **Cap boundaries:** a body of exactly `max_bytes` passes and `max_bytes + 1` is
+  TOO_LARGE, for identity and for decoded gzip/deflate (pins the T030 "max_bytes itself
+  is the limit" reading). A lying `Content-Length: 10` does not lift the streamed cap.
+- **Timeouts:** 0.05 s budgets (slow handler; a body that stalls after its first chunk;
+  a two-hop chain where each hop is under a 0.1 s budget but the chain is not, proving
+  one deadline across hops) and raised `httpx.ConnectTimeout`/`ReadTimeout`/
+  `PoolTimeout`/builtin `TimeoutError`. A slow extractor after the deadline still
+  returns the page: this pins the T030 decision that extraction is outside
+  `fail_after`. If that decision is reversed, change that one test.
+- **Cancellation and BaseException:** `move_on_after` around `fetch` proves cancellation
+  propagates (code after `fetch` is not reached) and the client is closed after
+  cancellation inside `async with`. A custom `BaseException` subclass stands in for
+  KeyboardInterrupt, from the handler and from the extractor thread (a real
+  KeyboardInterrupt inside an asyncio task would tear down the event loop).
+- **Headers on every hop:** a tracker -> same-host hop -> article chain with
+  `Set-Cookie` on every response, then a second fetch on the same fetcher: each of the
+  4 requests has UA == `USER_AGENT`, `Accept-Encoding: identity`, `Accept-Language: en`
+  and no `Cookie`, `Authorization` or `Referer`; the jar stays empty. Client settings
+  are also asserted on `fetcher._client` (private attribute, as the T030 notes suggest).
+- **Proxy env:** `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` set to a private proxy; a fetch
+  through the default-built guarded transport (no `transport=`) dials only the
+  resolved public IP and resolves only the target host.
+- **SSRF through PageFetcher:** URL-policy rejects (userinfo, ports, file/ftp/gopher,
+  localhost, `LOCALHOST.`, `.local`, inet_aton forms) with zero requests; the same on a
+  redirect hop via MockTransport (hook level); and redirects to 169.254.169.254,
+  10.0.0.5, 127.0.0.1, `fd00:ec2::254`, `::ffff:169.254.169.254` and a hostname
+  resolving private, through the real guarded transport, with `dials` equal to the
+  first public hop only. A public two-host redirect through the guarded transport
+  returns the page.
+- **Finding (minor, not a test change):** a redirect `Location: http://0177.0.0.1/` is
+  rejected by httpx itself while it builds the redirect (`InvalidURL` re-raised as
+  `RemoteProtocolError`), before the request hook, so `fetch` returns NETWORK, not
+  UNSAFE as AF-3.7 lists for numeric hosts. Nothing is requested, so it is safe; only
+  the note text differs. The test accepts UNSAFE or NETWORK and asserts no request.
+  If UNSAFE is wanted, fetch.py could map a `RemoteProtocolError` whose cause is an
+  invalid Location to UNSAFE (owner: T030).
+- **Ledger:** converging trackers (second destination differs only in host case and
+  fragment) -> DUPLICATE and one request; the concurrent version holds the destination
+  until both tasks are blocked; same URL twice; a failed (500) request still claims its
+  URL; a redirect back to an already requested URL is DUPLICATE (T030 note); separate
+  fetchers have separate ledgers; `RequestLedger` normalisation and 20 concurrent
+  claims grant exactly one.
+- **Logs:** an ERROR logs exactly one WARNING with the host and exception type and no
+  path, query or message text; a run over a page, a challenge page, a JSON response
+  and an extractor that raises with the body as its message never puts the body
+  marker in `caplog` (DEBUG level).
+- **Default extractor:** one test fetches tests/fixtures/pages/typical_article.html with
+  the real `extract_article_text` adapter (default `max_chars`; with 500 the paragraph
+  truncation gives 351 chars, which is TOO_SHORT by design).
+- **Verification:** a monkeypatch mutation plugin (scratch only, fetch.py untouched)
+  killed all 8 mutants: no redirect-body drop, hook without ledger / URL policy / link
+  class, unbounded zlib decoder, changed Accept-Encoding, no Content-Length check, no
+  challenge check. Coverage of fetch.py (`uv run --with coverage`, branch): 98%; the
+  misses are `_host`'s ValueError branch, the decoder `flush()` tail over the cap and a
+  non-async redirect stream. Full suite: 1981 passed, 2 deselected, 1 xfailed; ruff and
+  pyrefly clean.

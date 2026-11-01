@@ -257,3 +257,12 @@
   ChatOpenAI error path (e.g. a 429 after `max_retries`) without any network.
 - (T031) A pacer with only an injectable clock still sleeps for real; inject the sleep
   function too, or a fake-clock test waits the full interval.
+- (T038) httpx parses a redirect `Location` before the request hook runs. An
+  unparseable one (`http://0177.0.0.1/`) becomes `RemoteProtocolError` ("Invalid URL in
+  location header"), so a policy test on that hop sees NETWORK, not the hook's UNSAFE.
+  Use hosts httpx accepts (`0x7f.0.0.1`, `2130706433`) to reach the URL policy.
+- (T038) To prove "rejected unread", pass an async generator body that counts its
+  yields (and can repeat forever with an `anyio.sleep(0)` per chunk) as `content=`;
+  assert zero yields. An endless body also makes a missing cap show up as a timeout
+  instead of a silent pass. For a bomb, also bound the `tracemalloc` peak: an unbounded
+  decoder still ends in TOO_LARGE.
