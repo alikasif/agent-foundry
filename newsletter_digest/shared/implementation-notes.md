@@ -29,7 +29,7 @@
 | V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 | httpx 0.28.1, httpcore 1.0.9, stdlib `http.cookiejar` (3.13.5) | Scratch probe: real `PageFetcher` (real `GuardedTransport`), fake resolver, scripted `httpcore` backend recording every byte written; hop 1 `302` with two `Set-Cookie` (one with `Domain=`), hop 2 `200` with `Set-Cookie`; `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` set to `10.9.9.9:3128`; read `_client.py` | Confirmed. No `Cookie` header on either hop and the jar stayed empty (`DefaultCookiePolicy(allowed_domains=[])` rejects every cookie in `set_ok` and `return_ok`). Requests went to the resolved origin IPs (resolver saw `a.example`, `b.example`), `_client._mounts == {}`. Headers sent per hop: Host, Connection, User-Agent, Accept, Accept-Language, `Accept-Encoding: identity`; no Authorization/Referer. **Correction to AF-3.4:** in 0.28.1 env proxies are mounted only when `trust_env and transport is None`, so with our custom transport they are ignored even with `trust_env=True`; there is no `.netrc` support any more. `trust_env=False` is kept as defence in depth (it also matters if `transport` were ever None). Same probe: redirect hop to a host resolving to 169.254.169.254 -> UNSAFE |
 | V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 | trafilatura 2.3.1, lxml 6.1.3, Python 3.13.5 | `inspect.signature`, read `core.py`/`settings.py`/`settings.cfg` in `.venv`, offline probes with `socket.socket.connect`/`create_connection`/`getaddrinfo` patched to raise | Signature matches AF-4 (all AF-4 kwargs exist). **Deviation:** any truthy `max_tree_size=` kwarg raises `ValueError("\"max_tree_size\" will be removed, use settings.cfg instead")` in `_check_deprecation`, so `extract.py` passes `config=` (a copy of `DEFAULT_CONFIG` with `MAX_TREE_SIZE = 100000`) instead. Semantics: checked after extraction on `len(postbody)` = number of top-level output elements (not total nodes); over the limit, `hi` tags are stripped, then the page is discarded (None): 100,100 `<p>` -> None, 99,000 -> text. No network I/O in `extract()` (probes pass with sockets blocked). Empty/garbage/UTF-16/random bytes return None (trafilatura catches its own `ValueError`/`TypeError`). Logs `WARNING trafilatura.core: discarding data: None` per rejected page |
 | V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 | langchain-openai 1.7.3, openai 3.41.0, langchain-core 1.7.3 | Read `langchain_openai/chat_models/base.py` (`_handle_openai_api_error`) and `openai/_exceptions.py`; offline probe: `ChatOpenAI(max_retries=3, http_async_client=httpx2.AsyncClient(transport=httpx2.MockTransport(...)))` answering every request with 429 | Confirmed. After 4 requests (1 + 3 retries) `ainvoke` raises `langchain_openai...OpenAIRateLimitError`, a subclass of both `openai.RateLimitError` (`APIStatusError`) and `langchain_core.exceptions.ModelRateLimitError`; `exc.status_code == 429` and `exc.response.status_code == 429`. enrich checks both attributes duck-typed (no openai import). Note: openai 3.x uses its own `httpx2` package, not `httpx`; and its client stops retrying early when `Retry-After` exceeds its maximum delay, which only makes the 429 arrive sooner |
-| V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 | TODO | TODO | TODO |
+| V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 | click 8.5.0 | Scratch command with the same two option declarations, run through `CliRunner(env=...)` for 16 values; plus the real `digest` command with a fake `run_digest` | Unset, `""` and `" "` -> False; `1`, `true`, `True`, `yes`, `y`, `t`, `on` -> True; `0`, `false`, `no`, `off` -> False (case-insensitive, stripped). Any other value (`2`, `garbage`, `maybe`) -> exit 2: `Invalid value for '--fetch-articles' (env var: 'NEWSLETTER_FETCH_ARTICLES'): 'maybe' is not a valid boolean.` The CLI flag wins over the env var (`--fetch-articles` with `NEWSLETTER_FETCH_ARTICLES=0` -> True); there is no `--no-fetch-articles` to turn an env `1` off on the command line. `NEWSLETTER_MAX_FETCH` goes through `IntRange(1, 50)`: `0`, `51`, `abc` -> exit 2 naming both the option and the env var; `""` -> default 15. So `Settings.build`'s own `max_fetch` range check is not reachable from the CLI |
 
 ## Task notes
 
@@ -1889,3 +1889,68 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   misses are `_host`'s ValueError branch, the decoder `flush()` tail over the cap and a
   non-async redirect stream. Full suite: 1981 passed, 2 deselected, 1 xfailed; ruff and
   pyrefly clean.
+
+## T032 — agent.py and cli.py wiring: --fetch-articles, --max-fetch, fetch env settings, report line
+
+- **run_digest**: new keyword `enricher: Enricher = enrich_reading_list` (last kwarg).
+  After the `async with gmail_opener(...)` block and `assemble_reading_list`:
+  flag off -> return the assembled list as before (the enricher, `store.rankings()` and
+  `FetchStats` are not touched, no new log record); flag on -> `_enrich(...)`. The
+  enricher is imported at module level in `agent.py` (so `fetch`, `netguard`, `extract`
+  and trafilatura are imported when the CLI starts, as AF-11 accepts), but nothing from
+  them is constructed or called with the flag off.
+- **Zero matching emails with the flag on**: the enricher is not called; the list gets
+  `fetch=FetchStats()` (all zero, no skip reason), as the task recommends, so the
+  template shows the consistent "Article pages: 0 ... of 0 selected" header line and the
+  fetching footer. No fetch log line is emitted on that path (the enricher would have
+  logged "skipped: ranking was not completed", which is misleading for an empty search).
+  Emails found but nothing recorded/ranked still goes through the enricher.
+- **Internal-error wrapper** (`_enrich`): `except Exception` -> one WARNING
+  `Article fetching failed (<TypeName>); keeping the newsletter summaries` (type name
+  only, never the message) and `reading_list.model_copy(update={"fetch":
+  FetchStats(skipped_reason=INTERNAL_ERROR_REASON)})` where
+  `agent.INTERNAL_ERROR_REASON = "internal error"`. `BaseException` (cancellation,
+  `KeyboardInterrupt`, a `BaseExceptionGroup`) propagates. An `ExceptionGroup` escaping
+  the enricher's task group is an `Exception` and is caught.
+- The User-Agent INFO line and the stats INFO line are logged by `enrich_reading_list`
+  itself (T031), so `run_digest` adds no INFO line of its own; it logs only the WARNING
+  above. The existing `Settings:` line shows the fetch keys only with the flag on
+  (`safe_summary`, T027).
+- **CLI**: `--fetch-articles` (`is_flag`, `envvar="NEWSLETTER_FETCH_ARTICLES"`,
+  `show_envvar`) and `--max-fetch` (`IntRange(MIN_MAX_FETCH, MAX_MAX_FETCH)`, default
+  `DEFAULT_MAX_FETCH`, `show_default`, `envvar="NEWSLETTER_MAX_FETCH"`, `show_envvar`),
+  placed after `--open` and before `--log-level`. Bounds and default come from the
+  `config` constants instead of literals. The help of `--fetch-articles` names the three
+  privacy effects (publisher sees the IP, tracker clicks are registered, page text goes
+  to the reader model on OpenRouter). The command docstring (shown in `--help`) lists the
+  eight env-only vars. `fetch_env = {name: os.environ.get(name) for name in
+  FETCH_ENV_VARS}` (keys are the env var names, as `Settings.build` expects); a bad value
+  is a `ConfigError` -> `click.UsageError` -> exit 2 naming the variable (probed).
+- **`_report` line**: printed after the existing lines only when `reading_list.fetch` is
+  not None: `Article pages: F fetched and summarised, X couldn't be fetched`, with
+  `F = fetch.summarised` and `X = fetch.failed_total` (same numbers as the HTML header),
+  plus ` (skipped: <reason>)` when `skipped_reason` is set. Not covered by the spec: on the
+  zero-email path `_report` keeps its early return, so no article-pages line is printed
+  there (all counts would be 0). The line goes through the same Rich console as the
+  others, so at 80 columns a long skip reason wraps (as the existing lines would).
+  Exit code is unchanged by fetch outcomes (the enricher never raises into the CLI).
+- **trafilatura logging: no change needed.** T029 noted a WARNING per rejected page. The
+  `trafilatura` package logger has a `NullHandler` attached in `trafilatura/__init__.py`,
+  and the CLI configures only the `newsletter_digest` logger (root has no handler), so
+  Python's last-resort handler never fires and nothing reaches stderr (probed:
+  `_setup_logging("INFO")` then `extract_article_text` on a too-short page and on `b""`
+  print nothing). Changing the trafilatura logger level would only add code.
+- **Test isolation note for T041/T047** (not changed here): `cli.py` loads `.env` from the
+  cwd at import time. A developer `.env` with `NEWSLETTER_FETCH_ARTICLES=1` or a bad
+  `NEWSLETTER_FETCH_*` value would leak into CLI tests that do not clear those vars; the
+  existing `tests/test_cli.py` clears only its `TOOL_ENV_VARS`. New wiring tests should
+  `monkeypatch.delenv` the ten fetch vars.
+- context7 was not available; click behaviour was probed on the installed 8.5.0 (V20).
+  Offline probes (scratch, fake Gmail/agent/enricher from `tests/test_agent.py`): flag off
+  with a raising enricher -> `fetch is None`, no WARNING; flag on -> enricher called once
+  with the 3 items, the rankings keys and the given `model_factory`, after the Gmail
+  session closed; raising enricher -> 3 items kept, `skipped_reason="internal error"`,
+  one WARNING without the message; zero emails -> `FetchStats()`; `KeyboardInterrupt`
+  propagates. No tests added (wiring tests are T041). Existing `tests/test_cli.py`,
+  `tests/test_agent.py` and `tests/test_flag_off_identity.py` pass unchanged; full suite
+  1981 passed, 2 deselected, 1 xfailed; ruff and pyrefly clean.

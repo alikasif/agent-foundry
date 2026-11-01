@@ -266,3 +266,9 @@
   assert zero yields. An endless body also makes a missing cap show up as a timeout
   instead of a silent pass. For a bomb, also bound the `tracemalloc` peak: an unbounded
   decoder still ends in TOO_LARGE.
+- (T032) trafilatura attaches a `NullHandler` to its package logger, so its per-page
+  WARNINGs ("discarding data: None") never reach stderr when only the project logger has a
+  handler (no last-resort output). Probe a third-party logger's handlers before adding
+  code to quiet it.
+- (T032) click 8.5 `is_flag` + `envvar`: blank/whitespace -> False, an unknown value
+  (e.g. `2`) -> exit 2 naming the option and env var; the CLI flag beats an env `0`.

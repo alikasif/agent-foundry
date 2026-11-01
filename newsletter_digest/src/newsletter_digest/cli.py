@@ -18,9 +18,13 @@ from rich.logging import RichHandler
 
 from newsletter_digest.agent import run_digest
 from newsletter_digest.config import (
+    DEFAULT_MAX_FETCH,
+    FETCH_ENV_VARS,
     LOG_LEVELS,
     MAX_MAX_EMAILS,
+    MAX_MAX_FETCH,
     MIN_MAX_EMAILS,
+    MIN_MAX_FETCH,
     ConfigError,
     Settings,
 )
@@ -112,6 +116,25 @@ def _setup_logging(log_level: str) -> logging.Logger:
     help="Open the reading list in the default browser.",
 )
 @click.option(
+    "--fetch-articles",
+    is_flag=True,
+    envvar="NEWSLETTER_FETCH_ARTICLES",
+    show_envvar=True,
+    help="Also fetch the linked pages of must-read and worth-reading items and "
+    "summarise them. Privacy: publisher sites see your IP address, tracker links "
+    "are followed (which registers the click), and the page text is sent to the "
+    "reader model on OpenRouter.",
+)
+@click.option(
+    "--max-fetch",
+    type=click.IntRange(MIN_MAX_FETCH, MAX_MAX_FETCH),
+    default=DEFAULT_MAX_FETCH,
+    show_default=True,
+    envvar="NEWSLETTER_MAX_FETCH",
+    show_envvar=True,
+    help="Maximum number of article pages to fetch (with --fetch-articles).",
+)
+@click.option(
     "--log-level",
     type=click.Choice(CLI_LOG_LEVELS, case_sensitive=False),
     default="INFO",
@@ -127,12 +150,20 @@ def digest(
     reader_model: str | None,
     out_dir: Path,
     open_browser: bool,
+    fetch_articles: bool,
+    max_fetch: int,
     log_level: str,
 ) -> None:
     """Turn a Gmail newsletter label into a ranked HTML reading list.
 
     OPENROUTER_API_KEY, OPENAI_API_BASE, GMAIL_MCP_COMMAND and GMAIL_MCP_ARGS are
     read from the environment (or .env) only.
+
+    Article fetching limits are read from the environment (or .env) only:
+    NEWSLETTER_FETCH_TIMEOUT, NEWSLETTER_FETCH_CONNECT_TIMEOUT,
+    NEWSLETTER_FETCH_MAX_REDIRECTS, NEWSLETTER_FETCH_MAX_BYTES,
+    NEWSLETTER_FETCH_MAX_CHARS, NEWSLETTER_FETCH_CONCURRENCY,
+    NEWSLETTER_FETCH_LLM_CONCURRENCY and NEWSLETTER_FETCH_LLM_INTERVAL.
     """
     logger = _setup_logging(log_level)
     try:
@@ -150,6 +181,9 @@ def digest(
             log_level=log_level,
             mcp_command=os.environ.get("GMAIL_MCP_COMMAND"),
             mcp_args=os.environ.get("GMAIL_MCP_ARGS"),
+            fetch_articles=fetch_articles,
+            max_fetch=max_fetch,
+            fetch_env={name: os.environ.get(name) for name in FETCH_ENV_VARS},
         )
     except ConfigError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -174,7 +208,11 @@ def digest(
 
 
 def _report(reading_list: ReadingList, settings: Settings) -> None:
-    """Print a one-line summary of the run (and any warning) to stderr."""
+    """Print a one-line summary of the run (and any warning) to stderr.
+
+    With article fetching on, one more line gives the page counts (and the skip
+    reason, if fetching was skipped).
+    """
     meta = reading_list.meta
     if meta.emails_found == 0:
         console.print(
@@ -196,3 +234,13 @@ def _report(reading_list: ReadingList, settings: Settings) -> None:
             markup=False,
             highlight=False,
         )
+    fetch = reading_list.fetch
+    if fetch is None:
+        return
+    line = (
+        f"Article pages: {fetch.summarised} fetched and summarised, "
+        f"{fetch.failed_total} couldn't be fetched"
+    )
+    if fetch.skipped_reason:
+        line += f" (skipped: {fetch.skipped_reason})"
+    console.print(line, markup=False, highlight=False)

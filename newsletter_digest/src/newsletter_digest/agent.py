@@ -20,9 +20,10 @@ from deepagents.backends import StateBackend
 from langchain_core.tools import BaseTool
 
 from newsletter_digest.config import Settings
+from newsletter_digest.enrich import Enricher, enrich_reading_list
 from newsletter_digest.gmail_mcp import open_gmail_tools, search_email_refs
 from newsletter_digest.llm import ModelFactory, make_model
-from newsletter_digest.models import DigestMeta, ReadingList
+from newsletter_digest.models import DigestMeta, FetchStats, ReadingList
 from newsletter_digest.prompts import (
     MAIN_SYSTEM_PROMPT,
     READER_DESCRIPTION,
@@ -45,6 +46,8 @@ READER_NAME = "newsletter-reader"
 # built-in file tool (ls, write_file, edit_file, delete, glob, grep, execute) is
 # hidden from the main agent, the reader and the default general-purpose subagent.
 FILESYSTEM_TOOLS: list[FsToolName] = ["read_file"]
+# FetchStats.skipped_reason when the enricher itself raised (a bug).
+INTERNAL_ERROR_REASON = "internal error"
 
 GmailOpener = Callable[[Settings], AbstractAsyncContextManager[dict[str, BaseTool]]]
 
@@ -125,6 +128,7 @@ async def run_digest(
     gmail_opener: GmailOpener = open_gmail_tools,
     model_factory: ModelFactory = make_model,
     agent_builder: AgentBuilder = build_agent,
+    enricher: Enricher = enrich_reading_list,
 ) -> ReadingList:
     """Search Gmail, run the agent over the found emails and assemble the list.
 
@@ -132,6 +136,11 @@ async def run_digest(
     an agent or a model. If the agent raises (e.g. ``GraphRecursionError``) after
     articles were recorded, a WARNING is logged and the partial store is
     assembled (unranked or partially ranked fallback).
+
+    Only when ``settings.fetch_articles`` is on, and only after the Gmail MCP
+    session has closed, the assembled list goes through ``enricher`` (article
+    fetching). The enricher can never fail the run: see :func:`_enrich`. With no
+    matching emails it is not called and empty ``FetchStats`` are attached.
 
     Raises:
         GmailMCPError: if the Gmail MCP server cannot be started or searched.
@@ -166,7 +175,38 @@ async def run_digest(
         emails_failed=0,
         generated_at=datetime.now().astimezone(),
     )
-    return assemble_reading_list(store, meta)
+    reading_list = assemble_reading_list(store, meta)
+    if not settings.fetch_articles:
+        return reading_list
+    if not emails:
+        return reading_list.model_copy(update={"fetch": FetchStats()})
+    return await _enrich(enricher, reading_list, store, settings, model_factory)
+
+
+async def _enrich(
+    enricher: Enricher,
+    reading_list: ReadingList,
+    store: ArticleStore,
+    settings: Settings,
+    model_factory: ModelFactory,
+) -> ReadingList:
+    """Run the enricher; on any ``Exception`` keep the un-enriched list.
+
+    The failure is logged at WARNING with the exception type only (never its
+    message, which could carry page content). ``BaseException`` (cancellation,
+    Ctrl-C) propagates.
+    """
+    try:
+        return await enricher(
+            reading_list, store.rankings(), settings, model_factory=model_factory
+        )
+    except Exception as exc:
+        logger.warning(
+            "Article fetching failed (%s); keeping the newsletter summaries",
+            type(exc).__name__,
+        )
+        stats = FetchStats(skipped_reason=INTERNAL_ERROR_REASON)
+        return reading_list.model_copy(update={"fetch": stats})
 
 
 async def _invoke_agent(
