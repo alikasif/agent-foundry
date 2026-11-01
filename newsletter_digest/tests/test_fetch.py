@@ -889,12 +889,30 @@ async def test_article_with_recaptcha_widget_is_a_page() -> None:
 
 
 async def test_challenge_marker_in_long_body_is_not_blocked() -> None:
+    # No extracted text, so only the CHALLENGE_MAX_BYTES bound keeps it from BLOCKED.
+    extractor = FakeExtractor(result=None)
     body = (
         b"<html><body><p>captcha</p>" + b"x" * CHALLENGE_MAX_BYTES + b"</body></html>"
     )
+    assert len(body) > CHALLENGE_MAX_BYTES
     site = Site({ARTICLE_URL: page(body)})
-    result = await fetch_one(site, config=make_config(max_bytes=4 * CAP))
-    assert isinstance(result, FetchedPage)
+    result = await fetch_one(
+        site, config=make_config(max_bytes=4 * CAP), extractor=extractor
+    )
+    assert result is FetchFailure.TOO_SHORT
+    assert len(extractor.calls) == 1
+
+
+async def test_short_challenge_body_with_json_ld_not_free_is_paywalled() -> None:
+    # T044 #1: the JSON-LD paywall check comes before the challenge markers.
+    extractor = FakeExtractor(result=None)
+    body = json_ld_page(b"false").replace(
+        b"<p>teaser</p>", b"<h1>Please complete the CAPTCHA</h1>", 1
+    )
+    assert len(body) <= CHALLENGE_MAX_BYTES
+    site = Site({ARTICLE_URL: page(body)})
+    assert await fetch_one(site, extractor=extractor) is FetchFailure.PAYWALLED
+    assert len(extractor.calls) == 1
 
 
 # ------------------------------------------------------------------ TIMED_OUT

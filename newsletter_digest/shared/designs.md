@@ -829,13 +829,20 @@ reused only for the same origin it was validated for. The steps:
 
 ```python
 class GuardedTransport(httpx.AsyncHTTPTransport):
-    def __init__(self, *, resolver, inner_backend=None, max_connections, connect_timeout):
+    def __init__(
+        self, *, resolver, inner_backend=None, max_connections, connect_timeout
+    ):
         super().__init__(trust_env=False, http1=True, http2=False)
-        self._pool = httpcore.AsyncConnectionPool(          # private attr: see risk R-F1
-            ssl_context=httpx.create_ssl_context(),          # certifi, verify on
-            network_backend=GuardedNetworkBackend(inner_backend or httpcore.AnyIOBackend(),
-                                                  resolver),
-            max_connections=max_connections, http1=True, http2=False, retries=0)
+        self._pool = httpcore.AsyncConnectionPool(  # private attr: see risk R-F1
+            ssl_context=httpx.create_ssl_context(),  # certifi, verify on
+            network_backend=GuardedNetworkBackend(
+                inner_backend or httpcore.AnyIOBackend(), resolver
+            ),
+            max_connections=max_connections,
+            http1=True,
+            http2=False,
+            retries=0,
+        )
 ```
 
 Subclassing keeps httpx's own request/response mapping and its `map_httpcore_exceptions`, so
@@ -851,12 +858,21 @@ prototyped on 2026-11-01:
 ```python
 httpx.AsyncClient(
     transport=GuardedTransport(...),
-    trust_env=False,          # no HTTP(S)_PROXY mounts (would bypass the guard), no .netrc creds
-    follow_redirects=True, max_redirects=settings.fetch_max_redirects,   # 5
-    timeout=httpx.Timeout(settings.fetch_timeout, connect=settings.fetch_connect_timeout),
-    cookies=httpx.Cookies(CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))),  # deny-all jar
-    headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
-             "Accept-Language": "en", "Accept-Encoding": "identity"},
+    trust_env=False,  # no HTTP(S)_PROXY mounts (would bypass the guard), no .netrc creds
+    follow_redirects=True,
+    max_redirects=settings.fetch_max_redirects,  # 5
+    timeout=httpx.Timeout(
+        settings.fetch_timeout, connect=settings.fetch_connect_timeout
+    ),
+    cookies=httpx.Cookies(
+        CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
+    ),  # deny-all jar
+    headers={
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+        "Accept-Language": "en",
+        "Accept-Encoding": "identity",
+    },
     event_hooks={"request": [policy_hook]},
 )
 ```
@@ -932,9 +948,19 @@ A second test monkeypatches `socket.socket.connect` to raise during
 
 ```python
 trafilatura.extract(
-    html_bytes, url=None, output_format="txt", include_comments=False, include_tables=False,
-    include_images=False, include_links=False, include_formatting=False, favor_precision=True,
-    deduplicate=False, with_metadata=False, max_tree_size=MAX_TREE_SIZE)   # 100_000 [re-verify]
+    html_bytes,
+    url=None,
+    output_format="txt",
+    include_comments=False,
+    include_tables=False,
+    include_images=False,
+    include_links=False,
+    include_formatting=False,
+    favor_precision=True,
+    deduplicate=False,
+    with_metadata=False,
+    max_tree_size=MAX_TREE_SIZE,
+)  # 100_000 [re-verify]
 ```
 
 Post-processing in `extract.py`:

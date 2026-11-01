@@ -2161,7 +2161,8 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   `links.ledger_key`, so `/a` and `HTTPS://NEWS.example/a#x` are the same hop.
 - **`abandon_on_cancel=True` on extraction (T044 #6).** A cancelled fetch no longer waits
   for a running extraction; the thread finishes in the background and its result is
-  dropped. No test pins this yet (tester follow-up, optional).
+  dropped. Pinned by the T044 test follow-up (ce98d1a): a cancelled fetch returns in
+  under 1 s while a blocking extractor thread is still running.
 - **Breaker inside the HTTP limiter and after the pacer (T045 #1, #2).** See the corrected
   T031 note. The strict xfail `test_open_breaker_skips_requests_of_items_queued_for_http`
   is now a normal test, driven by an `anyio.Event` instead of sleeps (T045 #3): the
@@ -2183,8 +2184,8 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
 - **Deferred (not done in this round, per the lead):** T046 #2 (`untrusted.py` shared
   delimiter scrub), T046 #4 (skip-reason constants into models.py), T046 #5 (R-F2 is
   documented only), T046 #6 (llm import in enrich), T046 #7 (README DNS64 note, docs),
-  T044 #3 (TLS `ssl_context` test, T036 tester), T044 #5 (Azure WireServer address,
-  optional). T045's `fetch_env=None` default vs AF-6 `{}`: deliberate, avoids a mutable
+  T044 #5 (Azure WireServer address, optional). T044 #3 (TLS `ssl_context` test) was
+  done later in ce98d1a. T045's `fetch_env=None` default vs AF-6 `{}`: deliberate, avoids a mutable
   default argument; behaviour is the same.
 - **Tests touched (minimal):** test_fetch.py (`test_short_challenge_body_is_blocked`
   now parametrised over None/short extraction and asserts one extractor call; new
@@ -2195,3 +2196,101 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   `..._is_too_many_redirects`; new loop test `/tracker -> /a -> /check -> /a#again` and
   `test_redirect_into_another_fetchs_chain_is_duplicate`), test_enrich.py, test_extract.py.
   Full suite: 2407 passed, 2 deselected, 0 xfailed; ruff and pyrefly clean.
+
+## T047 — final verification (article fetching)
+
+Run on 2026-11-01 from the project dir with uv only; offline, `.env` never read.
+
+| Command | Result |
+| --- | --- |
+| `uv sync` | OK (109 resolved, 106 audited, nothing changed) |
+| `uv lock --check` | OK |
+| `uv run pytest -q` | **2410 passed, 2 deselected**, 0 failed, 0 xfailed (13.7 s) |
+| `uv run pytest -m integration --collect-only -q` | 2/2412 collected (both tests in tests/test_integration.py) |
+| `uv run pytest tests/test_flag_off_identity.py tests/test_architecture.py tests/test_netguard.py -q` | **290 passed** |
+| `uv run ruff format --check .` | first run: 1 file would be reformatted (`shared/designs.md`, Python code blocks from 401f08c); fixed with `ruff format shared/designs.md` (layout only, every comment kept); now 81 files already formatted |
+| `uv run ruff check .` | All checks passed |
+| `uv run pyrefly check` | 0 errors (6 suppressed, 2 warnings hidden) |
+| `uv run newsletter-digest --help` | exit 0; lists `--fetch-articles [env var: NEWSLETTER_FETCH_ARTICLES]` with the privacy note, `--max-fetch [env var: NEWSLETTER_MAX_FETCH; default: 15; 1<=x<=50]`, and the 8 env-only fetch vars |
+
+pyrefly suppressions (unchanged, all justified earlier): `netguard.py:273`
+`ignore[bad-assignment]` (pyrefly types `httpcore.AnyIOBackend()` as a union with
+httpcore's no-anyio stub class, learnings T028); `agent.py:105` `ignore[bad-assignment]`
+(`FilesystemMiddleware` in a `SubAgent["middleware"]` list, list invariance, learnings
+T008). The 2 hidden warnings are the known `asynccontextmanager` deprecated-overload
+warnings. Tests keep three `# type: ignore[misc]` lines that deliberately misuse frozen
+models / a keyword-only parameter.
+
+**CLI smoke from an empty cwd** (`uv run --project <project_dir> newsletter-digest ...`,
+no tool or fetch env vars in the shell):
+
+| Invocation | Exit | Message |
+| --- | --- | --- |
+| no key | 2 | `OPENROUTER_API_KEY is not set; copy .env.example to .env and set it.` |
+| `OPENROUTER_API_KEY=dummy NEWSLETTER_FETCH_TIMEOUT=abc ... --model x/y --fetch-articles` | 2 | `NEWSLETTER_FETCH_TIMEOUT must be a number between 1 and 120, got 'abc'.` |
+| `OPENROUTER_API_KEY=dummy ... --model x/y --fetch-articles --max-fetch 0` | 2 | `Invalid value for '--max-fetch' (env var: 'NEWSLETTER_MAX_FETCH'): 0 is not in the range 1<=x<=50.` |
+| `NEWSLETTER_MAX_FETCH=0` (env) | 2 | same message as the flag |
+| `NEWSLETTER_FETCH_TIMEOUT=abc` with the flag OFF | 2 | same as above: by contract (plan.md config.py: "Validation runs even with the flag off") |
+
+**Offline end-to-end CLI smoke (flag on and off).** A scratch script ran the real
+`cli.digest` through `CliRunner` from an empty cwd, with `cli.run_digest` swapped for the
+REAL `run_digest` on fakes: `tests.test_agent.FakeGmail` + `ScriptedBuilder(full_run)`,
+`tests.test_enrich.FakeChatModel` as the reader model, and with the flag on the REAL
+`enrich_reading_list` + REAL `PageFetcher` and trafilatura extractor over an
+`httpx.MockTransport` (`long_article.html` for two URLs, 404 for the third).
+`socket.getaddrinfo`, `socket.create_connection` and `socket.socket.connect(_ex)` were
+replaced by functions that record and raise.
+- Flag ON (`--fetch-articles --max-fetch 5`): exit 0; 3 page requests, 1 reader-model
+  build, 0 network attempts; log `Article fetching: eligible 3, excluded 0, selected 3,
+  fetched 2, summarised 2, skipped 0, failed {HTTP_ERROR: 1}`; report line `Article
+  pages: 2 fetched and summarised, 1 couldn't be fetched`. HTML: summary, key points and
+  a collapsed "Read here" for the 2 pages, a "couldn't fetch" note for the 404; CSP equal
+  to the flag-off page, one `<script>`, no tag with `src=`.
+- Flag OFF: exit 0; 0 page requests, 0 model builds, 0 network attempts; Settings line
+  without fetch keys; no "Article pages" line.
+- **Flag-off identity:** the same script run against `git archive bb16231` (src and
+  tests on PYTHONPATH, module path asserted) produced the same HTML: sha256
+  `8f94abea...b2fd8b8` for both, `cmp` identical (8757 bytes). The stderr lines match too
+  (apart from timestamps and out dir). `tests/test_flag_off_identity.py` 13 passed
+  against the bb16231 goldens.
+
+**Repository checks**
+- `git diff --name-status bb16231 -- newsletter_digest/tests/` (working tree included):
+  26 entries, all `A` (added). No test file that existed at bb16231 is modified
+  (tests/test_agent.py and tests/test_cli.py have an empty diff).
+- Goldens: `git log --format=%h -- tests/fixtures/flag_off_*` shows only `b5b2b50`
+  (T023, "golden flag-off baseline from bb16231") for all four files.
+- `pyproject.toml`: `httpx>=0.28.1,<0.29`, `httpcore>=1.0.9,<2`, `trafilatura>=2.3.1`;
+  `uv tree`: httpx 0.28.1, httpcore 1.0.9, trafilatura 2.3.1.
+- pip: no `pip install` / `uv pip install` / `python -m pip` in the 37 commits since
+  bb16231. The only hit is the T024 verification table, which used the read-only
+  `uv pip list`.
+- `git status`: nothing staged before this commit; no `.env`, `out/` or credentials
+  tracked (`.env` and `out/` are ignored by `newsletter_digest/.gitignore`). Only
+  `.env.example` is tracked, as the user confirmed: `OPENROUTER_API_KEY=` empty and
+  every fetch variable commented out.
+- Secrets grep over tracked files (OpenRouter/OpenAI/Google/GitHub key shapes, private
+  keys, OAuth tokens): only the obvious test dummies (`sk-or-v1-TESTSECRET...`,
+  `sk-or-*-do-not-log`, etc.).
+
+**Fixed in this task**
+- tests/test_fetch.py (T044 round-2 MINOR): `test_challenge_marker_in_long_body_is_not_blocked`
+  now uses `FakeExtractor(result=None)` and asserts `TOO_SHORT` plus one extractor call
+  (before, the default 600-char fake made it a page whatever the size bound was). New
+  `test_short_challenge_body_with_json_ld_not_free_is_paywalled` (short body with a
+  CAPTCHA marker, JSON-LD `isAccessibleForFree: false`, no text -> `PAYWALLED`).
+  Mutation check in a scratch script (exec'd mutant `fetch.py`): dropping the
+  `CHALLENGE_MAX_BYTES` bound fails the first test only; moving the JSON-LD paywall
+  check after the challenge check fails the second only.
+- The stale T030/T031/T029 round-1 notes above (abandon_on_cancel "no test pins this
+  yet" and T044 #3 listed as deferred) now point to ce98d1a.
+- `shared/designs.md` code blocks reformatted by ruff (see the table).
+
+No source defects found; nothing routed back as review_feedback.
+
+**Manual end-to-end (acceptance 15, not run here: needs real Gmail OAuth and
+OpenRouter).** For the user, from the project dir with a filled `.env`:
+
+```
+uv run newsletter-digest --window 1w --max-emails 5 --fetch-articles --max-fetch 5 --open
+```
