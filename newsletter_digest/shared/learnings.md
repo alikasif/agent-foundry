@@ -215,3 +215,6 @@
   there. Match attributes inside real tags (`re.search(r"<[^>]*\ssrc=", html)`).
 - (T033) `tests.flag_off_fixture` is importable from a scratch script only with the
   project dir on the path: `PYTHONPATH=. uv run python <scratch>.py`.
+- (T035) A pydantic `mode="before"` validator that only handles `isinstance(value, list)`
+  is bypassed by tuples and sets: lax mode coerces them into `list[str]` after the
+  validator returned them unchanged. Test sequence validators with a tuple too.

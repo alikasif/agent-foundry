@@ -1411,3 +1411,40 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   `#…` or `safe_url`-clean, and no raw `{%` in the output.
 - Probe counts: 15 `FetchFailure` members, DUPLICATE not rendered, so 14 notes (2 of
   them "summarise"). Full suite: 954 passed, 1 xfailed; ruff and pyrefly clean.
+
+## T035 — Tests for fetch models and fetch settings
+
+- Files: `tests/test_models_fetch.py` (AF-5, AF-3.7) and `tests/test_config_fetch.py`
+  (AF-6, FR-023, FR-035). 249 tests plus 1 strict xfail, all offline; no existing test
+  file edited. Each file has its own fixtures (`make_item`, `build_kwargs`/
+  `make_settings`), copied in shape from `tests/test_models.py`/`tests/test_config.py`
+  rather than imported, so the old files stay untouched.
+- **Bug found in models.py (not fixed; test tasks may not edit source):**
+  `ArticleSummary._clean_key_points` returns any non-`list` value unchanged, and pydantic
+  (lax mode) then coerces a tuple or set into `list[str]`. So
+  `ArticleSummary.model_validate({"summary": "s", "key_points": ("- a",)})` gives
+  `["- a"]` (no bullet strip, no truncation) and `key_points=()` gives `[]`, which breaks
+  the "at least one point" rule. JSON from the LLM only produces lists, so `parse_summary`
+  is not affected in practice. Fix: check `isinstance(value, (list, tuple))` (or
+  `Sequence` minus `str`). Pinned by the strict xfail
+  `test_article_summary_cleans_tuple_key_points_like_a_list`; remove the marker with the fix.
+- Error-message checks assert that the message contains the env var name, the raw value
+  (for range errors) and a `between <low> and <high>` range, not the exact sentence, so a
+  wording change in config.py does not break them. `--max-fetch` errors must name both
+  `--max-fetch` and `NEWSLETTER_MAX_FETCH` (T027 wording).
+- T027's connect-timeout clamp (unset connect timeout follows a fetch timeout below 5 s)
+  and "existing config errors are reported before fetch errors" are pinned as tests, since
+  they are recorded decisions.
+- The `.env.example` tests run unconditionally: T024 restored the file (no skip needed).
+  Besides "commented, never set" (`dotenv_values`), one test feeds the commented example
+  values back through `Settings.build` and checks they equal the defaults, so the
+  documented defaults cannot drift from the code.
+- The flag-off `safe_summary()` check compares the key set with
+  `tests/fixtures/flag_off_safe_summary_keys.json` (the golden is sorted, so the set is
+  compared) and separately checks that the key order still follows the field order.
+- Not covered: case of the `:free` suffix (`:FREE` gives 0.0 today; the spec says
+  "ends with `:free`", so it is left unpinned). Coverage was not measured: pytest-cov is
+  not a project dependency and adding it would edit the shared `pyproject.toml`/`uv.lock`
+  during a parallel batch.
+- Verified: ruff format/check and pyrefly clean (0 errors); full suite 1396 passed,
+  1 xfailed, including `tests/test_flag_off_identity.py`.
