@@ -59,6 +59,18 @@
   args without relying on ToolNode error handling.
 - (T007) `requires-python >= 3.11`: ruff rejects PEP 695 `def f[T: X](...)` as invalid
   syntax; use `typing.TypeVar`.
+- (T019) Other agents may leave files STAGED in the shared index; a plain `git add <mine>
+  && git commit` then commits their work too. Check `git diff --cached --name-only` first;
+  for a file only you own, `git commit -m ... -- <path>` commits just that path and leaves
+  the others staged (undo a sweep with `git reset --soft HEAD~1`).
+- (T019) Pydantic only wraps ValueError/AssertionError raised in validators; an
+  AttributeError from a `mode="before"` validator (e.g. `.casefold()` on an int) escapes
+  `model_validate` raw, so `except ValidationError` in tool code does not catch it.
+- (T007) The git index is shared by all concurrent agents: anything you stage can be
+  swept into another agent's plain `git commit` fired at the same moment (T019's commit
+  briefly carried T007's staged files before it was reset). Stage and commit in one
+  command (`git apply --cached p && git add <own files> && git commit ...`), then check
+  `git show --stat HEAD` and `git reflog` before reporting.
 - (T012) To test code that calls `langchain_mcp_adapters.tools.load_mcp_tools(session)`
   without patching it, a fake session only needs `async list_tools(cursor=None)`
   returning `mcp.types.ListToolsResult(tools=[mcp.types.Tool(name=..., inputSchema=
@@ -77,6 +89,10 @@
   `contextlib.nullcontext()` in a scratch script) shows whether the threading smoke test
   can catch a race. A Barrier plus single-article `add_articles` calls from 8 threads
   caught it here.
+- (T003 fix) A pydantic `mode="before"` validator receives raw input of any type, and
+  only `ValueError`/`AssertionError` raised inside it become a `ValidationError`.
+  Type its helper's parameter as `object` and handle non-strings explicitly; a stray
+  `.casefold()` on an int escapes `model_validate` as a raw `AttributeError`.
 - (T014) A fake raw MCP tool for wrapper tests: `StructuredTool.from_function(
   coroutine=<async def f(**kwargs)>, args_schema=<JSON-schema dict>)`. With a dict schema
   langchain-core passes the input dict straight through as kwargs, so the fake does not

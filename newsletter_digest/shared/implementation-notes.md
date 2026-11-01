@@ -564,6 +564,17 @@ Results:
   test fail.
 - No bugs found in models.py or store.py.
 
+## T003 review fix (T019 MAJOR + MINOR)
+
+- `coerce_topic(value: object)` is now total: a `Topic` passes through, and any
+  non-string (int, float, bool, list, dict, None) or unknown string maps to
+  `Topic.OTHER`. Chose this over letting non-strings fail with a `ValidationError`,
+  to keep FR-014's "unknown -> Other" leniency in one place, as the reviewer preferred.
+- `models._truncate` is renamed to the public `truncate_text` (same behaviour). store.py
+  imports it by the new name.
+- Regression tests are in `tests/test_coerce_topic.py`, not in `tests/test_models.py`,
+  because another agent was editing that file at the same time.
+
 ### T014 — tests for tools.py and prompts.py
 
 - **Fake raw read tool:** a `StructuredTool` with a JSON-schema dict `args_schema` whose

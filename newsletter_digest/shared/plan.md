@@ -324,3 +324,18 @@ source evidence.
 - Local `git commit` per task with conventional-commit messages scoped to
   `newsletter_digest/` paths only (`git add newsletter_digest/<files>`). Never push.
 - Never read, copy or log `~/.gmail-mcp/*` or any API key. `.env` is never committed.
+
+## Architectural Decisions
+
+- **2026-10-31 (T021, arch review, APPROVED).** The actual dependency graph is the
+  authoritative layer order: `cli` > `agent` > {`tools`, `prompts`, `llm`} > `gmail_mcp` >
+  {`store`, `render`} > {`models`, `config`}; edges only point down. designs.md's
+  component diagram omits sanctioned edges (tools -> gmail_mcp per §5, prompts -> config/
+  models, cli -> gmail_mcp for `GmailMCPError`); treat them as allowed. `models`, `store`,
+  `render`, `config` and `prompts` must stay LangChain/MCP-free.
+- Future single source of truth for contract names: `READER_NAME` (and tool-name
+  constants, if added) belong in `prompts.py`, never in `agent.py` (cycle) or `tools.py`
+  (would make prompts import LangChain).
+- If they grow, split the pure email-text pipeline out of `gmail_mcp.py` (`email_text.py`)
+  and the dedupe / assembly parts out of `store.py`, re-exporting the current public names.
+  Details: `shared/reviews/T021_arch_review.md`.
