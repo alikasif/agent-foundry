@@ -2013,3 +2013,65 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
 - Beyond the task text: the doc states that fetch env values are validated even with the flag off (T027), the `:free` default interval of 3.1 s applies only when the reader model name ends in `:free`, and the extracted full text is written into the HTML (so the file is larger and holds page text).
 - The free-tier figures (20 requests/minute, 50/day under 10 credits, 1000/day at 10 or more) come from the task description, not from a source file; they should be re-checked against OpenRouter's current docs.
 - "Startup import cost" is documented as verified: `agent.py` imports `enrich`, which imports `fetch` and `extract`, which import trafilatura at module load.
+
+## T041 — Wiring tests: run_digest and CLI with the flag on and off (flag-off identity at run level)
+
+- **File**: `tests/test_wiring_fetch.py` (90 tests, all offline). It imports the fakes of
+  `tests/test_agent.py` (`FakeGmail`, `ScriptedBuilder`, `full_run`, `read_and_record`,
+  `ModelFactoryRecorder`, `main_responder`, the forbidden factory/builder) instead of
+  copying them; that module is importable unchanged (`tests` is a package and pyrefly's
+  `search-path = ["."]` resolves it). Only helper names are imported, so no test or
+  fixture of `test_agent.py` is collected twice. The CLI fakes are new (a capturing
+  `run_digest` and a `WiredRunDigest` that runs the REAL `run_digest` on the fakes),
+  because `tests/test_cli.py`'s autouse isolation fixture clears only seven vars.
+- **CLI isolation**: an `isolated_cli` fixture chdirs to `tmp_path` and `delenv`s the seven
+  tool vars plus all ten fetch vars (T032 note: `cli.py` loads `.env` at import).
+- **Flag off (AF-9.2)**: a raising enricher is never called; `PageFetcher.__init__`
+  patched to raise is never hit with the default enricher, and a canary test shows the
+  same patch IS hit with the flag on (it ends as `skipped_reason="internal error"`, so
+  the patch target is live); the real `build_agent` graph with scripted models makes
+  exactly 2 `model_factory` calls (also with the flag on and a recording enricher); no
+  record from the enrich/fetch/netguard/extract loggers and only pre-amendment package
+  loggers appear; the logged `Settings:` dict keys equal
+  `tests/fixtures/flag_off_safe_summary_keys.json` and the dict is unchanged by
+  `max_fetch=7` or other fetch values. Through the CLI, `--max-fetch 7`,
+  `NEWSLETTER_MAX_FETCH=7` and fetch env values without the flag give the same stdout,
+  the same package log messages as a baseline run, the golden keys and no
+  "Article pages" line.
+- **Flag on**: the order log is `gmail-open, gmail-closing, gmail-closed, enrich`; the
+  enricher gets the assembled list (`fetch is None`, items equal to the flag-off run),
+  `store.rankings()` of the run's store (captured by a delegating builder), the same
+  `Settings` object and the same `model_factory` object, and its return value is
+  returned as is. `RuntimeError`, `ValueError` and an `ExceptionGroup` give one WARNING
+  from `newsletter_digest.agent` naming only the type (the message is checked absent) and
+  `FetchStats(skipped_reason="internal error")` with the items unchanged;
+  `KeyboardInterrupt` and `SystemExit` propagate. Zero emails: the enricher is not called,
+  `fetch == FetchStats()`, no fetch log record, no warning (T032 behaviour). An unranked
+  fallback still goes through the real enricher, which skips with "ranking was not
+  completed" without building a `PageFetcher`.
+- **CLI**: `--help` shows both options with `env var:` and the default/range, the privacy
+  wording and the eight env-only names; `NEWSLETTER_FETCH_ARTICLES` per V20 (11 values,
+  flag beats env `0`, `maybe`/`2`/`garbage` exit 2 naming option and var); `--max-fetch`
+  1/50/env/blank/flag-beats-env reach Settings, `0`/`51`/`-1`/`abc` (flag) and
+  `0`/`51`/`abc` (env) exit 2; each env-only var (and all eight together) reaches its
+  Settings field; nine invalid env values exit 2 naming the variable with no traceback,
+  both with and without the flag (T027 validates even when off). `_report`: the line
+  only when `fetch` is set, with the skip reason; no line on the zero-email path.
+  End-to-end through the CLI on the real `run_digest`: every page failing (real
+  `enrich_reading_list` with a fetcher factory that returns `TIMED_OUT`) exits 0, writes
+  the file with the "timed out" notes and prints "0 fetched and summarised, 3 couldn't be
+  fetched"; an enricher `RuntimeError` exits 0 with the WARNING and "(skipped: internal
+  error)"; `NEWSLETTER_FETCH_ARTICLES=true` turns the real enrich step on.
+- **Decision**: the `Settings:` record is read from `record.args`, which logging sets to
+  the dict itself (a lone mapping argument is not wrapped in a tuple), not from the
+  formatted text, so the keys are compared exactly.
+- **Mutation check** (scratch pytest plugin, nothing committed, no source edited): 14
+  mutants of `run_digest`/`_enrich` (flag ignored, no catch, catching `BaseException`,
+  zero-email stats dropped, zero-email enriching, wrong factory, empty rankings, message
+  logged, wrong reason, enrich inside the Gmail block), `FETCH_SUMMARY_FIELDS` emptied,
+  `_report` always printing, the flag or `fetch_env` dropped before `Settings.build`; all
+  killed. Coverage from this file alone: agent.py 91%, cli.py 88% (the misses are
+  pre-amendment paths covered by test_agent/test_cli).
+- **Bugs found**: none in agent.py/cli.py wiring.
+- Verified: ruff format/check and pyrefly clean; full suite 2395 passed, 2 deselected,
+  2 xfailed. No existing test file edited.

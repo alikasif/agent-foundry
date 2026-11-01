@@ -279,3 +279,6 @@
 - (T039) pyrefly cannot pick a `sorted(..., key=f)` overload when `f` takes
   `list[BaseMessage]` and the iterable is inferred as `list[HumanMessage | SystemMessage]`
   (list invariance). Annotate the container as `list[BaseMessage]`.
+- (T041) `logger.info("Settings: %s", some_dict)` stores the dict itself in
+  `record.args` (logging unwraps a lone mapping argument), not a 1-tuple. Read it with
+  `isinstance(record.args, dict)` when a test needs the logged object.
