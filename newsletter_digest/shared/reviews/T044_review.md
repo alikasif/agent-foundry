@@ -154,3 +154,116 @@ a missing test guard (#3) and an optional metadata address (#5).
   tracemalloc. Nine of my ten independent mutants were killed.
 - `links.classify_link` is total: it splits the URL before decoding and checks
   precedence explicitly.
+
+---
+
+## Review: T044 (round 2) — Backend + security review: SSRF and network layer
+
+**Status:** APPROVED
+
+Re-reviewed: commits 9949728 (fetch.py, extract.py, links.py) and ce98d1a (tests), the
+whole of `fetch.py` again, and implementation-notes "T030 / T031 / T029 review fixes,
+round 1".
+
+Gates (run by the reviewer): the 4 T044 test files give 812 passed and 0 xfailed. The
+full suite gives 2409 passed and 2 deselected. `ruff check` and `ruff format --check`
+are clean, pyrefly reports 0 errors, and no line in the touched files is over 88
+characters.
+
+**Round-1 findings, verified:**
+
+| # | Round 1 | Round 2 | Evidence |
+|---|---|---|---|
+| 1 | MAJOR: challenge markers matched raw HTML before extraction | **Fixed** | `_extract` (fetch.py:281-310) now runs extraction, then the JSON-LD paywall check, then the challenge markers only when the text is None or under `MIN_TEXT_CHARS` and the body is <= 64 KiB, then TOO_SHORT. Probe with the real extractor: long_article.html + reCAPTCHA gives a page (19,938 chars); typical_article.html + reCAPTCHA gives a page; a realistic Cloudflare "Just a moment..." interstitial gives BLOCKED; the same interstitial padded past 64 KiB gives TOO_SHORT; the interstitial with JSON-LD not-free gives PAYWALLED. The round-1 order (mutant N6) is killed |
+| 2 | MINOR: redirect loop reported as DUPLICATE | **Fixed** | Per-call `set` in the request extension `newsletter_digest.chain_hops`; httpx 0.28.1 `_build_redirect_request` passes `extensions=request.extensions`, so every hop shares the set. Probe through the real guarded transport: `/a -> /check -> /a` gives TOO_MANY_REDIRECTS after 2 dials, and `/a -> /a` after 1. `HTTP://NEWS.example/a#x` and `/a?` count as the same hop (ledger_key). Two concurrent fetches that converge on `/check` give one page and one DUPLICATE (3 dials). Mutants N1 (no loop check), N2 (fresh set per hop) and N3 (ledger claim before the loop check) are all killed |
+| 3 | MINOR: no test guard for TLS verify | **Fixed** | `test_https_tls_context_verifies_certificate_and_hostname` asserts `CERT_REQUIRED` and `check_hostname`. M10 (`verify=False`) is now killed |
+| 4 | Informational (`0177.0.0.1` gives NETWORK) | Unchanged, accepted | — |
+| 5 | Optional: Azure WireServer `168.63.129.16` | Still deferred (optional) | Not in `BLOCKED_NETWORKS`. Not a deviation from AF-3.2 |
+| 6 | Optional: `abandon_on_cancel` | **Fixed** | fetch.py:289-294. `test_cancelled_fetch_abandons_running_extraction` kills mutant N5. Probe: a fetch cancelled during a 3 s extraction unwinds in 0.3 s. See note (b) |
+
+**SSRF regression check (chain-hops extension and the reordering):** no regression.
+- The hook order is still URL policy, then `NEVER_REQUEST_KINDS`, then the loop check,
+  then the ledger claim. The extension is only read after the policy has passed.
+- Every rejected hop is raised from the request hook, so nothing is sent or dialled.
+- Probes through the real guarded transport each gave UNSAFE with no extra dial:
+  `/check -> 127.0.0.1`, `[::ffff:7f00:1]`, `169.254.169.254`, `u:p@news.example/a` (a
+  loop key that also has userinfo), `0x7f.0.0.1`, and a hostname that resolves to 10.x.
+  An unsubscribe hop still gives NOT_ARTICLE.
+- The extension is client-side only, and a response cannot change it. If the extension
+  is missing (a direct `_client.get`), the hook raises KeyError before the send, so it
+  fails closed (0 dials). That gives ERROR, never an unguarded request.
+- The reordering adds no new parser exposure. Challenge pages are now extracted, but
+  they are bounded by the same `max_bytes` / `max_tree_size` as every other body.
+- Mutant N4 (loop check moved before the URL policy) survives. It is equivalent for
+  security: a key is only in the chain after its hop has passed the policy.
+
+**Issues Found:**
+
+1. **[MINOR]** `tests/test_fetch.py:891-897` (`test_challenge_marker_in_long_body_is_not_blocked`)
+   no longer tests the 64 KiB bound. It uses the default `FakeExtractor` (600 chars),
+   so after the reordering the challenge branch is never reached. Mutant N7, which
+   removes `len(body.data) <= CHALLENGE_MAX_BYTES` from fetch.py:299, **survives** all
+   391 fetch and netguard tests. The ordering "paywall before challenge" in the T030
+   notes is not pinned either: mutant N8, which checks the challenge before the
+   JSON-LD paywall, survives.
+   The code is correct; the probes above show the bound and the order hold. Impact if
+   either regressed: only the note text changes (BLOCKED instead of TOO_SHORT or
+   PAYWALLED), so this does not block.
+   **Fix (owner T038, python-test-runner):**
+   - Give that test `FakeExtractor(result=None)` and assert `TOO_SHORT`.
+   - Add a body <= 64 KiB with a challenge marker, JSON-LD not-free and no text, and
+     assert `PAYWALLED`.
+2. **[MINOR, docs]** `shared/implementation-notes.md:2164, 2186` is stale.
+   - It still says no test pins `abandon_on_cancel`, but ce98d1a added one.
+   - It lists T044 #3 as deferred, but ce98d1a fixed it.
+   **Fix (owner T030):** update both lines at the next notes touch.
+
+**Notes (informational, no change required):**
+- (a) The short-text page plus captcha widget case: a ~240-character post with a
+  reCAPTCHA form now gives BLOCKED instead of TOO_SHORT. Both are skips, so only the
+  note differs. This is inherent to matching raw bytes, and it is acceptable.
+- (b) The anyio 4.15.1 worker threads are non-daemon. An abandoned extraction keeps
+  running until it ends, and interpreter shutdown waits for it. Probe: the async unwind
+  took 0.44 s, but the process exited about 2.8 s later than the baseline, for a 3 s
+  extraction.
+  So Ctrl-C now unwinds the pipeline at once, but the shell returns only when the
+  current extraction ends. The worst case is the T029 pathological page, about 34 s,
+  and a second Ctrl-C interrupts the join. This is acceptable. If it ever matters, run
+  extraction in a daemon thread or bound it more tightly.
+- (c) A pre-existing httpx quirk, not a regression. `httpx.URL("HTTP://host:80/x")`
+  keeps the explicit port when the scheme is upper case, so such a Location gives
+  UNSAFE ("port not allowed"). It fails safe.
+- (d) Paths that differ only in form (`//a`, `/a/`, `/%61`) are different ledger keys,
+  so the loop check does not catch them. `max_redirects` still caps those chains.
+
+**Mutation probes, round 2** (scratch copy, real test files, `src/` untouched;
+test_fetch.py + test_netguard.py):
+
+| Mutant | Result |
+|---|---|
+| N1 no loop check | killed |
+| N2 fresh chain set per hop | killed |
+| N3 ledger claim before loop check | killed |
+| N4 loop check before URL policy | survived (equivalent for security) |
+| N5 no `abandon_on_cancel` | killed |
+| N6 challenge check before extraction | killed |
+| N7 challenge check without the 64 KiB bound | **survived** (#1) |
+| N8 challenge check before paywall | **survived** (#1) |
+| M10 TLS `verify=False` | killed |
+
+**Security Notes:** I found no SSRF regression. The chain-hops extension is read only
+after the URL policy, it fails closed when it is absent, and no attacker input can reach
+it. Every round-1 checklist item still holds. The only open security item is the
+optional Azure WireServer entry (#5).
+
+**Positive Notes:**
+- The loop fix uses explicit data flow: a per-call set in the request extension, not a
+  ContextVar. It relies on documented httpx behaviour, which the coder checked against
+  the httpx source and recorded in the notes.
+- The DUPLICATE and TOO_MANY_REDIRECTS split matches AF-3.6.
+- The reCAPTCHA regression test uses the real extractor on a real fixture. That is the
+  probe shape round 1 asked for.
+- The abandon-on-cancel test is deterministic. It uses a thread event, a teardown
+  release and an elapsed-time budget, and it kills the mutant.
+- `default_extractor` gives a public, positional default and removes the round-1 strict
+  xfail cleanly.
