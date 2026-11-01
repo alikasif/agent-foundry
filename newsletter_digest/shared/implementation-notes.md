@@ -27,7 +27,7 @@
 | V15 | `ipaddress` `is_global`/`is_reserved` results for the AF-3.2 matrix on the venv's Python 3.13.5 | T028 | TODO | TODO | TODO |
 | V16 | httpx request event hooks run for every redirect hop; `TooManyRedirects` raised above `max_redirects` | T030 | TODO | TODO | TODO |
 | V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 | TODO | TODO | TODO |
-| V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 | TODO | TODO | TODO |
+| V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 | trafilatura 2.3.1, lxml 6.1.3, Python 3.13.5 | `inspect.signature`, read `core.py`/`settings.py`/`settings.cfg` in `.venv`, offline probes with `socket.socket.connect`/`create_connection`/`getaddrinfo` patched to raise | Signature matches AF-4 (all AF-4 kwargs exist). **Deviation:** any truthy `max_tree_size=` kwarg raises `ValueError("\"max_tree_size\" will be removed, use settings.cfg instead")` in `_check_deprecation`, so `extract.py` passes `config=` (a copy of `DEFAULT_CONFIG` with `MAX_TREE_SIZE = 100000`) instead. Semantics: checked after extraction on `len(postbody)` = number of top-level output elements (not total nodes); over the limit, `hi` tags are stripped, then the page is discarded (None): 100,100 `<p>` -> None, 99,000 -> text. No network I/O in `extract()` (probes pass with sockets blocked). Empty/garbage/UTF-16/random bytes return None (trafilatura catches its own `ValueError`/`TypeError`). Logs `WARNING trafilatura.core: discarding data: None` per rejected page |
 | V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 | TODO | TODO | TODO |
 | V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 | TODO | TODO | TODO |
 
@@ -1250,3 +1250,61 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   accepted risk).
 - No tests added here (tests/test_links.py is T034). store tests and the identity test
   pass unchanged: 858 passed.
+
+## T029 — extract.py: trafilatura main-text extraction (parse only)
+
+- **Deviation from AF-4/AF-P5 (`max_tree_size=MAX_TREE_SIZE`):** trafilatura 2.3.1
+  raises `ValueError` for any truthy `max_tree_size=` kwarg (deprecated in favour of
+  settings.cfg), so the literal AF-4 call would turn every page into `TOO_SHORT`. The
+  limit goes through `config=_CONFIG` instead: a module-level `ConfigParser` copy of
+  `trafilatura.settings.DEFAULT_CONFIG` with `MAX_TREE_SIZE = 100000`, built once and only
+  read afterwards (safe to share across threads). All other AF-4 kwargs are passed
+  verbatim. The only trafilatura call is still `trafilatura.extract`; the only extra
+  import is `trafilatura.settings.DEFAULT_CONFIG` (no downloader names).
+- `MAX_TREE_SIZE` counts top-level output elements (`len(postbody)`), not total nodes.
+  With the 2 MiB `fetch_max_bytes` default it can only trigger on extreme pages
+  (about 100k paragraphs), so the AF-13 risk "large pages reported as TOO_SHORT" is low.
+- **Risk for T030/T031 (not changed here):** extraction cost grows with element count.
+  A 2.2 MB page with 99k short `<p>` took about 34 s on this machine, against about 1 s
+  for 1.7 MB with 20k paragraphs. Extraction runs in `anyio.to_thread.run_sync`, and
+  that worker thread cannot be cancelled, so the per-page `fail_after(fetch_timeout)`
+  should not be expected to bound it. Consider keeping extraction outside the deadline
+  (as AF-1 already orders it) and accepting the rare slow page, or lowering
+  `fetch_max_bytes`.
+- **Never raises:** `trafilatura.extract` is wrapped in `except Exception` (untrusted
+  bytes into a third-party parser), logging only the exception type at DEBUG. trafilatura
+  already catches its own `ValueError`/`TypeError`; the wrapper covers anything else
+  (lxml, recursion). `BaseException` still propagates.
+- **trafilatura logging:** each rejected page logs `WARNING trafilatura.core: discarding
+  data: None` (empty input also logs `ERROR ... empty HTML tree: None`). No page content
+  and no URL (we pass `url=None`). `extract.py` does not touch global logger levels; if
+  the CLI output is too noisy with the flag on, T032 can set the `trafilatura` logger
+  to ERROR (flag-off output is unaffected either way because extraction never runs).
+- Whitespace tidy (decisions not in the spec): `\r\n`, `\r`, U+0085, U+2028 and U+2029
+  become `\n`; tab, VT and FF become a space (not deleted, so words do not join); other
+  C0/C1 control characters and DEL are deleted; runs of spaces collapse to one; spaces
+  at line edges are trimmed; 3+ newlines become one blank line; the text is stripped.
+  Unicode format characters (Cf, e.g. bidi overrides) are kept: they are not control
+  characters, and autoescape renders them as text.
+- Delimiter scrub is slightly broader than "`<<<` + optional END + ARTICLE|EMAIL":
+  `<<<\s*(?:END[\s_-]*)?(?:ARTICLE|EMAIL)`, case-insensitive, so `<<<END_ARTICLE` and
+  `<<<ENDARTICLE` are scrubbed too. Scrubbing runs before the length check and
+  truncation, and neither the replacement nor the marker can form a new match. Raw
+  `<<<END ARTICLE>>>` in HTML source is parsed by lxml as tags and never reaches the text;
+  only entity-escaped look-alikes (`&lt;&lt;&lt;...`) do, so fixtures (T037) should use
+  the escaped form.
+- Truncation: it looks for a boundary in `text[:max_chars + 1]`, so a break right at
+  `max_chars` keeps the full budget. It uses the last `\n` (trafilatura's `txt`
+  paragraph/heading separator) only if that keeps at least half the budget, otherwise the
+  last space, otherwise a hard cut. The marker is appended after the cut, so
+  `chars <= max_chars + len(TRUNCATION_MARKER)` (13), and `chars` always equals
+  `len(text)`. Text of exactly `max_chars` is not truncated.
+- `MIN_TEXT_CHARS` is applied to the tidied and scrubbed text, before truncation.
+- No `max_chars` validation: the contract relies on `Settings` validation (T027).
+- Library docs came from the installed 2.3.1 source; context7 was not available in this
+  session.
+- No tests added (tests/test_extract.py is T037). Probes (offline, sockets blocked):
+  typical page keeps h1 and paragraphs and drops nav/script/comments/footer; SPA shell,
+  empty, random, UTF-16 and deeply nested bytes return None; 5 of 5 escaped delimiter
+  look-alikes scrubbed; 64 parallel calls in 8 threads equal the sequential results.
+  Suite 858 passed; ruff and pyrefly clean.

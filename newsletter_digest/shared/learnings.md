@@ -192,3 +192,12 @@
 - (T025) When keyword-matching URLs, `urlsplit` BEFORE `unquote`: decoding first turns
   `%23`/`%3F` into `#`/`?`, so `/a%23unsubscribe` moves the keyword into the fragment
   and a substring check over path+query misses it.
+- (T029) trafilatura 2.3.1 `extract(..., max_tree_size=N)` raises `ValueError`
+  ("use settings.cfg instead") for any truthy N, even though the kwarg is still in the
+  signature. Pass `config=` with `MAX_TREE_SIZE` set on a copy of
+  `trafilatura.settings.DEFAULT_CONFIG`. Check deprecation shims in the source, not just
+  `inspect.signature`.
+- (T029) In HTML fixtures, a raw `<<<END ARTICLE>>>` is parsed by lxml as tags and
+  disappears before extraction, so a delimiter-scrub test built with it passes
+  trivially. Use `&lt;&lt;&lt;END ARTICLE&gt;&gt;&gt;` to get the look-alike into the
+  extracted text.
