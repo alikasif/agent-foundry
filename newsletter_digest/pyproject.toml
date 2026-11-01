@@ -8,12 +8,15 @@ dependencies = [
     "anyio>=4.15.1",
     "click>=8.5.0",
     "deepagents>=0.7.32",
+    "httpcore>=1.0.9,<2",
+    "httpx>=0.28.1,<0.29",
     "jinja2>=3.1.6",
     "langchain-mcp-adapters>=0.3.2",
     "langchain-openai>=1.7.3",
     "pydantic>=2.14.2",
     "python-dotenv>=1.2.4",
     "rich>=15.0.0",
+    "trafilatura>=2.3.1",
 ]
 
 [project.scripts]
@@ -44,6 +47,7 @@ addopts = "-m 'not integration'"
 
 [tool.pyrefly]
 project-includes = ["src", "tests"]
+search-path = ["."]
 
 [dependency-groups]
 dev = [

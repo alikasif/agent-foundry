@@ -18,7 +18,7 @@ import pytest
 from newsletter_digest.config import Settings
 from newsletter_digest.models import ReadingList
 from newsletter_digest.render import render_html, write_reading_list
-from tests.flag_off_fixture import (  # pyrefly: ignore[missing-import]
+from tests.flag_off_fixture import (
     SAFE_SUMMARY_BUILD_KWARGS,
     build_empty_reading_list,
     build_ranked_reading_list,
@@ -98,7 +98,7 @@ def test_safe_summary_never_contains_the_api_key() -> None:
 
 
 def test_fixture_module_resolves_inside_tests_package() -> None:
-    import tests.flag_off_fixture as fixture  # pyrefly: ignore[missing-import]
+    import tests.flag_off_fixture as fixture
 
     assert Path(fixture.__file__).resolve().parent == Path(__file__).resolve().parent
 

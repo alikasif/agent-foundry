@@ -180,3 +180,8 @@
 - (T023) Run `uv run ruff check .` before rendering goldens from a fixture module. A
   line-length fix after rendering means rendering again (or at least checking the sums
   again).
+- (T024) `search-path = ["."]` in `[tool.pyrefly]` makes `from tests.x import ...` resolve;
+  with it the `# pyrefly: ignore[missing-import]` comments are unneeded. `uv add` of
+  already-transitive deps (httpx, httpcore) just promotes them to direct dependencies.
+- (T024) `uv run ruff format --check .` also checks code blocks in `shared/*.md`; use
+  `ruff format <own files>` and `ruff check .` instead of a whole-tree format check.

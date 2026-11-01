@@ -16,6 +16,21 @@
 | V9 | `read_email` output: headers + text/plain body, else raw HTML with the `[Note: This email is HTML-formatted...]` prefix | T005 | @gongrzhe/server-gmail-autoauth-mcp 1.1.11 | `npm pack` of @gongrzhe/server-gmail-autoauth-mcp 1.1.11 into the session scratchpad, read `dist/index.js` (no live Gmail call: needs the user's OAuth) | `Thread ID/Subject/From/To/Date` lines, blank line, then `[Note: This email is HTML-formatted. Plain text version not available.]\n\n` + raw HTML only when there is no text/plain part, then an optional `\n\nAttachments (n):\n- ...` list. Handler errors come back as normal text `Error: <message>` (no isError); missing OAuth keys make the process exit(1) at startup |
 | V10 | Shape of MCP tool results returned by langchain-mcp-adapters (str vs content-block list vs tuple) | T005 | langchain-mcp-adapters 0.3.2, mcp 1.30.0 | Read `_convert_call_tool_result` + live `ainvoke` on the fake server | Tools use `response_format="content_and_artifact"`; `tool.ainvoke(args)` returns the content only: a list of `{"type": "text", "text": ...}` dicts (observed live). `(content, artifact)` tuples / ToolMessage appear only via tool-call invocation; `tool_result_text` handles all of them. isError results raise ToolException when `handle_tool_errors=False` |
 
+## Library verification (article fetching, 2026-11-01)
+
+| ID | Item | Owner task | Version | How checked | Result/consequence |
+|---|---|---|---|---|---|
+| V11 | Versions pinned by `uv add` (httpx, httpcore, trafilatura, lxml, lxml_html_clean, charset-normalizer) and `uv lock --check` | T024 | httpx 0.28.1, httpcore 1.0.9, trafilatura 2.3.1, lxml 6.1.3, lxml-html-clean 0.4.6, charset-normalizer 3.5.2 | `uv add 'httpx>=0.28.1,<0.29' 'httpcore>=1.0.9,<2' 'trafilatura>=2.3.1'`, `uv lock --check`, `uv run python -c 'import httpx, httpcore, trafilatura'` and `uv pip list` | Resolved and imports cleanly; `uv lock --check` passes (109 packages). charset-normalizer 3.5.2 was already in the lock (not newly added); lxml and lxml-html-clean arrive transitively via trafilatura |
+| V12 | httpx `AsyncHTTPTransport` still stores its pool in `_pool` and delegates `handle_async_request` to it; `httpcore.AsyncConnectionPool(network_backend=..., ssl_context=..., retries=...)` signature | T028 | TODO | TODO | TODO |
+| V13 | httpcore `start_tls` uses the origin host as `server_hostname` when the dialled host is an IP literal (cert verified against the hostname) | T028 | TODO | TODO | TODO |
+| V14 | `AnyIOBackend` stream `get_extra_info("server_addr")` shape (tuple vs None) | T028 | TODO | TODO | TODO |
+| V15 | `ipaddress` `is_global`/`is_reserved` results for the AF-3.2 matrix on the venv's Python 3.13.5 | T028 | TODO | TODO | TODO |
+| V16 | httpx request event hooks run for every redirect hop; `TooManyRedirects` raised above `max_redirects` | T030 | TODO | TODO | TODO |
+| V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 | TODO | TODO | TODO |
+| V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 | TODO | TODO | TODO |
+| V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 | TODO | TODO | TODO |
+| V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 | TODO | TODO | TODO |
+
 ## Task notes
 
 ### T001 — Scaffold
@@ -1077,3 +1092,19 @@ Checks: `uv run ruff format` (own files) clean; `uv run ruff check .` all passed
 `uv run pyrefly check` 0 errors (4 suppressed: the 2 existing ones plus these 2);
 `uv run pytest tests/test_flag_off_identity.py -q` 13 passed.
 No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
+
+## T024 — Scaffold (article fetching)
+
+- `.env.example` already existed, tracked and restored (user confirmed); nothing to do.
+  The new fetch env vars are left to T027.
+- Deps added with `uv add` only. httpx 0.28.1 and httpcore 1.0.9 were already present
+  transitively; they are now direct, bounded dependencies.
+- Five stub modules hold only a docstring (role plus allowed imports from AF-2). Their
+  allowed-import lists are not enforced here; the layer-order test belongs to a later task.
+- `tests/fixtures/pages/.gitkeep` added for T037/T038.
+- Deviation (suggested by T023): `search-path = ["."]` added to `[tool.pyrefly]`, and the
+  two `# pyrefly: ignore[missing-import]` comments removed from
+  `tests/test_flag_off_identity.py`. This touches a T023-owned test file, but only
+  comments; pyrefly reports 0 errors and the suite is 858 passed.
+- `uv run ruff format --check .` flags `shared/designs.md` (ruff formats code blocks in
+  markdown); pre-existing, unrelated, not changed.
