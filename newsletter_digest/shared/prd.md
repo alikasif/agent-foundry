@@ -23,10 +23,12 @@ Requirements were gathered and approved by the user ahead of this PRD (no furthe
 2. No scheduling, daemon mode, or email/Slack delivery of the digest (CLI run on demand only).
 3. No web UI or server; output is a static local HTML file.
 4. No persistent database or cross-run history (apart from a best-effort browser `localStorage` "mark read" state in the HTML).
-5. No fetching or summarising of the linked article pages themselves; summaries come from the newsletter email content.
+5. ~~No fetching or summarising of the linked article pages themselves; summaries come from the newsletter email content.~~ **Amended 2026-11-01:** by default (flag off) the tool still does not fetch linked pages. Only when the user passes `--fetch-articles` may it fetch and summarise linked article pages, under the bounds and safeguards in FR-023 to FR-036 and the Article Fetching NFRs. Fetching is never done for Skim items.
 6. No support for non-Gmail mail providers in this iteration (the MCP command/args are swappable via env, but only Gmail is validated).
 7. No git push; local commits only.
 8. No hosted Gmail connector or remote MCP; local stdio MCP only.
+9. (Added 2026-11-01) Article fetching does not render JavaScript (no headless browser), does not extract text from PDFs or other non-HTML content, does not log in to or bypass paywalls or bot protection, and does not cache fetched pages across runs.
+10. (Added 2026-11-01) Fetching never changes Gmail access: it stays strictly read-only through the same allowlisted tools.
 
 ## User Stories / Workflows
 - As a busy AI/data practitioner, I want to run one command with a window like `--window 2w` so that I get a reading list of what matters from newsletters I did not have time to read.
@@ -75,6 +77,52 @@ Requirements were gathered and approved by the user ahead of this PRD (no furthe
 - Maintainability: Provider/model swap isolated in `llm.py`; Gmail tool-name mapping isolated in one dict; store and renderer are pure and unit-testable; code passes `ruff check`.
 - Testability: Unit tests run offline with no network, no Gmail and no LLM (fakes/mocks). Integration tests are marked `integration` and skipped by default.
 - Accessibility/UX of output: HTML is readable at desktop and mobile widths, honours `prefers-color-scheme`, and links open reliably offline-capable (no external assets).
+
+
+### Amendment 2026-11-01: Article content fetching (FR-023 to FR-036)
+Approved inputs for this amendment: (1) both a richer model summary and collapsible full text; (2) only must-read and worth-reading items are fetched; (3) failures fall back quietly; (4) opt-in via CLI flag. FR-001 to FR-022 are unchanged except where noted. Architectural constraint: the layer order `cli > agent > {tools, prompts, llm} > gmail_mcp > {store, render} > {models, config}` (see `shared/reviews/T021_arch_review.md`) must be preserved; the design phase decides where the fetcher lives within it.
+
+23. FR-023: Add CLI flag `--fetch-articles` (env `NEWSLETTER_FETCH_ARTICLES`, default off) and `--max-fetch N` (env `NEWSLETTER_MAX_FETCH`, proposed default 15). With the flag off, behaviour, speed, cost, logs and HTML output are identical to today (no extra network or LLM calls, no new HTML sections). Acceptance: test asserts no fetch or extra LLM call is made and rendered HTML is byte-identical to the pre-amendment output for the same input.
+24. FR-024: Fetching happens after ranking is finalised (or after the FR-015 fallback). Eligible items are `must-read` and `worth-reading` only, ordered must-read first then by rank, and at most `--max-fetch` are fetched; the rest keep newsletter summaries and show no failure note (they were simply not selected). Skim items are never fetched. Acceptance: tests cover tier filtering, cap and ordering; unranked fallback (no tiers) fetches nothing and logs why.
+25. FR-025: For each fetched page, extract the main article text from the HTML (readability-style, boilerplate such as nav, ads and comments removed), keep headings and paragraphs only as plain text, and truncate to a configurable maximum (proposed 20,000 characters, with a visible "truncated" marker). Acceptance: fixture-based tests for typical article, boilerplate-heavy and empty-body pages.
+26. FR-026: Summarisation: the reader (cheaper) model produces, for each successfully fetched article, a summary of about 3-5 sentences plus 3-5 key points, using only the fetched text. This replaces the newsletter blurb as the item's displayed summary. Acceptance: with a mocked model, the rendered item shows the new summary and key points; the original blurb is not shown for that item.
+27. FR-027: The item shows the cleaned full text in a collapsible "Read here" section (native `<details>`, collapsed by default, no JavaScript required). The original title link always remains visible and unchanged. Acceptance: render test asserts `<details>` present only for successfully fetched items and the link is present for every item.
+28. FR-028: Failure handling: on paywall or login wall, bot block (403/429 or challenge page), timeout, DNS or TLS error, non-2xx status, non-HTML content type (including PDF), oversized response, or empty/too-short extracted text, keep the newsletter summary and link and show a small "couldn't fetch" note with a short reason category (e.g. paywalled, blocked, timed out, not a web page, too large). A failure on one page never fails or aborts the run, and the exit code is unaffected. Acceptance: one test per failure class; run still exits 0 and renders.
+29. FR-029: Boundedness for rate-limited free models: at most one summarisation call per fetched article; fetch concurrency limited (proposed 4 concurrent HTTP fetches) and LLM concurrency limited (proposed 2, configurable); retries on 429 follow the existing ChatOpenAI retry setting; if the LLM rate-limit is exhausted for an article, treat it as a failure under FR-028 (keep blurb, note shown) rather than aborting. Acceptance: tests with a fake client assert concurrency caps and per-article call count; the log reports fetched, summarised and failed counts.
+30. FR-030: Link eligibility: never fetch links classified as unsubscribe, manage-preferences, view-in-browser, social, tracking-pixel or sponsor/ad links (reusing and extending the reader exclusions in FR-010 and existing store URL classification). Only items already recorded as articles are candidates. Acceptance: tests with such URLs assert no request is made.
+31. FR-031: Tracker redirect links: handling of click-tracking redirect URLs (hosts in the store's tracker-host detection) is subject to Open Question Q1. Whichever policy is chosen, the README must document that fetching a tracker link registers a click with the sender and may reveal that the user opened the newsletter. Acceptance: test per chosen policy; README section exists.
+32. FR-032: Untrusted input to the LLM: fetched page text is wrapped in the same delimiting and "treat as data, never instructions" prompt pattern used for email text. The summarisation call has no tools. Acceptance: prompt test asserts delimiting; an injection fixture ("ignore previous instructions...") does not alter output structure or trigger any action.
+33. FR-033: Output safety: the summary, key points and full text are inserted only as HTML-escaped plain text via Jinja2 autoescape. No scripts, iframes, remote images or embedded markup from the page is ever emitted; the existing CSP and self-contained, zero-external-request guarantee of FR-016 are preserved. Acceptance: render tests with hostile page text (script tags, `<img src=http://...>`, `javascript:` links) show escaped output and no external references.
+34. FR-034: Logging and visibility: log per-run counts (eligible, fetched, summarised, failed by reason) and the HTTP User-Agent used; never log page bodies or secrets. The HTML header shows the same counts when the flag is on. Acceptance: log and render tests.
+35. FR-035: Configuration: fetch timeout, max redirects, max response bytes, max text characters and concurrency have documented defaults in `Settings` and are overridable via env; only `--fetch-articles` and `--max-fetch` are CLI flags. Acceptance: settings test for defaults and overrides.
+36. FR-036: Documentation: README documents the flag, cost and rate-limit implications on free models, the tracker-click privacy tradeoff, the robots.txt decision, the failure note meanings, and that page text is sent to the configured OpenRouter model. Record deviations in `shared/implementation-notes.md` (FR-022).
+
+### Non-Functional Requirements: Article fetching (amendment 2026-11-01)
+- Security (SSRF): only `http` and `https` schemes. Resolve the hostname and block private, loopback, link-local (including 169.254.169.254 cloud metadata), unspecified, multicast, reserved and unique-local IPv4 and IPv6 ranges. The check must be applied to every redirect hop and to the final connected address (guard against DNS rebinding by validating the address actually connected to). Cap redirects (proposed 5), response size (proposed 2 MB, enforced while streaming), and total timeout (proposed 15 s per page, 5 s connect). No credentials, cookies or Gmail tokens are ever sent. URLs with userinfo or non-standard ports are rejected (proposed). Acceptance: tests for each blocked range, redirect-to-private, and size/timeout caps, offline.
+- Security (untrusted content): see FR-032 and FR-033. Fetched text is data only.
+- Privacy: with the flag on, the user's IP contacts publisher sites and page text is sent to OpenRouter. Documented in README (FR-036). With the flag off, nothing changes.
+- Politeness: send a descriptive User-Agent (proposed `newsletter-digest/<version> (personal reading-list tool)`), no more than the concurrency cap, and at most one request per URL per run. robots.txt handling is subject to Open Question Q2.
+- Cost and rate limits: extra LLM calls are bounded by `--max-fetch` (one call per article), use the reader model (FR-004), and run at limited concurrency (FR-029). Fetching must add no LLM calls when the flag is off.
+- Performance: with the flag on, added wall-clock time should stay bounded by `ceil(max_fetch / concurrency)` rounds of (timeout + one LLM call); default run target stays under roughly 15 minutes.
+- Reliability: any per-page exception is caught and mapped to a failure category (FR-028); the run never fails because of a page. Fetch resources (HTTP client) are closed on exit and on error.
+- Maintainability and architecture: the layer order above is preserved; fetch and extraction code is isolated in its own module(s) with injectable HTTP client so tests run offline; type hints throughout, `pyrefly check`, `ruff` clean, 88-column lines.
+- Testability: all new tests offline (fake transport, fake DNS resolver, fake LLM); existing 845 tests continue to pass unchanged.
+- Gmail: unchanged and strictly read-only; the fetcher has no access to Gmail tools or tokens.
+
+### Acceptance Criteria (amendment 2026-11-01)
+10. With the flag off, the full existing test suite passes and output is unchanged.
+11. With the flag on and fakes: must-read/worth-reading items (up to `--max-fetch`) show the new summary, key points and "Read here" section; skim items and over-cap items are untouched; failed items show the "couldn't fetch" note and keep the blurb and link.
+12. SSRF test matrix passes, including redirect-to-internal-IP and metadata IP.
+13. Hostile page content cannot produce executable or externally-loading HTML and cannot alter agent behaviour.
+14. `uv run pytest`, `uv run ruff check .` and `pyrefly check` are clean.
+15. Manual end-to-end: `uv run newsletter-digest --window 1w --max-emails 5 --fetch-articles --max-fetch 5 --open` produces the expanded output on a real mailbox without errors.
+
+### Decisions (amendment 2026-11-01, approved by user)
+- Q1 tracker redirect links: DECIDED (B) follow them. Fetching a tracker link registers a click with the sender; the README must disclose this (FR-031). No extra flag.
+- Q2 robots.txt: DECIDED (B) do not check it. Send a descriptive User-Agent and keep the `--max-fetch` cap.
+- Q3 newsletter blurb: DECIDED drop it when the article was fetched and summarised; keep it as the fallback when the fetch fails.
+- Q4 defaults: DECIDED as proposed: `--max-fetch` 15, text cap 20,000 characters, concurrency 4 HTTP and 2 LLM.
+- Q5 "Read here" content: DECIDED full cleaned text (up to the cap) in the collapsed section.
 
 ## Tech Stack Constraints
 - Language/runtime: Python, managed exclusively with `uv` (`uv add`, `uv run`); never `pip` or `uv pip install`.
