@@ -41,9 +41,13 @@ setup." point here.
 1. In the [Google Cloud console](https://console.cloud.google.com/) create a project (or
    pick an existing one).
 2. Open **APIs & Services > Library**, search for **Gmail API** and click **Enable**.
-3. Open **APIs & Services > OAuth consent screen** and configure it. Choose the
-   **External** user type and leave the app in **Testing** mode. Under **Test users**
-   add the Google account whose mail you want to read.
+3. Open **Google Auth Platform > Audience** (older consoles: **APIs & Services > OAuth
+   consent screen**) and configure it. Choose the **External** user type and leave the
+   app in **Testing** mode. Under **Test users** click **Add users** and add the exact
+   Google account whose mail you want to read. This is required even if that account
+   owns the Cloud project: in Testing mode only listed test users can sign in, and any
+   other account gets `Error 403: access_denied` (see
+   [Troubleshooting](#troubleshooting)).
 4. Open **APIs & Services > Credentials > Create credentials > OAuth client ID** and
    choose the application type **Desktop app**.
 5. Download the JSON file for that client.
@@ -66,8 +70,13 @@ Keep the file only in `~/.gmail-mcp/`.
 npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth
 ```
 
-A browser window opens for the Google consent screen. While the app is in testing mode
-Google shows an "unverified app" warning; continue as the test user you added. The token
+Use the pinned version shown above; a bare `npx @gongrzhe/server-gmail-autoauth-mcp auth`
+runs whatever release is newest on npm.
+
+A browser window opens for the Google consent screen. Pick the same account you added as
+a test user in step 1 (switch accounts on the picker if the browser defaults to another
+one). While the app is in testing mode Google shows a "Google hasn't verified this app"
+warning; click **Continue** (or **Advanced > Go to** *your app name*) and approve. The token
 is saved to `~/.gmail-mcp/credentials.json`. `newsletter-digest` never reads these files;
 only the MCP server does.
 
@@ -108,6 +117,7 @@ To upgrade:
 | --- | --- |
 | `'npx' not found on PATH; install Node.js >= 18 ...` | Install Node.js 18+ so `npx` is on your `PATH`, or set `GMAIL_MCP_COMMAND` to another launcher. |
 | `Could not start the Gmail MCP server ...` or `Gmail search failed ...` | The keys file is missing or misplaced, or the token expired or was revoked. Check `~/.gmail-mcp/gcp-oauth.keys.json`, then re-run `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth`. |
+| Browser shows `Access blocked: <app name> has not completed the Google verification process` / `Error 403: access_denied` during `auth` | The account you signed in with is not a test user of the OAuth app. In the Cloud console open **Google Auth Platform > Audience > Test users**, click **Add users**, add that exact account, save, then re-run `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth` and choose that account on the picker. |
 | Token expires after about a week | An OAuth app in **Testing** mode issues refresh tokens that expire after 7 days. Re-run the `auth` command, or publish the app to production in the consent screen. |
 | `The Gmail MCP server does not offer the required read-only tool(s) ...` | `GMAIL_MCP_ARGS` does not point at `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, or a different server version renamed `search_emails` / `read_email`. |
 | `Could not parse the Gmail MCP search_emails output` | The server's output format changed. The tool was verified against server version 1.1.11. |
