@@ -25,8 +25,8 @@
 | V13 | httpcore `start_tls` uses the origin host as `server_hostname` when the dialled host is an IP literal (cert verified against the hostname) | T028 | httpcore 1.0.9 | Read `httpcore/_async/connection.py` `_connect`; probe with a stream that records `start_tls` arguments for `https://a.com/` resolved to `93.184.215.14` | Confirmed. `server_hostname = sni_hostname or self._origin.host`; the origin is the request URL host, not the IP the backend dials. Probe recorded `connect_tcp('93.184.215.14', 443)` then `start_tls(server_hostname='a.com')`. `httpx.create_ssl_context()` gives `CERT_REQUIRED` + `check_hostname=True` |
 | V14 | `AnyIOBackend` stream `get_extra_info("server_addr")` shape (tuple vs None) | T028 | httpcore 1.0.9, anyio 4.x (venv) | Read `httpcore/_backends/anyio.py` (`AnyIOStream.get_extra_info`) and `anyio/abc/_sockets.py` + `anyio/_core/_sockets.py` (`convert_ipv6_sockaddr`); no real socket opened | `server_addr` -> `SocketAttribute.remote_address` = `convert_ipv6_sockaddr(sock.getpeername())`: a 2-tuple `(host, port)` for IPv4 and IPv6 (IPv6 host gets `%<scope>` only when the scope id is non-zero), or `None` if getpeername fails. `AsyncMockStream` returns `None`. netguard uses `server_addr[0]`, strips any scope, and skips the check only when the value is `None` |
 | V15 | `ipaddress` `is_global`/`is_reserved` results for the AF-3.2 matrix on the venv's Python 3.13.5 | T028 | CPython 3.13.5 | Scratch probe printed every flag for 43 addresses, then `is_public_address` for the same matrix | `is_global` is True for addresses the policy must still block: `192.0.0.9`, `192.88.99.1`, `224.0.0.1` (multicast), `fec0::1`, `ff02::1`, `2001:3::1`, `2001:20::1`, `::ffff:8.8.8.8`, `::8.8.8.8`, and NAT64 `64:ff9b::a00:1` (embeds 10.0.0.1). `BLOCKED_NETWORKS`, the flag checks and the embedded-IPv4 unwrap reject all of them. Every embedded form is not public in the end: mapped (`::ffff:0:0/96` entry), compatible and NAT64 (`is_reserved`, inside `::/8`), 6to4 (`is_global` False), Teredo (`2001::/23`). Only true public unicast (8.8.8.8, 1.1.1.1, 2606:4700:4700::1111, 2001:4860:4860::8888) passes |
-| V16 | httpx request event hooks run for every redirect hop; `TooManyRedirects` raised above `max_redirects` | T030 | TODO | TODO | TODO |
-| V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 | TODO | TODO | TODO |
+| V16 | httpx request event hooks run for every redirect hop; `TooManyRedirects` raised above `max_redirects` | T030 | httpx 0.28.1 | Read `AsyncClient._send_handling_redirects`; scratch probe: `PageFetcher` over `httpx.MockTransport` with a 301/302 chain and a recording wrapper around the request hook | Confirmed. The loop checks `len(history) > max_redirects` first, then runs every request hook, then sends. 5 redirects (6 requests) with `max_redirects=5`: hook ran 6 times, page returned. 6 redirects: `TooManyRedirects` before the 7th hop, whose hook never ran (so it is never claimed in the ledger) -> TOO_MANY_REDIRECTS. Hook exceptions propagate unwrapped. **Found:** with `follow_redirects=True` httpx calls `response.aread()` on every redirect response, which reads and decodes (gzip/br/zstd) the body with no size bound; fetch.py drops redirect bodies in a response hook (see T030 notes) |
+| V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 | httpx 0.28.1, httpcore 1.0.9, stdlib `http.cookiejar` (3.13.5) | Scratch probe: real `PageFetcher` (real `GuardedTransport`), fake resolver, scripted `httpcore` backend recording every byte written; hop 1 `302` with two `Set-Cookie` (one with `Domain=`), hop 2 `200` with `Set-Cookie`; `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` set to `10.9.9.9:3128`; read `_client.py` | Confirmed. No `Cookie` header on either hop and the jar stayed empty (`DefaultCookiePolicy(allowed_domains=[])` rejects every cookie in `set_ok` and `return_ok`). Requests went to the resolved origin IPs (resolver saw `a.example`, `b.example`), `_client._mounts == {}`. Headers sent per hop: Host, Connection, User-Agent, Accept, Accept-Language, `Accept-Encoding: identity`; no Authorization/Referer. **Correction to AF-3.4:** in 0.28.1 env proxies are mounted only when `trust_env and transport is None`, so with our custom transport they are ignored even with `trust_env=True`; there is no `.netrc` support any more. `trust_env=False` is kept as defence in depth (it also matters if `transport` were ever None). Same probe: redirect hop to a host resolving to 169.254.169.254 -> UNSAFE |
 | V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 | trafilatura 2.3.1, lxml 6.1.3, Python 3.13.5 | `inspect.signature`, read `core.py`/`settings.py`/`settings.cfg` in `.venv`, offline probes with `socket.socket.connect`/`create_connection`/`getaddrinfo` patched to raise | Signature matches AF-4 (all AF-4 kwargs exist). **Deviation:** any truthy `max_tree_size=` kwarg raises `ValueError("\"max_tree_size\" will be removed, use settings.cfg instead")` in `_check_deprecation`, so `extract.py` passes `config=` (a copy of `DEFAULT_CONFIG` with `MAX_TREE_SIZE = 100000`) instead. Semantics: checked after extraction on `len(postbody)` = number of top-level output elements (not total nodes); over the limit, `hi` tags are stripped, then the page is discarded (None): 100,100 `<p>` -> None, 99,000 -> text. No network I/O in `extract()` (probes pass with sockets blocked). Empty/garbage/UTF-16/random bytes return None (trafilatura catches its own `ValueError`/`TypeError`). Logs `WARNING trafilatura.core: discarding data: None` per rejected page |
 | V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 | TODO | TODO | TODO |
 | V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 | TODO | TODO | TODO |
@@ -1607,3 +1607,100 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   (57 statements, 10 branches).
 - Results: `tests/test_extract.py` 131 passed, 1 xfailed (strict); full suite 1721
   passed, 2 deselected, 2 xfailed; ruff and pyrefly clean.
+
+## T030 — fetch.py: PageFetcher with guarded client, caps, failure classification, request ledger
+
+- **Extractor signature mismatch (deviation from AF-P5 `extractor: Extractor =
+  extract_article_text`).** `Extractor` is positional (`Callable[[bytes, int], ...]`)
+  but `extract_article_text(html, *, max_chars)` is keyword-only, so the literal default
+  is a pyrefly error and a `TypeError` at the `to_thread.run_sync(extractor, body,
+  max_chars)` call. Fixed in fetch.py only: the default is a private adapter
+  `_extract_text(html, max_chars)` that calls `extract_article_text(html,
+  max_chars=max_chars)`. extract.py and the `Extractor` alias are unchanged, so the
+  strict xfail `test_extract_article_text_satisfies_extractor_alias` in
+  tests/test_extract.py (T037) still xfails. Injected extractors keep the positional
+  `(bytes, int)` signature.
+- **Redirect bodies are dropped unread (addition).** V16 found that httpx's redirect
+  loop calls `response.aread()` on every redirect response: an unbounded read, decoded
+  with httpx's own gzip/br/zstd decoders. A 302 with a 49 KB gzip body of 50 MB used
+  100 MB peak memory in a probe. A `response` event hook (`_drop_redirect_body`) closes
+  the stream of any response with `has_redirect_location` and puts an empty
+  `httpx.ByteStream` in its place (peak 0.08 MB, same outcome). So `event_hooks` has a
+  `response` entry besides the AF-3.4 `request` hook.
+- **Body read iterates `response.stream`, not `response.aiter_raw()` (deviation).**
+  `aiter_raw()` raises `StreamConsumed` when the transport already loaded the body,
+  which is what every `httpx.MockTransport` handler returning `httpx.Response(...,
+  content=b"...")` does. Iterating the raw stream yields the same raw (still encoded)
+  bytes for real and mock responses. httpcore exceptions are still mapped, because
+  httpx's `AsyncResponseStream` maps them itself. **For T038:** a handler that builds
+  `httpx.Response(content=<bytes>, headers={"content-encoding": ...})` makes httpx
+  decode the body inside the handler. A gzip bomb then uses memory in the test, a
+  corrupt gzip or a non-zstd body under `zstd` raises `DecodingError` there (-> ERROR,
+  not NOT_HTML). Pass an async generator as `content=` for encoded bodies.
+- **Extraction is outside the deadline (reading of AF-3.5 over "whole operation").**
+  `fail_after(config.timeout)` covers every hop, the headers and the body read
+  (AF-3.5 "around all hops plus the body read"). The extractor runs afterwards in
+  `anyio.to_thread.run_sync`. A worker thread cannot be cancelled (T029 note), so
+  putting it inside the deadline would only turn a finished slow extraction into
+  TIMED_OUT. Tradeoff: a pathological page holds its fetch slot while it is
+  extracted.
+- **Order of checks** (first match wins): status (401/402 PAYWALLED; 403/429/451
+  BLOCKED; 503 + `cf-mitigated: challenge` BLOCKED, case-insensitive; 204 TOO_SHORT;
+  any other non-2xx, including a 3xx with no `Location`, HTTP_ERROR); final-URL paywall
+  path; a `Content-Type` that is present and not HTML NOT_HTML; unsupported
+  `Content-Encoding` NOT_HTML; `Content-Length` over the cap TOO_LARGE (unread); body
+  read with caps; missing or blank `Content-Type` sniffed (`<html` / `<!doctype html`,
+  case-insensitive, in the first 1 KiB of the decoded body); challenge markers;
+  extraction; JSON-LD paywall; TOO_SHORT. Everything before the body read is decided
+  from the headers alone, and the response is closed unread.
+- **JSON-LD paywall before TOO_SHORT.** `"isAccessibleForFree": false` (also `"false"`,
+  any case) together with extracted text under `PAYWALL_TEXT_CHARS` (1,500), including no
+  text at all, is PAYWALLED, which says more than TOO_SHORT. It is a bytes regex over the
+  whole body (at most `max_bytes`) and does not parse JSON-LD.
+- **Challenge markers** apply only to decoded bodies up to `CHALLENGE_MAX_BYTES` (64 KiB,
+  not specified), matched case-insensitively in the raw HTML before extraction, as the
+  spec orders it. Tradeoff: a short page that mentions "captcha" is reported BLOCKED
+  (AF-13 accepted heuristic risk).
+- **Encodings.** `""`/`identity` are read as is. `gzip`, `x-gzip` and `deflate` go
+  through one `zlib.decompressobj(MAX_WBITS | 32)`, which accepts a gzip or zlib header.
+  Raw (headerless) deflate and corrupt data raise `zlib.error` -> NOT_HTML. Anything
+  else, including stacked `gzip, gzip`, is NOT_HTML. The raw byte count and the decoded
+  size are both capped at `max_bytes`. The decoder gets `max_length = remaining + 1`, so
+  output of more than `remaining` proves the cap is exceeded, and when it does not
+  exceed, `unconsumed_tail` is always empty. `max_length` is never 0, which zlib would
+  read as "unlimited". The decoded body is never more than `max_bytes`, which makes
+  `max_bytes` itself the TOO_LARGE limit (a body of exactly `max_bytes` passes).
+- **`Content-Length`** is used only when it is all decimal digits; otherwise it is
+  ignored and the streamed cap applies.
+- **Exception mapping order:** `_RejectedHop` (the hook's NOT_ARTICLE / DUPLICATE) ->
+  `TimeoutError`/`httpx.TimeoutException` TIMED_OUT (before OSError: `TimeoutError` is an
+  OSError) -> `BlockedAddressError`, `UrlPolicyError`, `httpx.InvalidURL` (raised
+  while the request is built, before the hook) and `httpx.UnsupportedProtocol` UNSAFE ->
+  `TooManyRedirects` -> `httpx.NetworkError`, `httpx.RemoteProtocolError`, `OSError`
+  (gaierror, ssl.SSLError) NETWORK -> any other `Exception` ERROR with one WARNING
+  (`Unexpected error fetching a page from <host>: <TypeName>`). `BlockedAddressError` is
+  caught before the generic OSError (T028 note). `BaseException` propagates. There is no
+  other log line: per-item DEBUG and the UA INFO line belong to the enricher (T031
+  description).
+- **Hook order on every hop:** `check_url_policy` -> `classify_link` in
+  `NEVER_REQUEST_KINDS` (NOT_ARTICLE) -> ledger claim (DUPLICATE). So a rejected hop
+  never claims a key. A redirect back to an already requested URL in the same chain is
+  DUPLICATE too (ledger semantics), not TOO_MANY_REDIRECTS.
+- **One ledger per `PageFetcher`** (one fetcher per run, as enrich creates it). The
+  `anyio.Lock` is kept as specified, although check-and-add has no await between.
+- **Client lifecycle.** The client is built in `__init__` (no I/O) and entered in
+  `__aenter__`. `__aexit__` closes it inside a shielded `CancelScope`, so it is closed on
+  cancellation too (probe: `move_on_after` around `async with` -> client
+  `is_closed`). The cookie jar is passed as a bare `CookieJar` (httpx wraps it as
+  `Cookies(jar)` and keeps the same object), not as `httpx.Cookies(...)`.
+- **`FetchedPage`:** `url` is the final URL (in memory only, never rendered),
+  `content_type` the media type without parameters (`""` when it was sniffed), and
+  `byte_count` the decoded body length handed to the extractor.
+- **Public extras beyond AF-P5** (constants for tests): `REQUEST_HEADERS`,
+  `HTML_MEDIA_TYPES`, `PAYWALL_STATUSES`, `BLOCKED_STATUSES`, `PAYWALL_TEXT_CHARS`,
+  `SNIFF_BYTES`, `CHALLENGE_MAX_BYTES`.
+- context7 was not available; httpx and httpcore behaviour was read from the installed
+  0.28.1 / 1.0.9 sources and probed offline (MockTransport and a scripted httpcore
+  backend; no real sockets). The probe covered about 60 cases across every AF-3.7 fetch
+  category. No tests added (tests/test_fetch.py is T038). Suite: 1721 passed,
+  2 deselected, 2 xfailed; ruff and pyrefly clean.

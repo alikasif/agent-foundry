@@ -236,3 +236,15 @@
 - (T037) Check a `Callable[...]` alias against its default implementation with pyrefly
   in a scratch file (`x: Alias = func`). AF-P5's positional `Extractor` alias does not
   accept the keyword-only `extract_article_text`.
+- (T030) httpx 0.28.1 with `follow_redirects=True` calls `response.aread()` on every
+  redirect response, which reads and decodes (gzip/br/zstd) the body with no size bound.
+  A 302 carrying a 49 KB gzip of 50 MB costs 100 MB of memory. Drop redirect bodies in a
+  `response` event hook: close `response.stream` (NOT `response.aclose()`, which makes the
+  later `aread()` raise `StreamClosed`) and assign `httpx.ByteStream(b"")`.
+- (T030) `httpx.Response(..., content=b"...")` (what MockTransport handlers return) is
+  read at construction time, so `aiter_raw()` on it raises `StreamConsumed`, and an
+  encoded body is decoded inside the handler. Iterate `response.stream` for raw bytes,
+  and use an async generator as `content=` when testing encoded bodies.
+- (T030) In httpx 0.28.1 env proxies are mounted only when `trust_env and transport is
+  None`, and there is no `.netrc` support. With a custom transport, `trust_env=False` is
+  defence in depth, not the thing that blocks `HTTP(S)_PROXY`.
