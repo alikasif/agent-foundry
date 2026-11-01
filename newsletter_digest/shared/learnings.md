@@ -248,3 +248,7 @@
 - (T030) In httpx 0.28.1 env proxies are mounted only when `trust_env and transport is
   None`, and there is no `.netrc` support. With a custom transport, `trust_env=False` is
   defence in depth, not the thing that blocks `HTTP(S)_PROXY`.
+- (T040) Mutation-test a Jinja template without touching the source: in a subprocess,
+  set `render.ENVIRONMENT.loader = DictLoader({render.TEMPLATE_NAME: mutated_src})`
+  before `pytest.main([...])`. Hostile text that renders escaped still contains `url(`
+  as plain text, like `src=` (T033): match it inside real tags or within `<style>` only.

@@ -1704,3 +1704,46 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   backend; no real sockets). The probe covered about 60 cases across every AF-3.7 fetch
   category. No tests added (tests/test_fetch.py is T038). Suite: 1721 passed,
   2 deselected, 2 xfailed; ruff and pyrefly clean.
+
+## T040 — Render tests for fetched content and output safety
+
+- New file `tests/test_render_fetch.py` (73 tests); no existing test file edited. Flag-on
+  lists are built from the `tests/flag_off_fixture.py` builders with `model_copy(update=)`
+  through a `with_outcomes(list, {item_id: FetchedContent | FetchFailure}, stats)` helper
+  (asserts every id exists). `model_copy` skips validation, so the helper never sets both
+  fields on one item.
+- The T023 helper is re-used by importing `assert_same_bytes` and the golden paths from
+  `tests.test_flag_off_identity` (only non-`test_` names, so pytest does not collect its
+  tests twice). AF-9 checks: rendering a flag-on copy first does not change the builder
+  output, and explicit `fetched=None`/`fetch_failure=None`/`fetch=None` still give the
+  golden bytes, for ranked, unranked and empty.
+- Own tiny `HTMLParser` DOM (not imported from `tests/test_render.py`) that fails on any
+  mismatched end tag, so a `</details>` or `</div>` injection would break parsing.
+  Items are located by `data-key` (= `read_key`), and each item must render exactly once.
+- Output safety, decided beyond AF-8 wording: "no `src=`" and "no `url(`" are matched
+  inside real tags (`<[^>]*\ssrc\s*=`, `<[^>]*url\(`) plus `url(` absent from `<style>`,
+  because hostile text legitimately renders as escaped plain text containing `src=` and
+  `url(` (T033 note). Added: no `on*`, `style` or `src` attribute on any element; the
+  flag-on tag set is a subset of the golden's tags plus `ul/li/details/summary/div`;
+  exactly one `<script>` with no attributes and body == `SCRIPT_BODY`; the full CSP meta
+  string (with `SCRIPT_HASH`) is present once and identical to the golden's; every
+  non-`#` href satisfies `safe_url(href) == href`; hostile full text is the single text
+  child of `div.full-text` (no element children). The hostile `skipped_reason` is also
+  checked as escaped (internal string today, cheap guard).
+- Wording asserted as T033 rendered it (and AF-3.7 specifies): `SUMMARY_FAILED`/`ERROR`
+  notes are repetitive ("Couldn't fetch the article: couldn't fetch"); the value's
+  apostrophe appears as `couldn&#39;t` in markup. All 14 rendered categories are
+  parametrised; DUPLICATE renders no note and keeps the blurb.
+- Header: stats line asserted as flattened text, with and without the excluded clause;
+  with `skipped_reason` set the zero stats line still shows, followed directly by the skip
+  note and then the unranked note. Empty list with the flag on shows the stats line and
+  the empty state. Flag-on CSS: the flag-off `<style>` content is an exact prefix of the
+  flag-on one, and the four new rules sit after it (present even with no fetched item).
+- Mutation check (scratch, template loaded via `DictLoader`, source untouched): `|safe`
+  on full text / key point / skip reason, `open` on details, DUPLICATE shown, blurb kept
+  for fetched items, old footer always, RATE_LIMITED verb "fetch", CSS always, excluded
+  clause always: all 10 mutants killed.
+- Results: `tests/test_render_fetch.py` 73 passed; full suite 1794 passed, 2 deselected,
+  2 xfailed (with other agents' in-progress edits in the tree); render.py line+branch
+  coverage from this file alone 85% (misses are `write_reading_list` and a `safe_url`
+  branch covered by `tests/test_render.py`). ruff and pyrefly clean. No source bugs found.
