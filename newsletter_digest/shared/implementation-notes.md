@@ -1492,3 +1492,55 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
 - Verified: ruff and pyrefly clean (0 errors). `tests/test_links.py`, `test_store.py` and
   `test_flag_off_identity.py`: 447 passed. The full suite's only failures were 2 in
   `tests/test_netguard.py`, which belongs to T036 and was in progress at the time.
+
+## T036 — SSRF matrix through the real guarded transport, plus _pool canary
+
+- **Fakes** (all in `tests/test_netguard.py`, no real sockets): `FakeResolver` (a dict
+  of host to IPs that records `(host, port)`; IP literals resolve to themselves; unknown
+  or `failing` hosts raise `socket.gaierror`), `ScriptedStream(httpcore.AsyncMockStream)`
+  (chosen `server_addr`, records `start_tls` `server_hostname` and `aclose`), and
+  `ScriptedBackend` (records every dial and pops one scripted stream or exception per
+  connect). Network tests use the real `GuardedNetworkBackend` and
+  `build_guarded_transport(...)` under a plain `httpx.AsyncClient`, with no
+  MockTransport, each one inside `anyio.fail_after(5)`.
+- **Resolver `gaierror`: the task text and the code differ.** The task says the
+  error "surfaces as a connect error". In fact a raw `socket.gaierror` (an `OSError`,
+  not mapped by httpx) reaches `client.get`, as the T028 notes say. That matches
+  AF-6's NETWORK row ("DNS failure (`socket.gaierror`/`OSError` from the resolver)").
+  The test pins `socket.gaierror` and checks that it is NOT a `BlockedAddressError`,
+  so fetch.py's UNSAFE-before-OSError order keeps DNS failures as NETWORK. An empty
+  answer gives `httpx.ConnectError`.
+- **Proxy env:** I set `HTTP(S)_PROXY`/`ALL_PROXY` and ran the client with both
+  `trust_env=False` and `trust_env=True`, the worst case. httpx turns env proxies off
+  whenever a `transport=` is passed (`allow_env_proxies = trust_env and transport is
+  None`), and the guarded pool has no proxy, so the backend dialled the target IP and
+  the proxy was never resolved. A second test checks that `SSL_CERT_FILE` pointing at a
+  missing file is ignored. As a control, `create_ssl_context(trust_env=True)` raises
+  `FileNotFoundError` with the same env.
+- **What these tests do not cover:** `check_url_policy` is not wired into the
+  transport. It is PageFetcher's request hook (T030), so the redirect tests here cover
+  only the connect-level block (AF-3.2). Hook-level checks on each redirect hop belong
+  in the fetch tests.
+- **Extras beyond the matrix:** boundary addresses just outside every blocked IPv4
+  range must stay public (this guards against over-blocking). Every `BLOCKED_NETWORKS`
+  entry's first, second and last address is checked. The design list is compared with
+  `BLOCKED_NETWORKS` as parsed networks: `str()` of `::ffff:0:0/96` is
+  `::ffff:0.0.0.0/96`. Embedded public IPv4 forms (mapped, 6to4, NAT64 of 8.8.8.8) are
+  pinned as blocked, per the T028 deviation. Other checks: an IPv6 `server_addr` given in
+  a non-compressed form is accepted, a pooled connection is reused only for the same
+  origin, and `retries=0` gives exactly one dial and no backoff sleep.
+- **Mutation check** (scratch `t036_mutate.py`, which execs a patched `netguard` into
+  `sys.modules`; the real `AnyIOBackend.connect_tcp` is stubbed so nothing touches the
+  network): 13 mutants, 12 killed. They covered: skipping the `server_addr` check,
+  accepting mixed answers, no failover, `_pool` not replaced (killed by the canary),
+  `retries=2`, an SSL context that trusts env, unix sockets allowed, no
+  dialled-vs-connected comparison, no numeric-host rule, ports allowed, no stream close
+  on a mismatch, and dropping `100.64/10`. The one survivor is dropping the Teredo
+  unwrap. It is an equivalent mutant: `2001::/23` blocks every Teredo address anyway,
+  so the unwrap is defence in depth that no test can observe. Dropping `169.254/16`
+  would survive for the same reason (the `is_link_local` flag), so I did not count it.
+- **Coverage:** pytest-cov is not in the dev deps. I did not add it, to avoid touching
+  the shared `pyproject.toml`/`uv.lock` during the parallel batch. Measured with
+  `uv run --with coverage coverage run --branch`: `netguard.py` is at 100% of
+  statements and branches (114 statements, 38 branches).
+- I found no bugs in `netguard.py`.

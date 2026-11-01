@@ -222,3 +222,9 @@
   parallel batch, measure one module's line coverage without touching `pyproject.toml`:
   `sys.settrace` before the first import, run `pytest.main`, and compare the hit lines
   with the `co_lines()` of the module's compiled code objects, walked recursively.
+- (T036) pytest-cov is not installed here. `uv run --with coverage coverage run --branch
+  --source=src/newsletter_digest -m pytest <file>` measures coverage (branches too)
+  without editing `pyproject.toml`/`uv.lock`. Set `COVERAGE_FILE` to a scratch path.
+- (T036) `str(IPv6Network("::ffff:0:0/96"))` renders as `::ffff:0.0.0.0/96`, so compare
+  network lists as parsed `ip_network` objects, not strings. `network_address + 1` on a
+  `/32` or `/128` raises `AddressValueError`; guard it with `num_addresses > 1`.
