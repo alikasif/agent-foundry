@@ -339,6 +339,24 @@ source evidence.
 - If they grow, split the pure email-text pipeline out of `gmail_mcp.py` (`email_text.py`)
   and the dedupe / assembly parts out of `store.py`, re-exporting the current public names.
   Details: `shared/reviews/T021_arch_review.md`.
+- **2026-11-01 (T046, arch review of the article-fetching amendment, APPROVED).** The real
+  import graph matches AF-2: `cli > agent > enrich > {tools, prompts, llm} > gmail_mcp >
+  {store, render, fetch} > {extract, netguard} > {models, config, links}`, with edges only
+  downward, no peer edges and no cycles. The `fetch -> newsletter_digest` (`__version__`)
+  root edge is sanctioned. Gmail isolation, flag-off identity, one guarded `AsyncClient` per
+  run and the trafilatura downloader ban all hold, and `tests/test_architecture.py` (T042)
+  is the enforcing guard. **R-F2 (new risk, recorded):** `fetch._drop_redirect_body`
+  depends on httpx 0.28 redirect internals (response hooks run before the unbounded
+  `aread()`; a replaced `response.stream` is honoured). It is guarded by
+  `test_redirect_body_is_dropped_unread` and the `httpx<0.29` bound. Re-verify R-F1 and
+  R-F2 before lifting that bound. Non-blocking follow-ups:
+  - give `Extractor` a public default implementation in `extract.py` and retire the strict
+    xfail;
+  - give the delimiter scrub one bottom-tier home (for example `untrusted.py`) shared by
+    `extract`, `prompts` and `gmail_mcp`;
+  - give the log-host helper one home in `links`.
+
+  Details: `shared/reviews/T046_arch_review.md`.
 
 ---
 
