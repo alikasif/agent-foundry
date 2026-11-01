@@ -339,3 +339,315 @@ source evidence.
 - If they grow, split the pure email-text pipeline out of `gmail_mcp.py` (`email_text.py`)
   and the dedupe / assembly parts out of `store.py`, re-exporting the current public names.
   Details: `shared/reviews/T021_arch_review.md`.
+
+---
+
+# Article fetching (2026-11-01)
+
+Amendment plan for PRD FR-023..FR-036, the "Article fetching" NFRs and Decisions Q1-Q5,
+designed in `shared/designs.md` "Article fetching (2026-11-01)" (AF-1..AF-13). Everything
+above this line is the original plan (T001-T022, all done) and still applies, including
+section 8 "Process rules". **AF-1..AF-13 are the binding contract**; this section adds task
+decomposition, ordering, a few **[plan addition]** clarifications, and new verification
+rows. Starting point: commit `bb16231` (src/ and tests/ unchanged since then), 845 tests.
+
+## AF-P1 Implementation approach
+
+Opt-in enrichment stage after ranking. With `--fetch-articles` off, `run_digest` never calls
+the enricher, so no HTTP client, extra model, log line or HTML byte changes (AF-9). With it
+on, after `assemble_reading_list` and after the Gmail MCP block has closed:
+`enrich_reading_list` selects must-read/worth-reading items (link-class filter, order, cap),
+fetches each page through an SSRF-guarded httpx client (URL policy in a request hook on
+every hop; address policy in a custom httpcore network backend that dials only validated
+IPs and re-checks `server_addr`), extracts text with `trafilatura.extract` in a thread,
+makes exactly one reader-model call per page (no tools, delimited untrusted text, paced,
+429 breaker), and merges results into a new `ReadingList` (`fetched` / `fetch_failure` per
+item, `fetch` stats). The template renders the extra fields inside `{% if %}` blocks that
+emit nothing when the flag is off.
+
+Order of work is driven by two safety nets that must exist **before** anything changes:
+1. **Golden baseline first (T023).** HTML goldens and the `safe_summary()` key list are
+   generated from the code at commit `bb16231` (exported with `git archive` into the
+   scratchpad and put first on `PYTHONPATH`), plus a byte-identity test that passes on the
+   untouched tree. Every later task must keep it green; the template task (T033) is blocked
+   by it.
+2. **Restore `.env.example` (T024)** so the suite is back to 845/845 before new code lands.
+   **NEEDS USER CONFIRMATION at plan approval:** the file is deleted in the working tree
+   (uncommitted, user-side change). T024 restores it with
+   `git -C /home/kasif/projects/agent-foundry checkout -- newsletter_digest/.env.example`.
+   If the user wants it gone, T024 skips the restore, T027 creates no env-var lines, and
+   the full-suite criterion becomes "all pass except
+   `tests/test_config.py::test_default_mcp_args_pin_an_explicit_server_version`
+   (documented)".
+
+## AF-P2 Module breakdown
+
+| File | Change | Task |
+|---|---|---|
+| `tests/flag_off_fixture.py`, `tests/fixtures/flag_off_*_golden.html`, `tests/fixtures/flag_off_safe_summary_keys.json`, `tests/test_flag_off_identity.py` | Golden baseline from `bb16231` + byte-identity test | T023 |
+| `.env.example` (restore), `pyproject.toml`, `uv.lock`, stubs `links.py`, `netguard.py`, `extract.py`, `fetch.py`, `enrich.py`, `tests/fixtures/pages/` | Scaffold + `uv add` deps | T024 |
+| `src/newsletter_digest/links.py`, `store.py` | `LinkKind`, `classify_link`, `is_tracker_host`, tracker tables moved; store keeps old names | T025 |
+| `src/newsletter_digest/models.py`, `llm.py`, `agent.py` | AF-5 models; `ModelFactory` alias moves to `llm.py`, `agent.py` re-exports it | T026 |
+| `src/newsletter_digest/config.py`, `.env.example` | AF-6 `Settings` fields, `build(..., fetch_articles, max_fetch, fetch_env)`, validation, `safe_summary()` hiding; new env vars documented | T027 |
+| `src/newsletter_digest/netguard.py` | AF-3.1 URL policy, AF-3.2 address policy, AF-3.3 `GuardedTransport` | T028 |
+| `src/newsletter_digest/extract.py` | AF-4 `extract_article_text`, `ExtractedText` | T029 |
+| `src/newsletter_digest/fetch.py` | AF-3.4..3.7 `FetchConfig`, `PageFetcher`, `FetchedPage`, `RequestLedger`, classification | T030 |
+| `src/newsletter_digest/enrich.py`, `prompts.py` | AF-1 step 2, AF-7: pipeline, summariser, parser, pacer, breaker; summary prompt | T031 |
+| `src/newsletter_digest/agent.py`, `cli.py` | `enricher` injection point, flags, env reads, `_report` line | T032 |
+| `src/newsletter_digest/templates/reading_list.html.j2` (`render.py` only if needed) | AF-8 | T033 |
+| `tests/test_links.py`, `test_models_fetch.py`, `test_config_fetch.py`, `test_netguard.py`, `test_extract.py`, `test_fetch.py`, `test_enrich.py`, `test_render_fetch.py`, `test_wiring_fetch.py`, `test_architecture.py` | New tests (existing test files are never edited) | T034-T042 |
+| `README.md` | FR-031/FR-036 documentation | T043 |
+| `shared/reviews/T044_review.md`, `T045_review.md`, `T046_arch_review.md` | Reviews | T044-T046 |
+
+## AF-P3 Agent responsibilities
+
+| `assigned_to` | Tasks |
+|---|---|
+| `python_test` | T023 (golden baseline), T034-T042 (tests), T047 (final gate) |
+| `project_structure` | T024 |
+| `python_coder` | T025-T033 |
+| `documentation` | T043 |
+| `backend_reviewer` | T044 (SSRF / network security: links, netguard, extract, fetch), T045 (pipeline, untrusted text, output safety, wiring, flag-off identity) |
+| `architecture_reviewer` | T046 |
+
+Deviation from the generic ordering rule: the golden baseline (T023, `python_test`) has no
+blockers and the scaffold (T024, `project_structure`) is blocked by it, so the baseline is
+captured before `uv add` touches the environment and before any source or template edit.
+
+## AF-P4 Dependency graph
+
+```
+T023 golden baseline (bb16231)
+ └─► T024 scaffold: restore .env.example [confirm], uv add, stubs
+      ├─► T025 links ──────────────┐
+      ├─► T026 models+ModelFactory ┼──────────────┬─► T033 template (also ◄ T023)
+      ├─► T027 config ─────────────┤              │
+      ├─► T028 netguard ───────────┤              │
+      └─► T029 extract ────────────┴─► T030 fetch ─► T031 enrich+prompts ─► T032 agent+cli
+Tests:  T034◄T025  T035◄T026,T027  T036◄T028  T037◄T029  T038◄T030
+        T039◄T031  T040◄T033      T041◄T032  T042◄T025,T028,T029,T030,T031,T032
+Docs:   T043◄T032,T033
+Review: T044◄T025,T028,T029,T030,T036,T038     T045◄T026,T027,T031,T032,T033
+Arch:   T046◄T025..T033
+Final:  T047◄T034..T046
+```
+
+Parallel waves:
+1. T023
+2. T024
+3. T025, T026, T027, T028, T029
+4. T030, T033, T034, T035, T036, T037
+5. T031, T038, T040
+6. T032, T039, T044
+7. T041, T042, T043, T045, T046
+8. T047
+
+Statuses: new tasks are `pending` (== not started for ralph, as in section 4).
+
+## AF-P5 API contracts (binding; details in AF-2..AF-8)
+
+### links.py (stdlib only)
+```python
+class LinkKind(StrEnum): ARTICLE, TRACKER, UNSUBSCRIBE, PREFERENCES, VIEW_IN_BROWSER,
+                         SOCIAL, PIXEL, SPONSOR          # values: lower-case names
+TRACKER_HOSTS: frozenset[str]          # moved verbatim from store.py
+TRACKER_HOST_PREFIXES: tuple[str, ...] # moved verbatim from store.py
+def is_tracker_host(host: str) -> bool # same semantics as store._is_tracker_host
+def classify_link(url: str) -> LinkKind   # total, never raises; precedence
+    # UNSUBSCRIBE > PREFERENCES > VIEW_IN_BROWSER > PIXEL > SPONSOR > SOCIAL > TRACKER > ARTICLE
+FETCHABLE_KINDS: frozenset[LinkKind] = {ARTICLE, TRACKER}            # [plan addition]
+NEVER_REQUEST_KINDS: frozenset[LinkKind] = {UNSUBSCRIBE, PREFERENCES, VIEW_IN_BROWSER}
+                                                                      # [plan addition] hop check
+def ledger_key(url: str) -> str        # [plan addition] per-run "one request per URL" key:
+    # lower-cased scheme and host, default port and fragment dropped, path and query kept
+```
+`store.py` imports these and keeps `TRACKER_HOSTS`, `TRACKER_HOST_PREFIXES` and
+`_is_tracker_host = is_tracker_host` in its namespace (identity, not copies).
+
+### models.py (additions only; AF-5 verbatim)
+`MAX_FETCH_SUMMARY_CHARS`, `MAX_KEY_POINT_CHARS`, `MAX_KEY_POINTS`, `FetchFailure`
+(StrEnum, members and display values exactly as the AF-3.7 table; `DUPLICATE = "duplicate"`),
+`ArticleSummary`, `FetchedContent`, `ReadingItem.fetched` / `.fetch_failure` (defaults None,
+"not both" validator), `FetchStats` (`failed: dict[str, int]` via `default_factory`,
+`failed_total` as a plain `@property`, **not** `computed_field`, so `model_dump()` of
+existing models is unchanged except for the new None/default keys), `ReadingList.fetch:
+FetchStats | None = None`.
+
+### llm.py / agent.py
+`llm.ModelFactory = Callable[[str, Settings], BaseChatModel]`; `agent.py` does
+`from newsletter_digest.llm import ModelFactory, make_model` and keeps the name
+`agent.ModelFactory`. `make_model` is unchanged.
+
+### config.py
+New `Settings` fields with defaults (AF-6 table, appended after the existing fields):
+`fetch_articles`, `max_fetch`, `fetch_timeout`, `fetch_connect_timeout`,
+`fetch_max_redirects`, `fetch_max_bytes`, `fetch_max_chars`, `fetch_concurrency`,
+`fetch_llm_concurrency`, `fetch_llm_interval`.
+```python
+FETCH_ENV_VARS: dict[str, str]   # [plan addition] env var name -> Settings field name, e.g.
+    # "NEWSLETTER_FETCH_TIMEOUT": "fetch_timeout", ... (the 8 env-only settings)
+@classmethod
+def build(cls, *, <existing kwargs unchanged>, fetch_articles: bool = False,
+          max_fetch: int = 15, fetch_env: Mapping[str, str | None] | None = None) -> Settings
+    # fetch_env values are raw strings (None/blank = default); parse + range-check per AF-6;
+    # ConfigError names the env var. fetch_llm_interval default: 3.1 if
+    # reader_model.endswith(":free") else 0.0. Validation runs even with the flag off.
+def safe_summary(self) -> dict[str, object]
+    # unchanged keys when fetch_articles is False (no fetch_* / max_fetch / fetch_articles);
+    # all of them when True
+```
+**[plan addition]** `fetch_articles` itself is also hidden while False, so the flag-off key
+set equals the `bb16231` golden exactly.
+
+### netguard.py (imports no project module)
+```python
+MAX_URL_CHARS = 2048
+class UrlPolicyError(ValueError): ...         # .reason: str (short, no URL body)
+class BlockedAddressError(OSError): ...       # not an httpcore exception -> propagates
+BLOCKED_NETWORKS: tuple[IPv4Network | IPv6Network, ...]
+Resolver = Callable[[str, int], Awaitable[list[str]]]
+async def default_resolver(host: str, port: int) -> list[str]   # anyio.getaddrinfo, dedup, order kept
+def check_url_policy(url: httpx.URL | str) -> None              # raises UrlPolicyError (AF-3.1)
+def is_public_address(ip: str) -> bool                          # AF-3.2 unwrap + flags + BLOCKED_NETWORKS
+class GuardedNetworkBackend(httpcore.AsyncNetworkBackend):
+    def __init__(self, inner: httpcore.AsyncNetworkBackend, resolver: Resolver) -> None
+class GuardedTransport(httpx.AsyncHTTPTransport): ...           # replaces self._pool (R-F1)
+def build_guarded_transport(*, resolver: Resolver = default_resolver,
+                            inner_backend: httpcore.AsyncNetworkBackend | None = None,
+                            max_connections: int = 4) -> GuardedTransport
+```
+
+### extract.py (imports no project module)
+```python
+MIN_TEXT_CHARS = 400; MAX_TREE_SIZE = 100_000; TRUNCATION_MARKER = "\n[…truncated]"
+@dataclass(frozen=True)
+class ExtractedText: text: str; truncated: bool; chars: int
+Extractor = Callable[[bytes, int], ExtractedText | None]
+def extract_article_text(html: bytes, *, max_chars: int) -> ExtractedText | None
+```
+Only `trafilatura.extract` is called; every downloader helper is banned (T042 test).
+
+### fetch.py
+```python
+USER_AGENT: str   # f"newsletter-digest/{__version__} (personal reading-list tool)"
+@dataclass(frozen=True)
+class FetchConfig: timeout; connect_timeout; max_redirects; max_bytes; max_chars;
+                   concurrency
+    @classmethod
+    def from_settings(cls, settings: Settings) -> FetchConfig
+@dataclass(frozen=True)
+class FetchedPage: url: str; status: int; content_type: str; byte_count: int;
+                   text: ExtractedText                      # extraction already done
+class RequestLedger: async def claim(self, url: str) -> bool  # False if url_key seen this run
+class PageFetcher:   # async context manager owning one httpx.AsyncClient (AF-3.4)
+    def __init__(self, config: FetchConfig, *, transport: httpx.AsyncBaseTransport | None = None,
+                 resolver: Resolver | None = None,
+                 inner_backend: httpcore.AsyncNetworkBackend | None = None,
+                 extractor: Extractor = extract_article_text) -> None
+    async def fetch(self, url: str) -> FetchedPage | FetchFailure   # never raises Exception
+```
+**[plan addition]** `PageFetcher.fetch` owns the AF-3.5 total deadline and runs the
+extractor via `anyio.to_thread.run_sync`, so `TOO_SHORT` and the paywall JSON-LD rule
+(which needs extracted-text length) are decided in one place. AF-3.6 keys the ledger by
+`store.url_key`, but `fetch` must not import its peer `store`, so the ledger key is
+`links.ledger_key(url)` **[plan addition]** (see links.py above). The enricher's concurrency
+cap is the `CapacityLimiter`; `max_connections` of the pool equals `fetch_concurrency`.
+
+### prompts.py (additions)
+`SUMMARY_SYSTEM_PROMPT: str`, `ARTICLE_DELIMITER_RE: re.Pattern[str]` (covers ARTICLE and
+EMAIL look-alikes), `build_summary_message(title: str, url: str, text: str) -> str` (AF-7
+block; scrubs all three inputs).
+
+### enrich.py
+```python
+class Summariser(Protocol):
+    async def __call__(self, title: str, url: str, text: str) -> ArticleSummary
+class SummaryError(Exception): category: FetchFailure   # SUMMARY_FAILED | RATE_LIMITED
+class Enricher(Protocol):
+    async def __call__(self, reading_list: ReadingList, rankings: Mapping[str, RankedItem],
+                       settings: Settings, *, model_factory: ModelFactory) -> ReadingList
+class RatePacer: def __init__(self, min_interval: float, clock=time.monotonic) -> None
+                 async def wait(self) -> None
+class LLMSummariser:   # one model.ainvoke per call; never bind_tools; 429 -> RATE_LIMITED
+    def __init__(self, model: BaseChatModel) -> None
+def parse_summary(text: str) -> ArticleSummary          # raises SummaryError(SUMMARY_FAILED)
+@dataclass(frozen=True)
+class Candidates: selected: list[ReadingItem]; eligible: int; excluded: int   # [plan addition]
+def select_candidates(reading_list: ReadingList, rankings: Mapping[str, RankedItem],
+                      max_fetch: int) -> Candidates
+def merge_results(reading_list: ReadingList, outcomes: Mapping[str, ItemOutcome],
+                  stats: FetchStats) -> ReadingList
+async def enrich_reading_list(reading_list, rankings, settings, *, model_factory,
+                              fetcher_factory=PageFetcher, summariser: Summariser | None = None,
+                              pacer: RatePacer | None = None) -> ReadingList
+```
+`ItemOutcome` = `FetchedContent | FetchFailure` (DUPLICATE = quiet skip). The reader model
+is built lazily, at most once, only when a page extracted successfully.
+
+### agent.py / cli.py
+`run_digest(settings, *, gmail_opener=..., model_factory=..., agent_builder=...,
+enricher: Enricher = enrich_reading_list)`; the enricher is awaited only when
+`settings.fetch_articles`, after the `async with gmail_opener(...)` block, wrapped so any
+`Exception` logs one WARNING and returns the un-enriched list with
+`fetch=FetchStats(skipped_reason="internal error")`. CLI: `--fetch-articles`
+(`is_flag`, `envvar="NEWSLETTER_FETCH_ARTICLES"`, `show_envvar=True`), `--max-fetch`
+(`IntRange(1, 50)`, default 15, `envvar="NEWSLETTER_MAX_FETCH"`), the other eight vars read
+with `os.environ.get` into `fetch_env`; `_report` prints "Article pages: F fetched and
+summarised, X couldn't be fetched" only when `reading_list.fetch` is not None.
+
+## AF-P6 Key decisions (planning level)
+
+1. **Golden from the archived commit, not from "current code"**: makes the baseline
+   independent of task ordering mistakes. The fixture builder uses only model fields that
+   exist at `bb16231` and is shared with the identity test.
+2. **Existing test files are never edited.** New behaviour gets new test files, so "the
+   existing 845 tests pass unchanged" is checkable with
+   `git diff --stat bb16231 -- newsletter_digest/tests/` (only added files). T047 checks it.
+3. **Two security nets for SSRF**: T036 tests the guarded transport directly with a fake
+   resolver and a scripted inner `httpcore` backend (no `MockTransport`, so the real
+   `GuardedNetworkBackend` runs), including redirect-to-private via a plain
+   `httpx.AsyncClient`; T038 re-runs the key cases through `PageFetcher`. The `_pool` canary
+   (recording resolver must be called) lives in T036.
+4. **Ledger key in `links.py`** (not `store.url_key`) to keep `fetch` from importing
+   `store` (peer rule, AF-2).
+5. **`fetch_articles` hidden from `safe_summary()` when False** (stricter than AF-6's
+   "every fetch_* field"), so the key set equals the golden.
+6. **Two backend reviews** like T019/T020: T044 is the SSRF/network review and waits for the
+   SSRF tests (T036, T038) so it can judge the matrix; T045 covers LLM/untrusted text, output
+   safety and wiring.
+7. **Manual end-to-end (acceptance 15)** needs real Gmail OAuth and OpenRouter; T047 runs
+   the offline gates and lists the manual command for the user, it does not block on it.
+
+## AF-P7 Library verification rows (owned by tasks)
+
+T024 adds a `## Library verification (article fetching, 2026-11-01)` table to
+`shared/implementation-notes.md`, directly before `## Task notes`, with these rows
+(Result cells `TODO`):
+
+| ID | Item | Owner |
+|---|---|---|
+| V11 | Versions pinned by `uv add` (httpx, httpcore, trafilatura, lxml, lxml_html_clean, charset-normalizer) and `uv lock --check` | T024 |
+| V12 | httpx `AsyncHTTPTransport` still stores its pool in `_pool` and delegates `handle_async_request` to it; `httpcore.AsyncConnectionPool(network_backend=..., ssl_context=..., retries=...)` signature | T028 |
+| V13 | httpcore `start_tls` uses the origin host as `server_hostname` when the dialled host is an IP literal (cert verified against the hostname) | T028 |
+| V14 | `AnyIOBackend` stream `get_extra_info("server_addr")` shape (tuple vs None) | T028 |
+| V15 | `ipaddress` `is_global`/`is_reserved` results for the AF-3.2 matrix on the venv's Python 3.13.5 | T028 |
+| V16 | httpx request event hooks run for every redirect hop; `TooManyRedirects` raised above `max_redirects` | T030 |
+| V17 | Deny-all `CookieJar` policy sends no `Cookie` header across hops; `trust_env=False` ignores `HTTP(S)_PROXY` | T030 |
+| V18 | `trafilatura.extract` signature on the pinned version; `MAX_TREE_SIZE` behaviour; `extract()` performs no network I/O | T029 |
+| V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 |
+| V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 |
+
+## AF-P8 Process rules (additions to section 8)
+
+- Every task reads `shared/designs.md` AF-1..AF-13 and this section first.
+- Each coder/test task appends its own `## T0xx — <title>` section to
+  `shared/implementation-notes.md` (re-read before editing; targeted edits only) and fills
+  its owned V-rows. Record every deviation from AF-* (FR-022, FR-036).
+- `tests/test_flag_off_identity.py` must pass at the end of every task. A task that breaks
+  it is not done.
+- Never use `trafilatura.fetch_url` or any trafilatura downloader; never pass
+  `trust_env=True`; never log page bodies, summaries or keys.
+- Stage only your own files and commit in one command (learnings T007/T019); check
+  `git show --stat HEAD` after committing. `shared/task_list.json` keeps the
+  `json.dumps(indent=2, ensure_ascii=True)`, no-trailing-newline format.
+- Local commits only; never push.

@@ -167,3 +167,9 @@ Resolved in `shared/designs.md` (Decisions D1-D10): `--query`/`--window` precede
 Open architecture decisions (re-verify against pinned libraries at implementation time):
 - MCP session lifetime: prefer `client.session("gmail")` + `load_mcp_tools` (one `npx` process per run) over `get_tools()` if the latter starts a session per call.
 - deepagents built-ins: pass the in-state filesystem backend explicitly, and disable the default general-purpose subagent if the API allows (otherwise forbid it in the prompt).
+
+Open architecture decisions (article fetching, added 2026-11-01 by design; see `shared/designs.md` "Article fetching (2026-11-01)", AF-13). None blocks planning:
+- SSRF guard wiring relies on replacing the private `httpx.AsyncHTTPTransport._pool` with an `httpcore.AsyncConnectionPool(network_backend=GuardedNetworkBackend)`. Recommended: accept it, with `httpx>=0.28.1,<0.29` and a canary test; fall back to a custom `AsyncBaseTransport` if httpx changes.
+- Summary output format: tolerant JSON parse of plain model output (recommended) vs `with_structured_output`/`response_format`. Revisit if `SUMMARY_FAILED` is frequent on the free reader model.
+- Design additions beyond FR-035, to confirm at plan approval: `NEWSLETTER_FETCH_LLM_INTERVAL` (3.1 s pacing between call starts for `:free` models, under OpenRouter's 20 RPM free limit), a run-level 429 breaker, and `Accept-Encoding: identity` with a bounded gzip/deflate decoder.
+- Risk: OpenRouter free tier allows 50 requests/day for accounts with under 10 credits purchased, which the agent run alone may exhaust. The README must say so.
