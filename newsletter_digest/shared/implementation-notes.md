@@ -1138,3 +1138,47 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   usage was checked by running the models instead.
 - Verified: ruff format/check and pyrefly clean (0 errors); `uv run pytest` 858 passed,
   including `tests/test_flag_off_identity.py`. No test files edited.
+
+## T027 — config.py fetch settings, env parsing, safe_summary hiding; new vars in .env.example
+
+- **Fields**: the ten AF-6 fields are appended after `reader_parallelism` with the AF-6
+  defaults (named `DEFAULT_*` constants). The dataclass default of `fetch_llm_interval` is
+  `0.0`; the `:free` default (3.1 s) is applied only in `Settings.build`, which knows the
+  resolved reader model (`--reader-model` or, if blank, the main model). An explicit
+  `NEWSLETTER_FETCH_LLM_INTERVAL` (including `0`) wins.
+- **Design addition beyond FR-035**: `fetch_llm_interval` / `NEWSLETTER_FETCH_LLM_INTERVAL`
+  (pacing for OpenRouter `:free` models, AF-7). Listed in prd.md for confirmation.
+- **Validation runs with the flag off** (decision recorded as asked): a bad fetch env value
+  or `max_fetch` outside 1..50 always raises `ConfigError` (exit 2), consistent with the
+  other config errors. The new checks run after all existing ones, so the error a user sees
+  for an existing bad setting is unchanged. `--max-fetch` without the flag is accepted
+  silently (no log line).
+- **Parsing** (`_env_number`, private): `None`, missing or blank -> default; values are
+  stripped; int fields use `int()` (so `"2.0"` is rejected), float fields use `float()`.
+  NaN and inf fail the inclusive range check. Parse and range failures share one message:
+  `<ENV_VAR> must be an integer|a number between <low> and <high>, got '<raw>'.`
+  Env values are not secret, so the raw value is echoed (same as `--window`).
+  Unknown keys in `fetch_env` are ignored; only the `FETCH_ENV_VARS` names are read.
+- **Not covered by the spec — connect-timeout default clamp**: AF-6 bounds
+  `fetch_connect_timeout` to `0.5..fetch_timeout`. If the user sets only
+  `NEWSLETTER_FETCH_TIMEOUT` below 5, the unset connect timeout defaults to
+  `min(5.0, fetch_timeout)` instead of failing on a variable the user never set. An
+  explicit connect timeout above the fetch timeout is still an error (its message gives the
+  resolved fetch timeout as the upper bound).
+- `max_fetch` error names both sources: `--max-fetch (NEWSLETTER_MAX_FETCH) must be between
+  1 and 50, got N.` click's `IntRange` (T032) will normally catch it first.
+- **safe_summary()**: `FETCH_SUMMARY_FIELDS` (`fetch_articles`, `max_fetch` and the eight
+  `fetch_*` fields) are hidden while `fetch_articles` is False, so the key set and the
+  dict order equal the bb16231 golden; with the flag on all ten appear after the existing
+  keys. The API key is excluded in both cases.
+- **`.env.example` NEEDS USER CONFIRMATION at review**: appended after the unchanged
+  `GMAIL_MCP_ARGS=...` line (and its newline) a blank line plus a commented block for
+  `NEWSLETTER_FETCH_ARTICLES`, `NEWSLETTER_MAX_FETCH` and the eight env-only vars, each
+  with default and range, every assignment commented out. Checked with
+  `dotenv_values('.env.example')`: no fetch key is set, so copying it to `.env` changes no
+  behaviour. `NEWSLETTER_FETCH_LLM_INTERVAL=` is shown blank, because its default depends
+  on the reader model and uncommenting a fixed `0` would change pacing for `:free` models.
+- No V-rows are owned by T027. context7 was not needed (stdlib only).
+- Verified: ruff format/check and pyrefly clean (0 errors); `uv run pytest` 858 passed,
+  including `tests/test_flag_off_identity.py` and the `.env.example` pin test. No test
+  files edited.

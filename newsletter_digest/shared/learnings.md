@@ -185,3 +185,7 @@
   already-transitive deps (httpx, httpcore) just promotes them to direct dependencies.
 - (T024) `uv run ruff format --check .` also checks code blocks in `shared/*.md`; use
   `ruff format <own files>` and `ruff check .` instead of a whole-tree format check.
+- (T027) Parallel agents dispatched from one session share the SAME scratchpad
+  directory: a generic `probe.py` written there was overwritten by another agent between
+  the write and the run (the output came from their extract probe). Prefix scratch
+  files with your task id (`t027_probe.py`).
