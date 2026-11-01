@@ -18,7 +18,11 @@ DATE_OPERATOR_RE = re.compile(r"\b(newer_than|older_than|after|before):", re.I)
 DEFAULT_API_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_LABEL = "Newsletters"
 DEFAULT_MCP_COMMAND = "npx"
-DEFAULT_MCP_ARGS = "@gongrzhe/server-gmail-autoauth-mcp"
+# Pinned on purpose (supply chain): the server holds broad Gmail OAuth access, and the
+# tool names, args and output formats in gmail_mcp.py were verified against this
+# version. Upgrading means re-verifying them (README: Pinned server version).
+GMAIL_MCP_PACKAGE = "@gongrzhe/server-gmail-autoauth-mcp@1.1.11"
+DEFAULT_MCP_ARGS = GMAIL_MCP_PACKAGE
 MIN_MAX_EMAILS = 1
 MAX_MAX_EMAILS = 200
 MAX_WINDOW_DAYS = 365

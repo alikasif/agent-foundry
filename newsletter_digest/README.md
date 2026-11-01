@@ -31,9 +31,10 @@ uv run newsletter-digest --help
 
 Gmail access goes through the community MCP server
 [`@gongrzhe/server-gmail-autoauth-mcp`](https://www.npmjs.com/package/@gongrzhe/server-gmail-autoauth-mcp),
-which `npx` downloads and starts for each run. You authorise it once with your own Google
-OAuth client. Error messages from this tool that end with "See README: Gmail MCP setup."
-point here.
+which `npx` starts for each run. The default is pinned to version 1.1.11 (see
+[Pinned server version](#pinned-server-version)). You authorise it once with your own
+Google OAuth client. Error messages from this tool that end with "See README: Gmail MCP
+setup." point here.
 
 ### 1. Create the OAuth client
 
@@ -62,7 +63,7 @@ Keep the file only in `~/.gmail-mcp/`.
 ### 3. Authorise once
 
 ```bash
-npx @gongrzhe/server-gmail-autoauth-mcp auth
+npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth
 ```
 
 A browser window opens for the Google consent screen. While the app is in testing mode
@@ -83,14 +84,32 @@ proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` in upper and lower case
 environment (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`). In particular
 `OPENROUTER_API_KEY` is never passed to the Node process.
 
+### Pinned server version
+
+The default `GMAIL_MCP_ARGS` is `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, an exact
+version, on purpose. The server is third-party code with broad Gmail OAuth access, and an
+unpinned spec would make `npx` download and run whatever release is newest. The tool
+names, argument names and output formats this tool relies on were verified against
+1.1.11. If your `.env` was copied from an older `.env.example`, update its
+`GMAIL_MCP_ARGS` line to the pinned value.
+
+To upgrade:
+
+1. Review the new release, then bump the version in `GMAIL_MCP_PACKAGE`
+   (`src/newsletter_digest/config.py`) and in `.env.example` (or only in your own
+   `GMAIL_MCP_ARGS` to try it locally).
+2. Re-check that `search_emails` and `read_email` still exist with the same argument
+   names and output format (`gmail_mcp.py` holds the mapping and the parsers).
+3. Run `uv run pytest` and `uv run pytest -m integration`.
+
 ### Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
 | `'npx' not found on PATH; install Node.js >= 18 ...` | Install Node.js 18+ so `npx` is on your `PATH`, or set `GMAIL_MCP_COMMAND` to another launcher. |
-| `Could not start the Gmail MCP server ...` or `Gmail search failed ...` | The keys file is missing or misplaced, or the token expired or was revoked. Check `~/.gmail-mcp/gcp-oauth.keys.json`, then re-run `npx @gongrzhe/server-gmail-autoauth-mcp auth`. |
+| `Could not start the Gmail MCP server ...` or `Gmail search failed ...` | The keys file is missing or misplaced, or the token expired or was revoked. Check `~/.gmail-mcp/gcp-oauth.keys.json`, then re-run `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth`. |
 | Token expires after about a week | An OAuth app in **Testing** mode issues refresh tokens that expire after 7 days. Re-run the `auth` command, or publish the app to production in the consent screen. |
-| `The Gmail MCP server does not offer the required read-only tool(s) ...` | `GMAIL_MCP_ARGS` does not point at `@gongrzhe/server-gmail-autoauth-mcp`, or a different server version renamed `search_emails` / `read_email`. |
+| `The Gmail MCP server does not offer the required read-only tool(s) ...` | `GMAIL_MCP_ARGS` does not point at `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, or a different server version renamed `search_emails` / `read_email`. |
 | `Could not parse the Gmail MCP search_emails output` | The server's output format changed. The tool was verified against server version 1.1.11. |
 | Startup fails and the working directory has `gcp-oauth.keys.json` | Remove it from the working directory (see step 2). |
 
@@ -129,7 +148,7 @@ is already set in your shell wins over the same variable in `.env`.
 | `NEWSLETTER_READER_MODEL` | value of `NEWSLETTER_MODEL` | Cheaper model for the per-email reader subagents. |
 | `NEWSLETTER_LABEL` | `Newsletters` | Gmail label to search. |
 | `GMAIL_MCP_COMMAND` | `npx` | Command that launches the Gmail MCP server. Environment only. |
-| `GMAIL_MCP_ARGS` | `@gongrzhe/server-gmail-autoauth-mcp` | Arguments for that command, parsed with shell-style quoting. Environment only. |
+| `GMAIL_MCP_ARGS` | `@gongrzhe/server-gmail-autoauth-mcp@1.1.11` | Arguments for that command, parsed with shell-style quoting. Environment only. |
 
 Blank values count as unset. `GMAIL_OAUTH_PATH`, `GMAIL_CREDENTIALS_PATH`, proxy
 variables and `NODE_EXTRA_CA_CERTS` are forwarded to the MCP server if set (see
@@ -244,6 +263,10 @@ The tool is designed so that a run can read your newsletters and nothing else.
 - **Credentials stay with the server.** Tokens and keys live in `~/.gmail-mcp/` and are
   read only by the MCP server. This tool does not read them, and the API key is excluded
   from logs and from the MCP subprocess environment.
+- **The server version is pinned.** The MCP server is third-party code that holds your
+  Gmail token, so the default `GMAIL_MCP_ARGS` names an exact release instead of letting
+  `npx` fetch the latest one on every run. See
+  [Pinned server version](#pinned-server-version).
 - **Email content is untrusted data.** Each email is stripped of HTML, hidden elements
   and zero-width characters, truncated, and wrapped in markers that tell the model it is
   data and not instructions. The prompts tell the model to ignore instructions found in
@@ -305,8 +328,9 @@ Source lives in `src/newsletter_digest/`:
 - Gmail search returns one page: there is no pagination, so at most `--max-emails` (up to
   200) of the matching emails are processed.
 - The Gmail MCP integration was checked against `@gongrzhe/server-gmail-autoauth-mcp`
-  1.1.11 by reading its source and with a fake server, not against a live Gmail account.
-  Other versions may change tool or output formats.
+  1.1.11, the pinned default, by reading its source and with a fake server, not against
+  a live Gmail account. Other versions (set through `GMAIL_MCP_ARGS`) may change tool or
+  output formats.
 - Emails are truncated to 30,000 characters each; very long newsletters may lose their
   tail.
 - Extraction, de-duplication and ranking depend on the model, so results can vary between

@@ -1,8 +1,8 @@
 """Gmail MCP connection, read-only tool allowlist and email text preparation.
 
 This is the only module that knows the Gmail MCP server's tool names, argument
-names and output formats (verified against @gongrzhe/server-gmail-autoauth-mcp
-1.1.11). Everything else talks to Gmail through the helpers here.
+names and output formats (verified against the pinned default server,
+``config.GMAIL_MCP_PACKAGE``). Everything else talks to Gmail through the helpers here.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 
-from newsletter_digest.config import Settings
+from newsletter_digest.config import GMAIL_MCP_PACKAGE, Settings
 from newsletter_digest.models import EmailRef
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ README_HINT = "See README: Gmail MCP setup."
 AUTH_HINT = (
     "If Gmail is not authorised yet, put your OAuth client file at "
     "~/.gmail-mcp/gcp-oauth.keys.json and run "
-    "`npx @gongrzhe/server-gmail-autoauth-mcp auth` once."
+    f"`npx {GMAIL_MCP_PACKAGE} auth` once."
 )
 SERVER_NAME = "gmail"
 
@@ -139,8 +139,7 @@ def filter_read_only(
     if missing:
         raise GmailMCPError(
             f"The Gmail MCP server does not offer the required read-only tool(s) "
-            f"{missing}; check GMAIL_MCP_ARGS points at "
-            "@gongrzhe/server-gmail-autoauth-mcp."
+            f"{missing}; check GMAIL_MCP_ARGS points at {GMAIL_MCP_PACKAGE}."
         )
     exposed = {logical: offered[server] for logical, server in tool_map.items()}
     logger.info("Gmail MCP tools exposed (read-only): %s", sorted(exposed))

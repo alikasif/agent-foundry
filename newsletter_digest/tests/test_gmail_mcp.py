@@ -44,7 +44,7 @@ from newsletter_digest.gmail_mcp import (
 from newsletter_digest.models import EmailRef
 
 README_POINTER = "See README: Gmail MCP setup."
-AUTH_COMMAND = "npx @gongrzhe/server-gmail-autoauth-mcp auth"
+AUTH_COMMAND = "npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth"
 OAUTH_KEYS_PATH = "~/.gmail-mcp/gcp-oauth.keys.json"
 ALLOWLIST = frozenset({"search_emails", "read_email"})
 # Every tool offered by @gongrzhe/server-gmail-autoauth-mcp 1.1.11 (V7).

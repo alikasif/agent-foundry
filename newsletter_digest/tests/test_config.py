@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from newsletter_digest.config import (
 )
 
 SECRET_KEY = "sk-or-v1-super-secret-test-key"
-DEFAULT_MCP_ARGS = ("@gongrzhe/server-gmail-autoauth-mcp",)
+DEFAULT_MCP_ARGS = ("@gongrzhe/server-gmail-autoauth-mcp@1.1.11",)
 
 BuildSettings = Callable[..., Settings]
 
@@ -244,7 +245,7 @@ def test_settings_build_uses_explicit_values(make_settings: BuildSettings) -> No
 @pytest.mark.parametrize(
     ("raw_args", "expected"),
     [
-        ("@gongrzhe/server-gmail-autoauth-mcp", DEFAULT_MCP_ARGS),
+        ("@gongrzhe/server-gmail-autoauth-mcp@1.1.11", DEFAULT_MCP_ARGS),
         ("-y @scope/server --flag", ("-y", "@scope/server", "--flag")),
         (
             "server.js --creds '/path with spaces/creds.json'",
@@ -257,6 +258,15 @@ def test_settings_build_parses_mcp_args_with_shlex(
     make_settings: BuildSettings, raw_args: str, expected: tuple[str, ...]
 ) -> None:
     assert make_settings(mcp_args=raw_args).gmail_mcp_args == expected
+
+
+def test_default_mcp_args_pin_an_explicit_server_version() -> None:
+    # Supply-chain guard: an unpinned spec makes npx fetch the latest release.
+    pinned = re.compile(r"@gongrzhe/server-gmail-autoauth-mcp@\d+\.\d+\.\d+")
+    assert pinned.fullmatch(config.GMAIL_MCP_PACKAGE)
+    assert config.DEFAULT_MCP_ARGS == config.GMAIL_MCP_PACKAGE
+    env_example = (Path(__file__).parents[1] / ".env.example").read_text()
+    assert f"\nGMAIL_MCP_ARGS={config.GMAIL_MCP_PACKAGE}\n" in env_example
 
 
 def test_settings_build_unparsable_mcp_args_raise_config_error(

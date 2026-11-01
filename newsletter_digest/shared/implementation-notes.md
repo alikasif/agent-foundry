@@ -926,3 +926,67 @@ test or config file was changed.
   `tests/test_cli.py:30`, `tests/test_config.py:23`).
 - The live integration tests were collected but not run: they need Gmail OAuth, npx
   and a real OpenRouter key.
+
+## F001 — pin Gmail MCP server version
+
+Ad-hoc follow-up (2026-11-01), not in task_list.json. The default `GMAIL_MCP_ARGS` was
+the unpinned `@gongrzhe/server-gmail-autoauth-mcp`, so every run let `npx` fetch the
+newest npm release of third-party code that holds broad Gmail OAuth access. It is now
+pinned to `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, the version V7–V9 verified.
+
+Decisions:
+
+- One source of truth: `config.GMAIL_MCP_PACKAGE` holds the pinned spec, and
+  `DEFAULT_MCP_ARGS = GMAIL_MCP_PACKAGE`. `gmail_mcp.py` imports it for `AUTH_HINT` and
+  the missing-tool error, keeping the existing direction (gmail_mcp -> config). Both
+  constants are kept: `DEFAULT_MCP_ARGS` is the settings default (and `tests/test_cli.py`
+  imports it), while `GMAIL_MCP_PACKAGE` names the package for messages.
+- `.env.example`, README and the PRD repeat the literal string, since they are not
+  Python. `test_default_mcp_args_pin_an_explicit_server_version` asserts that the
+  constant matches `@gongrzhe/server-gmail-autoauth-mcp@X.Y.Z` and that `.env.example`
+  has exactly `GMAIL_MCP_ARGS=<GMAIL_MCP_PACKAGE>`. So the default cannot silently go back
+  to unpinned, and the example file cannot drift from source. A scratch mutation
+  (unpinned constant) makes that test fail.
+- The tests keep literal expected values (`tests/test_config.py` `DEFAULT_MCP_ARGS`,
+  `tests/test_gmail_mcp.py` `AUTH_COMMAND`) rather than importing the constant, so they
+  check the actual value and not just self-consistency.
+- The `-y @gongrzhe/server-gmail-autoauth-mcp` args in `tests/test_gmail_mcp.py` (lines
+  ~273 and ~335) were left alone: they test arbitrary arg pass-through, not the default.
+- README: a new "Pinned server version" subsection in Gmail MCP setup explains why and
+  how to upgrade (bump `GMAIL_MCP_PACKAGE` and `.env.example`, re-check `search_emails` /
+  `read_email` names, args and output format, then `uv run pytest` and
+  `uv run pytest -m integration`). There is also a one-line bullet in Safety model that
+  links to it. The auth commands, troubleshooting rows, defaults table and Limitations
+  line now name the pinned spec.
+- `npm view @gongrzhe/server-gmail-autoauth-mcp@1.1.11` resolves (integrity
+  `sha512-IP9nbCmJ...`). 1.1.11 is also the current `latest` on npm as of 2026-11-01, so
+  the pin changes nothing at runtime today. It only stops future releases from being
+  picked up silently.
+
+Tradeoffs:
+
+- A version pin is not an integrity pin: `npx` trusts the registry for what `1.1.11`
+  resolves to, and its own dependencies resolve within their semver ranges (no lockfile
+  for npx installs). Pinning removes the "newest release on every run" exposure, but not
+  every supply-chain risk. A vendored or lockfile-installed server would be stronger, at
+  the cost of more setup.
+- Upgrades are now manual. Security fixes in newer server releases are not picked up
+  until someone bumps the pin and re-verifies.
+- An existing user `.env` copied from the old `.env.example` still has the unpinned
+  value, and env overrides the default. No warning is logged for unpinned custom
+  `GMAIL_MCP_ARGS`, because users may legitimately point it at another server. The README
+  tells them to update the line. No `.env` exists in this checkout.
+
+Official Google Gmail MCP server: evaluated and deferred. It is Developer Preview only,
+gated to program members, and the user is not in the program. The tool-name and argument
+maps in `gmail_mcp.py` remain the single place to change if it is adopted later.
+
+Historical files (designs.md, verified_facts.md, plan.md, reviews/) were left unchanged.
+The PRD got the pinned default in FR-004, FR-021 and the Tech Stack Gmail line, plus a
+dated 2026-11-01 note.
+
+Checks: `uv run pytest -q` 845 passed, 2 deselected (844 before plus the new test);
+`uv run ruff format --check .` 47 files already formatted (the count includes untracked
+`.claude/agent-memory/*.md` files, not this change); `uv run ruff check .` all checks
+passed; `uv run pyrefly check` 0 errors (2 suppressed); `uv run newsletter-digest --help`
+exit 0.
