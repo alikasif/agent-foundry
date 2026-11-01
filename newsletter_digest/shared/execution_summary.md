@@ -48,3 +48,38 @@ Status: ALL_DONE (22/22 tasks done). RALPH_COMPLETE.
 ## Open items (non-blocking, MINOR)
 - m3, m4 (round 1) remain open.
 - m5: tools.py handle_unexpected uses unstripped email_id (negligible impact).
+
+---
+
+# Article fetching (2026-11-01), tasks T023-T047
+
+Status: ALL_DONE (T023-T047 done). Flag `--fetch-articles` is off by default; flag-off output is byte-identical to bb16231 (golden baseline T023).
+
+## Tasks
+- T023 golden baseline; T024 scaffold (httpx 0.28.1, httpcore 1.0.9, trafilatura 2.3.1; .env.example restored per user confirmation)
+- T025 links.py; T026 fetch models; T027 fetch settings and .env.example vars; T028 netguard.py; T029 extract.py; T030 fetch.py; T031 enrich.py and prompts; T032 agent/cli wiring; T033 template
+- T034-T042 tests (links, models/config, SSRF matrix, extract, fetch, enrich/prompts, render, wiring, architecture guards); T043 README
+- T044 backend/security review: round 1 NEEDS_CHANGES (challenge-marker false positive on raw HTML, redirect loop reported as DUPLICATE, TLS-verify test gap), round 2 APPROVED
+- T045 backend review: round 1 NEEDS_CHANGES (429 breaker checked before HTTP limiter, no re-check after pacer wait), round 2 APPROVED
+- T046 architecture review: round 1 APPROVED
+- T047 final gate
+
+## Final verification
+- pytest: 2410 passed, 2 deselected, 0 xfailed; identity + architecture + netguard: 290 passed
+- ruff format --check and ruff check clean; pyrefly 0 errors (6 suppressed, all justified)
+- CLI: --help lists --fetch-articles and --max-fetch; bad NEWSLETTER_FETCH_TIMEOUT and --max-fetch 0 exit 2
+- Offline CLI smoke, flag on: exit 0, 3 page requests via MockTransport, 2 summarised, 1 HTTP_ERROR, 0 real network attempts; flag off: 0 requests, HTML byte-identical to bb16231
+- No secrets, .env or out/ committed
+
+## Deviations from the design
+- trafilatura 2.3.1 rejects max_tree_size=; passed via config= instead (extract.py)
+- Extractor alias made positional-compatible via extract.default_extractor
+- Embedded IPv4 in IPv6 always blocked (breaks DNS64-only networks)
+- Redirect bodies dropped unread via a response hook; per-fetch chain tracking via request extension
+- Fetch env vars validated even with flag off; fetch_llm_interval added (3.1s for :free models)
+- run_digest converts enricher exceptions to skipped_reason "internal error"
+
+## Open (non-blocking)
+- T046 #2 (shared untrusted.py for delimiter regex), #4-#7 deferred; T044 #5 (Azure WireServer 168.63.129.16) not blocked
+- Free-tier rate-limit numbers in README should be re-checked against OpenRouter docs
+- Manual end-to-end not run: `uv run newsletter-digest --window 1w --max-emails 5 --fetch-articles --max-fetch 5 --open`
