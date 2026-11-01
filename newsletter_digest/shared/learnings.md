@@ -272,3 +272,10 @@
   code to quiet it.
 - (T032) click 8.5 `is_flag` + `envvar`: blank/whitespace -> False, an unknown value
   (e.g. `2`) -> exit 2 naming the option and env var; the CLI flag beats an env `0`.
+- (T039) In an anyio task-group pipeline where every task is started at once, a
+  "breaker open?" check placed before `async with limiter` runs for all tasks at start-up,
+  so it never fires for tasks that are merely queued on the limiter. Check shared state
+  after acquiring the limiter. A strict-xfail test with slow fetches and a fast 429 shows it.
+- (T039) pyrefly cannot pick a `sorted(..., key=f)` overload when `f` takes
+  `list[BaseMessage]` and the iterable is inferred as `list[HumanMessage | SystemMessage]`
+  (list invariance). Annotate the container as `list[BaseMessage]`.

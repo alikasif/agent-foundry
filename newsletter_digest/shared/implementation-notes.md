@@ -1954,3 +1954,55 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   propagates. No tests added (wiring tests are T041). Existing `tests/test_cli.py`,
   `tests/test_agent.py` and `tests/test_flag_off_identity.py` pass unchanged; full suite
   1981 passed, 2 deselected, 1 xfailed; ruff and pyrefly clean.
+
+## T039 — Tests for enrich.py and summary prompts
+
+- **Files**: `tests/test_enrich.py` (119 tests + 1 strict xfail) and
+  `tests/test_prompts_summary.py` (123 tests). All offline: fake fetcher factory (scripted
+  `FetchedPage | FetchFailure | BaseException` per URL, peak in-flight, config/enter/exit
+  records), `FakeChatModel(BaseChatModel)` overriding `ainvoke` only (records messages,
+  kwargs, config, start times, peak concurrency; `bind_tools`, `with_structured_output`,
+  `invoke` and `_generate` record the attempt and raise), `FakeModelFactory` counting builds.
+  No network; the real `openai.RateLimitError` case is built offline from an
+  `httpx2.Response(429)` (no request is sent).
+- **Fake model is a `BaseChatModel` subclass**, not a bare object with `ainvoke`, so it
+  type-checks as `ModelFactory`'s return type without casts. Everything except `ainvoke`
+  raises, which keeps the "ainvoke only" intent.
+- **Pacer**: unit tests use a fake clock whose `sleep` advances time (T031's `sleep=`
+  kwarg). The pipeline test injects that pacer and asserts LLM call starts are >= 3.1 s
+  apart in fake time; one short real-time test (0.1 s) checks that the default pacer is
+  built from `settings.fetch_llm_interval`.
+- **Breaker**: tested with `status_code=429`, `response.status_code=429` and a real
+  `openai.RateLimitError`; LLM concurrency 1 so "queued" is deterministic. Asserts exactly
+  one call and every selected item `RATE_LIMITED`; earlier successes stand; breaker is per
+  run. Non-429 errors (500, 503, 401, timeout, others) and unusable replies fail only that
+  item.
+- **Laziness**: build events are interleaved with fetch events in one log, so the test
+  proves the model is built after the first extracted page (and never when every fetch
+  fails, the list is unranked, nothing is eligible, or a summariser is injected).
+- **Contract choices I tested that the spec leaves open** (from T031 notes): the summary
+  message uses the newsletter `item.url`, not the final `FetchedPage.url`; `eligible`
+  includes excluded items; `fetched` counts extracted pages including summary failures;
+  the stats line's exact text and `failed {NAME: n}` in item order.
+- **Parity test**: `prompts.ARTICLE_DELIMITER_RE` vs `extract._DELIMITER_RE` on 16
+  look-alikes, 9 non-markers and a seeded 3000-string fuzz corpus (asserted to contain both
+  matching and non-matching strings); same replacement text.
+- **BUG (T031, minor), strict xfail
+  `test_open_breaker_skips_requests_of_items_queued_for_http`**: the T031 note says an open
+  breaker also skips the request of items that have not started fetching. It does not:
+  `_Run._process` checks `_breaker_open` before `async with self._http_limiter`, and all
+  tasks are started at once, so every task passes that check at start-up and then waits
+  on the limiter. Items queued for HTTP are still fetched after a 429 (no LLM call, so the
+  AF-7 contract holds; the cost is extra publisher requests). Fix: move the check inside
+  the HTTP limiter block (or re-check there). Verified: with that fix applied in a
+  monkeypatch, the xfail XPASSes and all other tests pass.
+- **Mutation check** (scratch `-p` plugin, source untouched): killed no LLM limit, no HTTP
+  limit, no 429 detection, no-op pacer, model built per call, flattened priority order,
+  no delimiter scrub, DUPLICATE counted as failure, no think-block strip. Survivor:
+  removing the code-fence strip in `parse_summary` is equivalent (fences lie outside the
+  outermost `{...}`), so no test can tell; not a gap.
+- **Coverage** (`uv run --with coverage`, branch): enrich.py 97 %, prompts.py 95 %. Missed:
+  the breaker fetch-skip line (unreachable, see bug), `_host` None/ValueError branches
+  (unreachable for selected items), `build_user_message` (not T039).
+- Results: 242 new tests pass + 1 xfail; full suite 2223 passed, 2 deselected, 2 xfailed;
+  ruff and pyrefly clean.
