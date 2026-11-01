@@ -1108,3 +1108,33 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   comments; pyrefly reports 0 errors and the suite is 858 passed.
 - `uv run ruff format --check .` flags `shared/designs.md` (ruff formats code blocks in
   markdown); pre-existing, unrelated, not changed.
+
+## T026 — models.py fetch models; ModelFactory alias moved to llm.py
+
+- `FetchFailure` values are the AF-3.7 display texts verbatim; `DUPLICATE = "duplicate"`.
+  The "Couldn't fetch / Couldn't summarise the article:" prefix is left to the template
+  (T033), not baked into the enum.
+- `ArticleSummary.summary` uses a plain (mode="after") validator with `_clean_required`;
+  pydantic's `str` check rejects non-string input first, so no before-validator is needed.
+- `ArticleSummary.key_points` uses one `mode="before"` validator: a non-list value and
+  non-string points are passed through unchanged so pydantic rejects them with a normal
+  `ValidationError` (not leniently dropped). String points are collapsed, then
+  `lstrip("-*• ")`, then `truncate_text(..., 240)`; empty results are dropped, the
+  first 5 kept, and an empty result raises `ValueError` ("at least one point"). The
+  ">= 1" rule therefore surfaces as a `ValidationError`; T031's `parse_summary` maps it to
+  `SummaryError`. The bullet characters live in a new constant `KEY_POINT_BULLETS`.
+- Tradeoff: `lstrip` also eats a leading `**` of a Markdown-bold point ("**Bold** x" ->
+  "Bold** x") and a leading minus sign ("-5% revenue" -> "5% revenue"). Accepted as
+  rare; the spec asks for exactly these characters to be stripped.
+- `FetchedContent` has no validators: it is built internally from an already validated
+  `ArticleSummary` plus `extract` output.
+- `ReadingItem` "not both" rule is a `model_validator(mode="after")` returning `Self`.
+- `FetchStats.failed_total` is a plain `@property` (not in `model_dump()`); `failed`
+  uses `Field(default_factory=dict)`.
+- `llm.ModelFactory` carries a `#` comment rather than a docstring (a bare string after
+  an assignment is not a real docstring). `agent.py` imports it from `llm` and drops its
+  now-unused `BaseChatModel` import; `agent.ModelFactory is llm.ModelFactory` (checked).
+- context7 was not available in this session; pydantic v2 `model_validator`/`Self`
+  usage was checked by running the models instead.
+- Verified: ruff format/check and pyrefly clean (0 errors); `uv run pytest` 858 passed,
+  including `tests/test_flag_off_identity.py`. No test files edited.

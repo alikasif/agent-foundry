@@ -14,10 +14,16 @@ import hashlib
 import re
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 ELLIPSIS = "…"
 MAX_TITLE_CHARS = 300
@@ -27,6 +33,10 @@ MAX_NEWSLETTER_CHARS = 120
 MAX_DATE_CHARS = 64
 MAX_URL_CHARS = 2048
 ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+MAX_FETCH_SUMMARY_CHARS = 1200
+MAX_KEY_POINT_CHARS = 240
+MAX_KEY_POINTS = 5
+KEY_POINT_BULLETS = "-*\u2022 "
 
 Priority = Literal["must-read", "worth-reading", "skim"]
 
@@ -172,6 +182,30 @@ def _check_http_url(value: str) -> str:
     return url
 
 
+class FetchFailure(StrEnum):
+    """Why an article page was not fetched and summarised (AF-3.7).
+
+    The value is the display text of the "couldn't fetch" note. ``DUPLICATE`` is a
+    quiet skip and is never rendered.
+    """
+
+    PAYWALLED = "paywalled or login required"
+    BLOCKED = "blocked by the site"
+    TIMED_OUT = "timed out"
+    NETWORK = "network or TLS error"
+    HTTP_ERROR = "page unavailable"
+    NOT_HTML = "not a web page"
+    TOO_LARGE = "too large"
+    TOO_SHORT = "no readable article text"
+    UNSAFE = "address not allowed"
+    NOT_ARTICLE = "not an article page"
+    TOO_MANY_REDIRECTS = "too many redirects"
+    SUMMARY_FAILED = "couldn't summarise"
+    RATE_LIMITED = "model rate limit reached"
+    ERROR = "couldn't fetch"
+    DUPLICATE = "duplicate"
+
+
 class EmailRef(BaseModel):
     """One email from the pre-flight search (header fields only)."""
 
@@ -306,8 +340,58 @@ class RankedItem(BaseModel):
         return _clean_required(value, MAX_REASON_CHARS, "reason")
 
 
+class ArticleSummary(BaseModel):
+    """The summariser's parsed output for one fetched page (untrusted LLM text)."""
+
+    summary: str
+    key_points: list[str]
+
+    @field_validator("summary")
+    @classmethod
+    def _clean_summary(cls, value: str) -> str:
+        """Non-empty summary, truncated to 1200 chars at a word boundary."""
+        return _clean_required(value, MAX_FETCH_SUMMARY_CHARS, "summary")
+
+    @field_validator("key_points", mode="before")
+    @classmethod
+    def _clean_key_points(cls, value: object) -> object:
+        """Tidy each point, drop blanks, keep the first 5; at least one required.
+
+        Each string is whitespace-collapsed, loses leading bullet characters
+        ("-", "*", "\u2022", spaces) and is truncated to 240 chars. A non-list
+        value or a non-string point is passed through for pydantic to reject.
+        """
+        if not isinstance(value, list):
+            return value
+        points = [
+            truncate_text(
+                _collapse(point).lstrip(KEY_POINT_BULLETS), MAX_KEY_POINT_CHARS
+            )
+            if isinstance(point, str)
+            else point
+            for point in value
+        ]
+        kept = [point for point in points if point != ""][:MAX_KEY_POINTS]
+        if not kept:
+            raise ValueError("key_points must contain at least one point")
+        return kept
+
+
+class FetchedContent(BaseModel):
+    """What the template renders for a successfully fetched and summarised item."""
+
+    summary: str
+    key_points: list[str]
+    full_text: str
+    truncated: bool
+
+
 class ReadingItem(BaseModel):
-    """One rendered entry of the reading list (template view model)."""
+    """One rendered entry of the reading list (template view model).
+
+    ``fetched`` and ``fetch_failure`` are set only when article fetching is on,
+    and never both.
+    """
 
     id: str
     title: str
@@ -319,6 +403,15 @@ class ReadingItem(BaseModel):
     sources: list[str]
     date: str
     mentioned_in: int
+    fetched: FetchedContent | None = None
+    fetch_failure: FetchFailure | None = None
+
+    @model_validator(mode="after")
+    def _check_fetch_outcome(self) -> Self:
+        """Reject an item that is both fetched and marked as failed."""
+        if self.fetched is not None and self.fetch_failure is not None:
+            raise ValueError("fetched and fetch_failure must not both be set")
+        return self
 
     @computed_field
     @property
@@ -341,16 +434,36 @@ class DigestMeta(BaseModel):
     generated_at: datetime
 
 
+class FetchStats(BaseModel):
+    """Counters for one article-fetching pass; present only when the flag is on."""
+
+    eligible: int = 0
+    excluded: int = 0
+    selected: int = 0
+    fetched: int = 0
+    summarised: int = 0
+    skipped: int = 0
+    failed: dict[str, int] = Field(default_factory=dict)
+    skipped_reason: str | None = None
+
+    @property
+    def failed_total(self) -> int:
+        """Number of selected items that ended with a failure category."""
+        return sum(self.failed.values())
+
+
 class ReadingList(BaseModel):
     """The render-time projection of the store.
 
     ``items`` are already in display order (sorted by ``assemble_reading_list``).
     When ``ranked`` is False (fallback) there is no Must read section.
+    ``fetch`` is None exactly when article fetching is off.
     """
 
     meta: DigestMeta
     ranked: bool
     items: list[ReadingItem]
+    fetch: FetchStats | None = None
 
     def must_read(self) -> list[ReadingItem]:
         """Must-read items in list order; always empty for an unranked list."""

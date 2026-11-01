@@ -17,12 +17,11 @@ from typing import Any, Protocol
 
 from deepagents import FilesystemMiddleware, FsToolName, SubAgent, create_deep_agent
 from deepagents.backends import StateBackend
-from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
 from newsletter_digest.config import Settings
 from newsletter_digest.gmail_mcp import open_gmail_tools, search_email_refs
-from newsletter_digest.llm import make_model
+from newsletter_digest.llm import ModelFactory, make_model
 from newsletter_digest.models import DigestMeta, ReadingList
 from newsletter_digest.prompts import (
     MAIN_SYSTEM_PROMPT,
@@ -47,7 +46,6 @@ READER_NAME = "newsletter-reader"
 # hidden from the main agent, the reader and the default general-purpose subagent.
 FILESYSTEM_TOOLS: list[FsToolName] = ["read_file"]
 
-ModelFactory = Callable[[str, Settings], BaseChatModel]
 GmailOpener = Callable[[Settings], AbstractAsyncContextManager[dict[str, BaseTool]]]
 
 
