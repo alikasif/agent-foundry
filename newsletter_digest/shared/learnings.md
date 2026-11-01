@@ -172,3 +172,11 @@
   missing-key error, which still exits 2. To check the window message, pass a dummy key
   and `--model x/y`. To run the console script from an empty cwd, so that no `.env`
   is found, use `uv run --project <project_dir> newsletter-digest ...`.
+- (T023) pyrefly's import root here is `src` (`[tool.pyrefly]` has only
+  `project-includes`), so `from tests.<helper> import ...` in a test file is a
+  `missing-import` error, even though pytest resolves it (`tests` is a package). A
+  relative `from .helper import` fails the same way. Either add `search-path = ["."]`
+  to `[tool.pyrefly]` or use a targeted `# pyrefly: ignore[missing-import]`.
+- (T023) Run `uv run ruff check .` before rendering goldens from a fixture module. A
+  line-length fix after rendering means rendering again (or at least checking the sums
+  again).

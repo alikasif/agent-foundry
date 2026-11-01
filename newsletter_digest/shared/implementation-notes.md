@@ -990,3 +990,90 @@ Checks: `uv run pytest -q` 845 passed, 2 deselected (844 before plus the new tes
 `.claude/agent-memory/*.md` files, not this change); `uv run ruff check .` all checks
 passed; `uv run pyrefly check` 0 errors (2 suppressed); `uv run newsletter-digest --help`
 exit 0.
+
+## T023 — Golden flag-off baseline from commit bb16231 (before any template edit)
+
+Sanity check: `git -C /home/kasif/projects/agent-foundry diff --quiet bb16231 --
+newsletter_digest/src newsletter_digest/tests` succeeded (exit 0) before anything was
+written.
+
+Commands (run from the project dir; `<sp>` is the session scratchpad
+`/tmp/claude-1000/-home-kasif-projects-agent-foundry-newsletter-digest/fd2e07ec-7db5-4f74-bfae-f99303a376fb/scratchpad`):
+
+```
+mkdir -p <sp>/bb16231 && git -C /home/kasif/projects/agent-foundry archive bb16231 newsletter_digest/src | tar -x -C <sp>/bb16231
+PYTHONPATH=<sp>/bb16231/newsletter_digest/src:/home/kasif/projects/agent-foundry/newsletter_digest uv run --no-sync python <sp>/make_golden.py
+```
+
+`make_golden.py` (kept in the scratchpad, not committed) asserts that
+`newsletter_digest`, `.config`, `.models` and `.render` `__file__`, and the loaded
+template's `filename`, all lie under `<sp>/bb16231/newsletter_digest/src`, and that
+`tests.flag_off_fixture` is the project's file. It then writes each golden with
+`Path.write_bytes(render_html(x).encode("utf-8"))` and the key list with
+`json.dumps(sorted(Settings.build(**SAFE_SUMMARY_BUILD_KWARGS).safe_summary()), indent=2)`
+(no trailing newline). Python 3.13.5 from the project venv.
+
+sha256 of the goldens:
+
+| File | sha256 |
+|---|---|
+| `tests/fixtures/flag_off_ranked_golden.html` | `45018a18d1c2e07a0467036fdb68ea6e6b183b7468e6e44f0e3592b7eb89e1e4` |
+| `tests/fixtures/flag_off_unranked_golden.html` | `7bd835f1a5d3efdb354e868e9c80614f7bf732c875bdc1450a65be99fd10ed11` |
+| `tests/fixtures/flag_off_empty_golden.html` | `e2ebfbb9f28fa68c7a4b4231d261917121e0cce97832f729c9c5dbf7db1e79ec` |
+| `tests/fixtures/flag_off_safe_summary_keys.json` | `665b44680d6ca702928afb4b28ea46610c9914db0d70abf6e86454cd4ecdbd1c` |
+
+The script was run twice (the second time after a ruff line-length fix that only split a
+string literal); the sums were identical.
+
+Decisions not covered by the spec:
+
+- AF-9.1 names one golden, `tests/fixtures/flag_off_golden.html`, covering "ranked plus
+  unranked plus failed emails". One `ReadingList` cannot be both ranked and unranked, so
+  per the T023 task there are three goldens (ranked, unranked, empty) with the names in
+  the task's output list.
+- The ranked fixture lists items in the order `assemble_reading_list` emits them
+  (must-read by order, then topics in `Topic` order, worth-reading before skim, partial
+  leftovers last in their topic). `ReadingList` never sorts, so this order is what the
+  template sees in a real run. `sources` are distinct names and `mentioned_in ==
+  len(sources)`, as in `store._reading_item`.
+- Coverage of the ranked fixture: 2 must-read items; worth-reading and skim in LLMs, RAG,
+  Industry, Tools and Other; 2 partial-finalise leftovers (`skim`, `reason=None`);
+  `mentioned_in` 2, 3 and 4; `url=None`; a `javascript:` URL (rendered as plain text by
+  `safe_url`); an href with `&` and `"`; an empty summary and an empty date;
+  `emails_failed=2`; hostile `<script>`, `"><img onerror>`, `' onmouseover='`,
+  `{{ 7*7 }}`, quotes and ampersands in titles, summaries, reasons and newsletter names;
+  em dash, accented letters and `€`.
+- The empty fixture uses `ranked=False`, because with no emails the agent never runs and
+  the store is never finalised. Its query is hostile because the empty-state message
+  echoes `meta.query`.
+- `SAFE_SUMMARY_BUILD_KWARGS` is typed as a `TypedDict` of the 13 `bb16231` `build`
+  keywords, so `Settings.build(**SAFE_SUMMARY_BUILD_KWARGS)` type-checks. It still works
+  after T027, because the new keywords have defaults. The fixture does not import
+  `newsletter_digest.config` at runtime: it only needs `Path` (ruff flagged the unused
+  `Settings` import).
+- Extra tests beyond the acceptance list: the key golden contains no API key and no
+  `openrouter_api_key`; `tests.flag_off_fixture` resolves to this `tests/` dir under
+  `uv run pytest`; unit tests for the first-difference helper (offset, length mismatch,
+  80-byte window only).
+- Mutation check (scratch `<sp>/mut_identity.py`): swapping the template for a copy with
+  one extra space after `Why:` fails the ranked and `write_reading_list` tests with a
+  short "first difference at byte 6427" message.
+
+Deviation / tradeoff:
+
+- `uv run pyrefly check` cannot resolve `tests.flag_off_fixture`: the pyrefly import root
+  is `src`, and `[tool.pyrefly]` sets only `project-includes`. A relative import fails
+  the same way. Changing `pyproject.toml` is out of scope for T023, so the two import
+  lines in `tests/test_flag_off_identity.py` carry `# pyrefly: ignore[missing-import]`.
+  The fixture module is still fully type-checked on its own (it is under `tests/` in
+  `project-includes`). Only the imported names are untyped at the import site.
+  Suggestion for T024, which edits `pyproject.toml` anyway: add `search-path = ["."]` to
+  `[tool.pyrefly]` and drop the two ignores.
+- `.env.example` was present in the working tree during this task, so `uv run pytest -q`
+  gave 858 passed, 2 deselected: 845 existing plus 13 new, with no `.env.example`
+  failure.
+
+Checks: `uv run ruff format` (own files) clean; `uv run ruff check .` all passed;
+`uv run pyrefly check` 0 errors (4 suppressed: the 2 existing ones plus these 2);
+`uv run pytest tests/test_flag_off_identity.py -q` 13 passed.
+No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.

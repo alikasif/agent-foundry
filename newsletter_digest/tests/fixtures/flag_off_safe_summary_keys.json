@@ -1,0 +1,18 @@
+[
+  "api_base",
+  "days",
+  "effective_query",
+  "gmail_mcp_args",
+  "gmail_mcp_command",
+  "label",
+  "log_level",
+  "max_email_chars",
+  "max_emails",
+  "model",
+  "open_browser",
+  "out_dir",
+  "query",
+  "reader_model",
+  "reader_parallelism",
+  "window"
+]

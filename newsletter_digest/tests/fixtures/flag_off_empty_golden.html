@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-/jL3rPe8uYi/g6yruYKa92g/hW/OWTpTs48ndR67qiI='; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Newsletter reading list — 2026-10-31</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f7f6f2;
+  --surface: #ffffff;
+  --text: #1d1d1b;
+  --muted: #5f5e58;
+  --border: #e2e0d8;
+  --accent: #1f5fbf;
+  --accent-visited: #6b3fa0;
+  --badge-bg: #e8eefa;
+  --badge-text: #1f4a8f;
+  --must-bg: #fbe9e4;
+  --must-text: #9a2f12;
+  --worth-bg: #e6f3ea;
+  --worth-text: #1e6b38;
+  --skim-bg: #efeee9;
+  --skim-text: #5f5e58;
+  --note-bg: #fff6dc;
+  --note-text: #6b5300;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --surface: #1f1f1d;
+    --text: #ecebe6;
+    --muted: #a5a39b;
+    --border: #34332f;
+    --accent: #8db4f2;
+    --accent-visited: #c3a4ec;
+    --badge-bg: #22314a;
+    --badge-text: #b9cff5;
+    --must-bg: #47231a;
+    --must-text: #f5b7a3;
+    --worth-bg: #1d3a27;
+    --worth-text: #a7dcb6;
+    --skim-bg: #2b2a27;
+    --skim-text: #b9b7ae;
+    --note-bg: #3a3218;
+    --note-text: #ecd58c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+.page { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+header h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 .5rem; }
+.stats { color: var(--muted); margin: 0 0 .25rem; }
+.stats strong { color: var(--text); font-weight: 600; }
+.note {
+  background: var(--note-bg);
+  color: var(--note-text);
+  border-radius: .5rem;
+  padding: .5rem .75rem;
+  margin: .75rem 0 0;
+  font-size: .925rem;
+}
+nav { margin: 1.25rem 0 0; padding: .75rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .4rem .9rem; }
+nav a { color: var(--accent); text-decoration: none; font-size: .95rem; }
+nav a:hover, nav a:focus-visible { text-decoration: underline; }
+nav .count { color: var(--muted); }
+section { margin-top: 2rem; scroll-margin-top: 1rem; }
+section h2 { font-size: 1.2rem; margin: 0 0 .75rem; display: flex; align-items: baseline; gap: .5rem; }
+section h2 .count { color: var(--muted); font-size: .9rem; font-weight: 400; }
+#must-read h2 { color: var(--must-text); }
+.item {
+  display: flex;
+  gap: .75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: .6rem;
+  padding: .85rem 1rem;
+  margin: 0 0 .65rem;
+}
+.item .check { padding-top: .2rem; }
+.item .mark-read { width: 1.05rem; height: 1.05rem; margin: 0; cursor: pointer; accent-color: var(--accent); }
+.item .body { min-width: 0; flex: 1; }
+.item .title { font-size: 1.05rem; line-height: 1.35; margin: 0; overflow-wrap: anywhere; }
+.item .title a { color: var(--accent); text-decoration: none; }
+.item .title a:visited { color: var(--accent-visited); }
+.item .title a:hover, .item .title a:focus-visible { text-decoration: underline; }
+.item .summary { margin: .35rem 0 0; overflow-wrap: anywhere; }
+.item .meta {
+  margin: .45rem 0 0;
+  color: var(--muted);
+  font-size: .85rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .3rem .6rem;
+}
+.item .reason { margin: .4rem 0 0; color: var(--muted); font-size: .9rem; font-style: italic; }
+.badge, .prio { border-radius: 999px; padding: .05rem .5rem; font-size: .78rem; font-weight: 600; white-space: nowrap; }
+.badge { background: var(--badge-bg); color: var(--badge-text); }
+.prio-must-read { background: var(--must-bg); color: var(--must-text); }
+.prio-worth-reading { background: var(--worth-bg); color: var(--worth-text); }
+.prio-skim { background: var(--skim-bg); color: var(--skim-text); }
+.item.is-read, .item:has(.mark-read:checked) { opacity: .55; }
+.item.is-read .title a, .item:has(.mark-read:checked) .title a { text-decoration: line-through; }
+.empty { margin: 2.5rem 0; color: var(--muted); font-size: 1.05rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; overflow-wrap: anywhere; }
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .85rem; }
+footer p { margin: .2rem 0; }
+@media (max-width: 30rem) {
+  .page { padding: 1.25rem .9rem 2rem; }
+  header h1 { font-size: 1.35rem; }
+  .item { padding: .75rem .8rem; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<header>
+  <h1>Newsletter reading list</h1>
+  <p class="stats">
+    Window <strong>1w</strong> (7 days):
+    2026-10-24 – 2026-10-31
+  </p>
+  <p class="stats">
+    Emails: <strong>0</strong> found,
+    <strong>0</strong> processed,
+    <strong>0</strong> failed
+    · Articles: <strong>0</strong>
+  </p>
+</header>
+<main>
+<p class="empty">No newsletter emails matched <code>label:&#34;News &lt;script&gt;alert(1)&lt;/script&gt;&#34; &amp; {{ 7*7 }} newer_than:7d</code> in this window.</p>
+</main>
+<footer>
+  <p>Generated 2026-10-31 09:30+01:00.</p>
+  <p>Summaries come from newsletter emails; links not fetched.</p>
+</footer>
+</div>
+<script>
+(function () {
+  "use strict";
+  var PREFIX = "nd-read:";
+  function isRead(key) {
+    try {
+      return window.localStorage.getItem(PREFIX + key) === "1";
+    } catch (err) {
+      return false;
+    }
+  }
+  function remember(key, read) {
+    try {
+      if (read) {
+        window.localStorage.setItem(PREFIX + key, "1");
+      } else {
+        window.localStorage.removeItem(PREFIX + key);
+      }
+    } catch (err) {
+      /* storage unavailable: the checkbox still works for this visit */
+    }
+  }
+  var items = document.querySelectorAll(".item[data-key]");
+  Array.prototype.forEach.call(items, function (item) {
+    var key = item.getAttribute("data-key");
+    var box = item.querySelector("input.mark-read");
+    if (!key || !box) {
+      return;
+    }
+    box.checked = isRead(key);
+    item.classList.toggle("is-read", box.checked);
+    box.addEventListener("change", function () {
+      item.classList.toggle("is-read", box.checked);
+      remember(key, box.checked);
+    });
+  });
+})();
+</script>
+</body>
+</html>
