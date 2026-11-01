@@ -300,3 +300,11 @@
   (a breaker) after every await that can take long, not only after acquiring the slot.
   Test it deterministically by injecting a pacer `sleep` that waits on an `anyio.Event`
   set when the failure is raised (no checkpoint between the raise and the breaker flag).
+- (T044 test follow-up) Scope a mutant to one module: replace that module's `httpx`
+  global with a `types.ModuleType` proxy (copy `vars(httpx)`, override one function).
+  Patching `httpx.create_ssl_context` globally also "kills" tests that call it directly,
+  which overstates what the new test catches.
+- (T044 test follow-up) To prove `abandon_on_cancel`, let the extractor thread call
+  `anyio.from_thread.run_sync(started.set)` and then block on a `threading.Event` that
+  is set only at fixture teardown. Cancel once `started` fires and time the return. If
+  the source drops the flag, the cancel waits for the thread's bounded wait (3 s).

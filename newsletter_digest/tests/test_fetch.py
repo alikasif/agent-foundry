@@ -19,10 +19,18 @@ import ipaddress
 import logging
 import socket
 import ssl
+import threading
 import time
 import tracemalloc
 import zlib
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
@@ -60,6 +68,8 @@ pytestmark = pytest.mark.anyio
 
 TIMEOUT_S = 10.0
 SMALL_BUDGET_S = 0.05
+RELEASE_WAIT_S = 3.0
+CANCEL_RETURN_BUDGET_S = 1.0
 CAP = 64 * 1024
 ARTICLE_URL = "https://news.example/a"
 PUBLIC_IP = "93.184.215.14"
@@ -581,6 +591,70 @@ async def test_fetch_lets_base_exception_from_extractor_propagate() -> None:
             make_config(), transport=httpx.MockTransport(site), extractor=abort
         ) as fetcher:
             await fetcher.fetch(ARTICLE_URL)
+
+
+@dataclass
+class BlockingExtractor:
+    """Extractor that signals entry, then blocks its worker thread on `release`.
+
+    `release` is set only at fixture teardown, so a fetch that waits for this
+    thread cannot finish before `RELEASE_WAIT_S` elapses.
+    """
+
+    started: anyio.Event = field(default_factory=anyio.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+
+    def __call__(self, html: bytes, max_chars: int) -> ExtractedText | None:
+        """Tell the event loop the thread is running, then block."""
+        anyio.from_thread.run_sync(self.started.set)
+        try:
+            self.release.wait(timeout=RELEASE_WAIT_S)
+            return text_of(600)
+        finally:
+            self.finished.set()
+
+
+@pytest.fixture
+def blocking_extractor() -> Iterator[BlockingExtractor]:
+    """Yield a BlockingExtractor; release its thread and wait for it at teardown."""
+    extractor = BlockingExtractor()
+    yield extractor
+    extractor.release.set()
+    extractor.finished.wait(timeout=RELEASE_WAIT_S)
+
+
+async def test_cancelled_fetch_abandons_running_extraction(
+    blocking_extractor: BlockingExtractor,
+) -> None:
+    # T044 #6: cancellation must not wait for a slow extraction thread.
+    reached_after_fetch = False
+    fetcher = PageFetcher(
+        make_config(),
+        transport=httpx.MockTransport(Site({ARTICLE_URL: page()})),
+        extractor=blocking_extractor,
+    )
+    scope = anyio.CancelScope()
+
+    async def run_fetch() -> None:
+        nonlocal reached_after_fetch
+        with scope:
+            await fetcher.fetch(ARTICLE_URL)
+            reached_after_fetch = True
+
+    with anyio.fail_after(TIMEOUT_S):
+        async with fetcher:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(run_fetch)
+                await blocking_extractor.started.wait()
+                started_at = time.monotonic()
+                scope.cancel()
+            elapsed = time.monotonic() - started_at
+    assert scope.cancelled_caught
+    assert not reached_after_fetch
+    assert elapsed < CANCEL_RETURN_BUDGET_S
+    assert not blocking_extractor.finished.is_set()
+    assert fetcher._client.is_closed
 
 
 # ------------------------------------------------------------------ success

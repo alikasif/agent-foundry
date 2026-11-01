@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import ssl
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from ipaddress import IPv4Network, IPv6Network
@@ -93,6 +94,7 @@ class ScriptedStream(httpcore.AsyncMockStream):
         super().__init__(buffer)
         self.server_addr = server_addr
         self.tls_server_hostnames: list[str | None] = []
+        self.tls_contexts: list[ssl.SSLContext] = []
         self.closed = False
 
     async def start_tls(
@@ -101,8 +103,9 @@ class ScriptedStream(httpcore.AsyncMockStream):
         server_hostname: str | None = None,
         timeout: float | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        """Record the SNI/verification hostname and stay on this stream."""
+        """Record the SSL context and SNI hostname; stay on this stream."""
         self.tls_server_hostnames.append(server_hostname)
+        self.tls_contexts.append(ssl_context)
         return self
 
     async def aclose(self) -> None:
@@ -657,6 +660,23 @@ async def test_https_tls_uses_original_hostname() -> None:
     assert response.status_code == 200
     assert backend.dials == [(PUBLIC_IP, 443)]
     assert stream.tls_server_hostnames == [PUBLIC_HOST]
+
+
+async def test_https_tls_context_verifies_certificate_and_hostname() -> None:
+    # T044 #3: the pool's context must keep verification on (CERT_REQUIRED +
+    # check_hostname); a `verify=False` context would accept any certificate.
+    resolver = FakeResolver({PUBLIC_HOST: [PUBLIC_IP]})
+    stream = ok_stream()
+    backend = ScriptedBackend({PUBLIC_IP: [stream]})
+    with anyio.fail_after(TIMEOUT_S):
+        async with make_client(resolver, backend) as client:
+            response = await client.get(f"https://{PUBLIC_HOST}/article")
+    assert response.status_code == 200
+    assert len(stream.tls_contexts) == 1
+    context = stream.tls_contexts[0]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
 
 
 @pytest.mark.parametrize(
