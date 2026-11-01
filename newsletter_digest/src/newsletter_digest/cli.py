@@ -7,6 +7,8 @@ empty and the unranked-fallback list), 1 runtime failure, 2 usage/config error.
 
 import logging
 import os
+import shutil
+import subprocess
 import webbrowser
 from pathlib import Path
 
@@ -36,6 +38,12 @@ from newsletter_digest.render import write_reading_list
 # below) see it. Variables already set in the environment win over .env. Search
 # from the cwd: a bare load_dotenv() searches from this file's directory instead.
 load_dotenv(find_dotenv(usecwd=True))
+
+# `--open` on WSL (F003): WSL is detected from these env vars or /proc/version, and
+# the file opens in the Windows default browser. Each helper call gets this timeout.
+WSL_ENV_VARS = ("WSL_DISTRO_NAME", "WSL_INTEROP")
+PROC_VERSION = Path("/proc/version")
+OPEN_TIMEOUT_S = 10.0
 
 # Logs and status lines go to stderr; stdout carries only the output path.
 console = Console(stderr=True)
@@ -204,7 +212,76 @@ def digest(
     _report(reading_list, settings)
     click.echo(str(path))
     if settings.open_browser:
-        webbrowser.open(path.resolve().as_uri())
+        _open_in_browser(path.resolve())
+
+
+def _open_in_browser(path: Path) -> None:
+    """Open the reading list in a browser; never raises on WSL.
+
+    Outside WSL this is plain `webbrowser.open`. On WSL, where `webbrowser` finds
+    no Linux browser, the Windows default browser is tried first (wslview, then
+    explorer.exe), then `webbrowser.open`; if all fail, a hint goes to stderr.
+    """
+    if not _is_wsl():
+        webbrowser.open(path.as_uri())
+        return
+    if _open_on_windows(path):
+        return
+    try:
+        if webbrowser.open(path.as_uri()):
+            return
+    except (webbrowser.Error, OSError):
+        pass
+    click.echo(f"Could not open a browser; open {path} manually.", err=True)
+
+
+def _is_wsl() -> bool:
+    """True when running under Windows Subsystem for Linux."""
+    if any(name in os.environ for name in WSL_ENV_VARS):
+        return True
+    try:
+        return "microsoft" in PROC_VERSION.read_text().lower()
+    except OSError:
+        return False
+
+
+def _open_on_windows(path: Path) -> bool:
+    """Open `path` with wslview, or with explorer.exe on its Windows path."""
+    wslview = shutil.which("wslview")
+    if wslview is not None:
+        done = _run_quietly([wslview, str(path)])
+        if done is not None and done.returncode == 0:
+            return True
+    wslpath = shutil.which("wslpath")
+    explorer = shutil.which("explorer.exe")
+    if wslpath is None or explorer is None:
+        return False
+    converted = _run_quietly([wslpath, "-w", str(path)], stdout=subprocess.PIPE)
+    if converted is None or converted.returncode != 0:
+        return False
+    windows_path = converted.stdout.strip()
+    if not windows_path:
+        return False
+    # explorer.exe often exits with 1 even when it opened the file.
+    return _run_quietly([explorer, windows_path]) is not None
+
+
+def _run_quietly(
+    args: list[str], *, stdout: int = subprocess.DEVNULL
+) -> subprocess.CompletedProcess[str] | None:
+    """Run `args` without a shell; None when it cannot start or times out."""
+    try:
+        return subprocess.run(
+            args,
+            stdout=stdout,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=OPEN_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _report(reading_list: ReadingList, settings: Settings) -> None:

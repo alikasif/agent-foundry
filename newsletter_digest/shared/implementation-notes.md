@@ -2366,3 +2366,50 @@ fails at 2 and 1 and 0; shared deadline -> TIMED_OUT; onward body cap -> TOO_LAR
 Mutation check (scratch copy of fetch.py, restored afterwards): dropping the budget
 check, the size gate, the short-text gate, the one-hop limit, the shared chain set or
 the shared deadline each fails at least one test.
+
+## F003 — `--open` on WSL opens the Windows default browser (ad-hoc fix, not in task_list.json)
+
+On WSL2 `webbrowser.open(file_uri)` finds no Linux browser and xdg-open prints about 25
+"not found" lines. cli.py now calls `_open_in_browser(path)`:
+
+- Not WSL: `webbrowser.open(path.as_uri())`, exactly as before (same URI, result
+  ignored, exceptions not caught, no hint), and no subprocess or `shutil.which` call.
+- WSL (`WSL_DISTRO_NAME` or `WSL_INTEROP` in the environment, or "microsoft" in
+  `/proc/version`, case-insensitive, so WSL1's "Microsoft" matches too):
+  1. `wslview <path>` if on PATH; success only with exit code 0.
+  2. else (or if wslview failed) `wslpath -w <path>` then `explorer.exe <windows path>`;
+     explorer.exe's exit code is ignored (it often exits 1 after opening the file), so
+     success means "it started and finished within the timeout".
+  3. else `webbrowser.open(uri)`, with `webbrowser.Error`/`OSError` caught.
+  4. else one line on stderr: `Could not open a browser; open <path> manually.`
+- All helpers run via `subprocess.run(list, ...)` with no shell, stdin/stderr
+  DEVNULL, `timeout=OPEN_TIMEOUT_S` (10 s), `check=False`; `OSError` and
+  `SubprocessError` (incl. `TimeoutExpired`) mean "did not work", never a crash.
+
+**Deviations / decisions**
+- `wslpath -w` needs its stdout, so that one call uses `stdout=PIPE` (text mode); the
+  wslview and explorer.exe calls use DEVNULL for stdout as asked.
+- A wslview that exits non-zero falls through to explorer.exe rather than straight to
+  `webbrowser`, since explorer is the more likely to work on WSL.
+- An explorer.exe timeout counts as failure (falls back to `webbrowser`), although the
+  browser may have opened; a timeout should not happen with the 10 s limit.
+- The hint uses `click.echo(err=True)` rather than the rich console so it is always
+  exactly one line (rich wraps at 80 columns).
+- The non-WSL branch keeps today's behaviour, including no hint when `webbrowser.open`
+  returns False there. The hint is WSL-only, as specified.
+- `WSL_ENV_VARS`, `PROC_VERSION` and `OPEN_TIMEOUT_S` are module constants;
+  `PROC_VERSION` exists so tests can point it at a temp file.
+
+**Tests** (tests/test_cli.py): the autouse `isolated_cli` fixture now deletes the WSL env
+vars and points `cli.PROC_VERSION` at a missing file. This matters on the user's
+machine: without it, the existing `--open` tests would detect WSL and launch a real
+Windows browser. New: WSL detection (both env vars, WSL2 and WSL1 `/proc/version`, plain
+Linux, missing file); non-WSL never runs a helper even with wslview on PATH; wslview
+path (args, no shell, DEVNULL, timeout); explorer path with exit 0 and 1 (wslpath gets
+PIPE); wslview exit code / OSError falls back to explorer; webbrowser fallback when
+tools are missing, wslpath fails, explorer times out, wslpath is not executable, or
+wslpath prints nothing; one-line hint when `webbrowser.open` returns False, raises
+`webbrowser.Error` or `OSError`, with exit code 0. Mutation check (scratch copy of
+cli.py, restored): requiring explorer exit 0, skipping WSL detection, a case-sensitive
+`/proc/version` match, dropping the hint, or not catching webbrowser errors each fail
+at least one test.

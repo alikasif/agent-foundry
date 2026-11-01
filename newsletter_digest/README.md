@@ -194,11 +194,16 @@ uv run newsletter-digest [OPTIONS]
 | `--model TEXT` | `NEWSLETTER_MODEL` | none | OpenRouter model for the main agent. |
 | `--reader-model TEXT` | `NEWSLETTER_READER_MODEL` | same as `--model` | OpenRouter model for the per-email reader. |
 | `--out DIRECTORY` | none | `out` | Output directory for `reading-list-YYYY-MM-DD.html` (created if needed). |
-| `--open` | none | off | Open the reading list in the default browser. |
+| `--open` | none | off | Open the reading list in the default browser. On WSL it opens in the Windows default browser (see below). |
 | `--fetch-articles` | `NEWSLETTER_FETCH_ARTICLES` | off | Also fetch the linked pages of must-read and worth-reading items and summarise them. See [Privacy](#privacy). |
 | `--max-fetch INTEGER` | `NEWSLETTER_MAX_FETCH` | `15` | Maximum number of article pages to fetch, 1 to 50. Only used with `--fetch-articles`. |
 | `--log-level [debug\|info\|warning\|error]` | none | `INFO` | Logging verbosity. `DEBUG` also prints tracebacks on failure. |
 | `-h`, `--help` | none | none | Show help and exit. |
+
+On WSL (detected from `WSL_DISTRO_NAME`, `WSL_INTEROP` or `/proc/version`), `--open`
+uses `wslview` if it is installed (package `wslu`), otherwise `explorer.exe` on the
+file's Windows path, and only then Python's `webbrowser`. If none of them works, a
+one-line hint with the file path is printed to stderr; the exit code is unchanged.
 
 ### How `--window`, `--label` and `--query` combine
 

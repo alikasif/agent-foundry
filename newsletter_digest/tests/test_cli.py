@@ -14,6 +14,7 @@ import subprocess
 import sys
 import webbrowser
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -107,10 +108,13 @@ def isolated_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[No
 
     ``cli`` calls ``load_dotenv()`` at import, so a developer's real ``.env`` may
     already be in ``os.environ``; deleting the vars here keeps tests hermetic.
+    WSL detection is switched off too (no WSL env vars, no ``/proc/version``), so
+    an ``--open`` test on a WSL machine never launches a real Windows browser.
     """
     monkeypatch.chdir(tmp_path)
-    for name in TOOL_ENV_VARS:
+    for name in TOOL_ENV_VARS + cli.WSL_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(cli, "PROC_VERSION", tmp_path / "no-proc-version")
     logger = logging.getLogger("newsletter_digest")
     handlers, level = list(logger.handlers), logger.level
     yield
@@ -568,6 +572,270 @@ def test_without_open_browser_is_not_called(
 def test_open_patch_targets_the_stdlib_module() -> None:
     # The documented patch point is newsletter_digest.cli.webbrowser.open.
     assert cli.webbrowser is webbrowser
+
+
+# --- --open on WSL (F003) -----------------------------------------------------------
+
+WSLVIEW = "/usr/bin/wslview"
+WSLPATH = "/usr/bin/wslpath"
+EXPLORER = "/mnt/c/Windows/explorer.exe"
+WINDOWS_PATH = r"\\wsl.localhost\Ubuntu\tmp\out\reading-list.html"
+
+
+@dataclass
+class FakeShell:
+    """Fake ``shutil.which`` and ``subprocess.run``: a PATH, exit codes and errors."""
+
+    on_path: dict[str, str] = field(default_factory=dict)
+    returncodes: dict[str, int] = field(default_factory=dict)
+    errors: dict[str, BaseException] = field(default_factory=dict)
+    calls: list[list[str]] = field(default_factory=list)
+    kwargs: list[dict[str, Any]] = field(default_factory=list)
+
+    def which(self, name: str, *args: Any, **kwargs: Any) -> str | None:
+        """Return the fake PATH entry for ``name``."""
+        return self.on_path.get(name)
+
+    def run(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Record the call; raise or return the scripted exit code."""
+        self.calls.append(list(args))
+        self.kwargs.append(kwargs)
+        exe = args[0]
+        if exe in self.errors:
+            raise self.errors[exe]
+        stdout = f"{WINDOWS_PATH}\n" if exe == WSLPATH else None
+        return subprocess.CompletedProcess(
+            args, self.returncodes.get(exe, 0), stdout=stdout
+        )
+
+
+@pytest.fixture
+def shell(monkeypatch: pytest.MonkeyPatch) -> FakeShell:
+    """Patch ``shutil.which`` and ``subprocess.run`` as cli sees them."""
+    fake = FakeShell()
+    monkeypatch.setattr(cli.shutil, "which", fake.which)
+    monkeypatch.setattr(cli.subprocess, "run", fake.run)
+    return fake
+
+
+@pytest.fixture
+def wsl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend to run under WSL2."""
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+
+
+def open_run(fake_run: FakeRunDigest, ranked_list: ReadingList) -> tuple[Result, Path]:
+    """Run ``--open``; check exit 0 and stdout; return the result and the file."""
+    fake_run.result = ranked_list
+    result = invoke("--open")
+    assert result.exit_code == 0, result.stderr
+    return result, output_path(result).resolve()
+
+
+@pytest.mark.parametrize(
+    ("env", "proc_version", "expected"),
+    [
+        ({"WSL_DISTRO_NAME": "Ubuntu"}, None, True),
+        ({"WSL_INTEROP": "/run/WSL/1_interop"}, None, True),
+        ({}, "Linux version 6.6.87.2-microsoft-standard-WSL2 (gcc)", True),
+        ({}, "Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)", True),
+        ({}, "Linux version 6.8.0-45-generic (buildd@lcy02) (gcc)", False),
+        ({}, None, False),
+    ],
+    ids=["distro-env", "interop-env", "wsl2-proc", "wsl1-proc", "linux", "no-proc"],
+)
+def test_wsl_detection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env: dict[str, str],
+    proc_version: str | None,
+    expected: bool,
+) -> None:
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if proc_version is not None:
+        version = tmp_path / "version"
+        version.write_text(proc_version)
+        monkeypatch.setattr(cli, "PROC_VERSION", version)
+    assert cli._is_wsl() is expected
+
+
+def test_open_outside_wsl_never_runs_a_helper(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    opened: list[str],
+    shell: FakeShell,
+) -> None:
+    shell.on_path = {"wslview": WSLVIEW, "wslpath": WSLPATH, "explorer.exe": EXPLORER}
+    result, path = open_run(fake_run, ranked_list)
+    assert opened == [path.as_uri()]
+    assert shell.calls == []
+    assert result.stderr.count("Could not open a browser") == 0
+
+
+def test_open_on_wsl_uses_wslview(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    opened: list[str],
+    shell: FakeShell,
+    wsl: None,
+) -> None:
+    shell.on_path = {"wslview": WSLVIEW, "wslpath": WSLPATH, "explorer.exe": EXPLORER}
+    result, path = open_run(fake_run, ranked_list)
+    assert shell.calls == [[WSLVIEW, str(path)]]
+    assert opened == []
+    assert "Could not open a browser" not in result.stderr
+    kwargs = shell.kwargs[0]
+    assert "shell" not in kwargs
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["timeout"] == cli.OPEN_TIMEOUT_S
+
+
+@pytest.mark.parametrize("explorer_code", [0, 1])
+def test_open_on_wsl_uses_explorer_on_the_windows_path(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    opened: list[str],
+    shell: FakeShell,
+    wsl: None,
+    explorer_code: int,
+) -> None:
+    # explorer.exe often exits with 1 after opening the file: still a success.
+    shell.on_path = {"wslpath": WSLPATH, "explorer.exe": EXPLORER}
+    shell.returncodes = {EXPLORER: explorer_code}
+    result, path = open_run(fake_run, ranked_list)
+    assert shell.calls == [[WSLPATH, "-w", str(path)], [EXPLORER, WINDOWS_PATH]]
+    assert opened == []
+    assert "Could not open a browser" not in result.stderr
+    assert shell.kwargs[0]["stdout"] is subprocess.PIPE
+    assert shell.kwargs[1]["stdout"] is subprocess.DEVNULL
+    assert all("shell" not in kwargs for kwargs in shell.kwargs)
+    assert all(kwargs["timeout"] == cli.OPEN_TIMEOUT_S for kwargs in shell.kwargs)
+
+
+@pytest.mark.parametrize(
+    "wslview_failure",
+    [{"returncodes": {WSLVIEW: 2}}, {"errors": {WSLVIEW: OSError("exec format")}}],
+    ids=["exit-code", "os-error"],
+)
+def test_open_on_wsl_falls_back_from_wslview_to_explorer(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    opened: list[str],
+    shell: FakeShell,
+    wsl: None,
+    wslview_failure: dict[str, Any],
+) -> None:
+    shell.on_path = {"wslview": WSLVIEW, "wslpath": WSLPATH, "explorer.exe": EXPLORER}
+    for name, value in wslview_failure.items():
+        setattr(shell, name, value)
+    _, path = open_run(fake_run, ranked_list)
+    assert shell.calls == [
+        [WSLVIEW, str(path)],
+        [WSLPATH, "-w", str(path)],
+        [EXPLORER, WINDOWS_PATH],
+    ]
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        {"on_path": {}},
+        {"on_path": {"wslpath": WSLPATH}},
+        {"on_path": {"explorer.exe": EXPLORER}},
+        {
+            "on_path": {"wslpath": WSLPATH, "explorer.exe": EXPLORER},
+            "returncodes": {WSLPATH: 1},
+        },
+        {
+            "on_path": {"wslpath": WSLPATH, "explorer.exe": EXPLORER},
+            "errors": {EXPLORER: subprocess.TimeoutExpired(EXPLORER, 10.0)},
+        },
+        {
+            "on_path": {"wslpath": WSLPATH, "explorer.exe": EXPLORER},
+            "errors": {WSLPATH: PermissionError("denied")},
+        },
+    ],
+    ids=[
+        "nothing-on-path",
+        "no-explorer",
+        "no-wslpath",
+        "wslpath-fails",
+        "explorer-times-out",
+        "wslpath-not-executable",
+    ],
+)
+def test_open_on_wsl_falls_back_to_webbrowser(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    opened: list[str],
+    shell: FakeShell,
+    wsl: None,
+    setup: dict[str, Any],
+) -> None:
+    for name, value in setup.items():
+        setattr(shell, name, value)
+    result, path = open_run(fake_run, ranked_list)
+    assert opened == [path.as_uri()]
+    explorer_tried = [EXPLORER, WINDOWS_PATH] in shell.calls
+    assert explorer_tried is (EXPLORER in setup.get("errors", {}))
+    assert "Could not open a browser" not in result.stderr
+
+
+def test_open_on_wsl_skips_explorer_when_wslpath_prints_nothing(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    opened: list[str],
+    shell: FakeShell,
+    wsl: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shell.on_path = {"wslpath": WSLPATH, "explorer.exe": EXPLORER}
+
+    def blank_wslpath(
+        args: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        shell.calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="  \n")
+
+    monkeypatch.setattr(cli.subprocess, "run", blank_wslpath)
+    _, path = open_run(fake_run, ranked_list)
+    assert shell.calls == [[WSLPATH, "-w", str(path)]]
+    assert opened == [path.as_uri()]
+
+
+@pytest.mark.parametrize(
+    "browser_failure",
+    [lambda url: False, webbrowser.Error("no runnable browser"), OSError("boom")],
+    ids=["returns-false", "webbrowser-error", "os-error"],
+)
+def test_open_on_wsl_prints_a_hint_when_nothing_works(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    shell: FakeShell,
+    wsl: None,
+    monkeypatch: pytest.MonkeyPatch,
+    browser_failure: Callable[[str], bool] | BaseException,
+) -> None:
+    def failing_open(url: str, *args: Any, **kwargs: Any) -> bool:
+        if isinstance(browser_failure, BaseException):
+            raise browser_failure
+        return browser_failure(url)
+
+    monkeypatch.setattr(cli.webbrowser, "open", failing_open)
+    result, path = open_run(fake_run, ranked_list)
+    hints = [line for line in result.stderr.splitlines() if "Could not open" in line]
+    assert hints == [f"Could not open a browser; open {path} manually."]
+    assert "Traceback" not in result.stderr
 
 
 # --- settings: flags, env and defaults ---------------------------------------------
