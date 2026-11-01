@@ -520,7 +520,7 @@
     "title": "Final verification gate: tests, lint, types, CLI smoke",
     "description": "After all implementation, tests, docs and reviews (including any review_feedback fixes) are done, run from /home/kasif/projects/agent-foundry/newsletter_digest: `uv sync`, `uv run pytest -q` (must pass; integration tests deselected), `uv run pytest -m integration --collect-only -q` (collects the integration test; do not require it to pass), `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyrefly check`, `uv run newsletter-digest --help`, and `uv run newsletter-digest --window 3x` (expect exit 2), plus `OPENROUTER_API_KEY= NEWSLETTER_MODEL= uv run newsletter-digest --window 1w` (expect exit 2 with actionable message; run with a temporary empty cwd or env override so no real .env is used). Also verify `git status` shows no .env, out/ or credential files staged/committed and grep the repo for accidental secrets. Fix trivial issues in tests/formatting yourself; for source defects set the owning coder task to review_feedback with exact failing output. Append a '## T022 \u2014 final verification' section to shared/implementation-notes.md with command results (re-read before editing; edit only your section). Local commit only if files changed (chore(newsletter_digest): final verification fixes), never push.",
     "assigned_to": "python_test",
-    "status": "pending",
+    "status": "done",
     "blocked_by": [
       "T010",
       "T011",
@@ -545,6 +545,19 @@
       "`uv run newsletter-digest --help` succeeds; invalid window and missing key exit 2",
       "No secrets, .env, out/ or credential files committed",
       "implementation-notes.md has a T022 section with the command results"
-    ]
+    ],
+    "results": {
+      "uv_sync": "ok (95 resolved, 92 audited), exit 0",
+      "pytest": "844 passed, 2 deselected in 9.02s, exit 0",
+      "pytest_integration_collect": "2/846 collected (844 deselected), exit 0",
+      "ruff_format_check": "46 files already formatted, exit 0",
+      "ruff_check": "All checks passed!, exit 0",
+      "pyrefly": "0 errors (2 suppressed), exit 0",
+      "cli_help": "exit 0, all nine options plus -h",
+      "cli_invalid_window": "exit 2: Invalid window '3x' ... (with dummy key + --model); without key exits 2 on the missing-key error first",
+      "cli_missing_key": "exit 2, 'Error: OPENROUTER_API_KEY is not set; copy .env.example to .env and set it.', no traceback (both /usr/bin/env -u and empty-var forms, empty cwd)",
+      "hygiene": "no .env/out/credential files tracked or in history; secret grep finds only 3 fake test constants"
+    },
+    "notes": "All gates green on HEAD 5820654; no source/test changes. Details in shared/implementation-notes.md '## T022 \u2014 final verification'."
   }
 ]

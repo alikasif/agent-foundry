@@ -886,3 +886,43 @@ Results:
   that limit from `settings.reader_parallelism`. I did not add a shared constant,
   because config.py is outside this task. A test asserts that no `at most <n>
   tasks` text is left in the system prompt.
+
+## T022 — final verification
+
+Run on 2026-11-01 from `newsletter_digest/` on branch `feat/newsletter-digest` at
+HEAD `5820654`. Python 3.13.5, pytest 9.2.0, ruff 0.17.3, pyrefly 1.4.0. No source,
+test or config file was changed.
+
+| Command | Result | Exit |
+|---|---|---|
+| `uv sync` | Resolved 95 packages, audited 92; nothing to change | 0 |
+| `uv run pytest -q` | 844 passed, 2 deselected in 9.02s | 0 |
+| `uv run pytest -m integration --collect-only -q` | 2/846 collected (844 deselected): the two live tests in `tests/test_integration.py` | 0 |
+| `uv run ruff format --check .` | 46 files already formatted | 0 |
+| `uv run ruff check .` | All checks passed! | 0 |
+| `uv run pyrefly check` | 0 errors (2 suppressed) | 0 |
+| `uv run newsletter-digest --help` | Usage, all nine options and `-h/--help` | 0 |
+| `newsletter-digest --window 3x` (empty cwd, no key) | `Error: OPENROUTER_API_KEY is not set; copy .env.example to .env and set it.` | 2 |
+| `newsletter-digest --model x/y --window 3x` (empty cwd, dummy key) | `Error: Invalid window '3x'; use 1w, 2w, 1m or Nd with N between 1 and 365 (e.g. 10d).` | 2 |
+| `/usr/bin/env -u OPENROUTER_API_KEY -u NEWSLETTER_MODEL newsletter-digest --window 1w` (empty cwd) | the same `OPENROUTER_API_KEY is not set` usage error | 2 |
+| `OPENROUTER_API_KEY= NEWSLETTER_MODEL= newsletter-digest --window 1w` (empty cwd) | the same `OPENROUTER_API_KEY is not set` usage error | 2 |
+
+- The CLI smoke runs used `uv run --project <project_dir>` from an empty scratch
+  directory, so no `.env` could be found. Every error was a click usage message on
+  stderr, with no traceback, and no files were written to the cwd (no `out/`).
+- Validation order: `Settings.build` reports only the first config error, in the
+  order API key, then model, then window. So `--window 3x` with no key reports the
+  key. To see the window message, the key and the model must be set. This matches the
+  ConfigError → exit 2 contract, so it is not a defect.
+- pyrefly's "2 suppressed" comes from the only two ignore comments in the repo. The
+  first is `src/newsletter_digest/agent.py:104`, `# pyrefly: ignore[bad-assignment]`,
+  for `FilesystemMiddleware` in `SubAgent["middleware"]` (documented in T008). The
+  second is `tests/test_config.py:417`, a `# type: ignore[misc]` on a deliberate write
+  to a frozen field. Both are deliberate, so nothing is left to document.
+- Hygiene: `git ls-files` lists no `.env`, `out/`, credential, token or key files.
+  `.env`, `out/` and `.coverage` are git-ignored, and `git log --all -- .env 'out/*'`
+  is empty. A `git grep` for OpenRouter/OpenAI/Google/GitHub key patterns and PEM
+  headers finds only the three fake test constants (`tests/test_agent.py:72`,
+  `tests/test_cli.py:30`, `tests/test_config.py:23`).
+- The live integration tests were collected but not run: they need Gmail OAuth, npx
+  and a real OpenRouter key.

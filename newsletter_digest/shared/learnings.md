@@ -167,3 +167,8 @@
 - (T020 round 2) `shared/task_list.json` is written with `json.dumps(indent=2,
   ensure_ascii=True)` and no trailing newline. Match that exactly, or a status edit
   rewrites every line containing non-ASCII text.
+- (T022) `Settings.build` stops at the first ConfigError, checking the API key, then the
+  model, then the window. A smoke test of `--window 3x` with no key therefore prints the
+  missing-key error, which still exits 2. To check the window message, pass a dummy key
+  and `--model x/y`. To run the console script from an empty cwd, so that no `.env`
+  is found, use `uv run --project <project_dir> newsletter-digest ...`.
