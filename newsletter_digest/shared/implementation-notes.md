@@ -1182,3 +1182,71 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
 - Verified: ruff format/check and pyrefly clean (0 errors); `uv run pytest` 858 passed,
   including `tests/test_flag_off_identity.py` and the `.env.example` pin test. No test
   files edited.
+
+## T025 — links.py: link classification, tracker tables moved from store.py
+
+- **Move.** `TRACKER_HOSTS` / `TRACKER_HOST_PREFIXES` moved with identical values;
+  `is_tracker_host` keeps `store._is_tracker_host` semantics exactly (prefix match, then
+  exact-or-parent-domain match; input must already be lower-case). `store.py` imports
+  them (`TRACKER_HOSTS as TRACKER_HOSTS` redundant-alias form, so ruff F401 treats them
+  as re-exports) and binds `_is_tracker_host = is_tracker_host`. Identity checked:
+  `store.TRACKER_HOSTS is links.TRACKER_HOSTS` etc. `store.DEFAULT_PORTS` stays in store;
+  links has its own private `_DEFAULT_PORTS` (links may not import store).
+- **Matching model.** Keyword tables are regex fragments (one alternation per kind),
+  matched against `host + path + "?" + query`, lower-cased. The URL is split first and
+  then path and query are percent-decoded once, so `%2Funsub%2F` matches but an encoded
+  `%23`/`%3F` cannot move text into the fragment. The fragment is ignored (never sent).
+  Host trailing dot is stripped (`x.com.`). Pixel and sponsor path rules see the path
+  only; sponsor utm rules see parsed query pairs.
+- **Tables (what is classified).**
+  - UNSUBSCRIBE: `unsubscribe` anywhere (covers `list-unsubscribe`, `unsubscribe.php`,
+    `?action=unsubscribe`), `\bunsub\b`, `\bopt[-_]?out\b`, `\bdisable[-_]?email`
+    (Substack's one-click unsubscribe is `/action/disable_email`; addition).
+  - PREFERENCES: `preference(s)`, `prefs`, `manage-subscription(s)`, `email-settings`,
+    `subscription-center/centre/settings`, `list-manage.com/profile` (Mailchimp
+    "update preferences"; addition).
+  - VIEW_IN_BROWSER: `view-in-(your-)browser`, `webversion`/`web-version`,
+    `view-online`, `view-(as-)web-page`, `browser-view`, `campaign-archive*.com`
+    (Mailchimp web versions; addition). `-`/`_`/nothing accepted between words.
+  - PIXEL: last path segment exactly `open`/`pixel`/`beacon` (any extension),
+    `/(track|wf|e|o)/open` (Mailchimp `track/open.php`, SendGrid `wf/open`),
+    `1x1|spacer|pixel|tracking-pixel` image file names, `track(ing)-pixel`, hosts
+    starting `pixel.`/`beacon.`. Deliberately NOT a bare `pixel` word: tech newsletters
+    link "google-pixel-10-review" articles.
+  - SPONSOR: hosts doubleclick.net, googleadservices.com, googlesyndication.com,
+    adservice.google.com, adnxs.com, adsrvr.org, amazon-adsystem.com, criteo.com/.net,
+    taboola.com, outbrain.com (exact or parent domain); host prefixes `ads.`,
+    `adserver.`, `adclick.`; paths `/sponsor(s|ed|ship)` and `/ad/`, `/ads/`;
+    `utm_medium`/`utm_source` whose `-`/`_`/space-separated words include sponsor,
+    sponsored, sponsorship, paid, ad, ads, advert, advertisement, advertising, cpc, ppc
+    (`utm_medium=paid_social` is SPONSOR). `utm_campaign` is ignored (issue names are
+    free text, e.g. a campaign about ad regulation).
+  - SOCIAL hosts: x.com, twitter.com, facebook.com, fb.com, linkedin.com, instagram.com,
+    threads.net, threads.com (Threads' current domain; addition), bsky.app. SOCIAL =
+    share intent (`/intent`, `/share`, `/sharer`, `/sharing`, `/sharearticle`,
+    `/cws/share`, `/dialog/share|feed`), home page, any one-segment path (profile or
+    top-level page), and the two-segment profile sections `linkedin.com/in|company|
+    school|showcase/<x>` and `bsky.app/profile/<x>`.
+  - NOT SOCIAL (stay ARTICLE, fetched, likely ending as a BLOCKED/PAYWALLED note): a
+    specific post (`x.com/<h>/status/<id>`, `bsky.app/profile/<h>/post/<id>`,
+    `threads.net/@h/post/<id>`, `instagram.com/p/<id>`, LinkedIn `/pulse/...`,
+    `/posts/...`, Facebook `/<page>/posts/<id>`), and every host not listed: YouTube
+    (videos and channels), Reddit, Mastodon, TikTok, Hacker News. LinkedIn profile pages
+    are SOCIAL although the task names only `linkedin.com/share`: I read "profile/home
+    URLs" as applying to every listed site.
+- **Totality.** `urlsplit`/`parse_qsl` `ValueError` (bad IPv6 brackets, NFKC netloc)
+  falls back to the three keyword kinds on the decoded whole string, then ARTICLE. Port
+  is never read in `classify_link`, so `:99999` cannot raise. Fuzzed 200k random
+  strings from a URL-ish alphabet: no exception from `classify_link` or `ledger_key`.
+- **`ledger_key`.** Lower-cases scheme and host, drops userinfo (not in the plan text;
+  userinfo hops are rejected by the URL policy anyway, and the request target is the
+  same), drops a default port (80/443) and the fragment, maps an empty path to `/` (the
+  request httpx actually sends), keeps path and query verbatim (no sorting, no tracking
+  param removal: two different queries are two different requests). IPv6 hosts are
+  re-bracketed. Unparseable input (`[`-broken host, bad port) is returned unchanged.
+- **Tradeoff.** Matching favours recall on UNSUBSCRIBE/PREFERENCES (the dangerous
+  direction is requesting a one-click unsubscribe); an article slug such as
+  `/why-users-opt-out` or `/developer-preferences-survey` becomes a quiet skip (AF-13
+  accepted risk).
+- No tests added here (tests/test_links.py is T034). store tests and the identity test
+  pass unchanged: 858 passed.

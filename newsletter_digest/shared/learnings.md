@@ -189,3 +189,6 @@
   directory: a generic `probe.py` written there was overwritten by another agent between
   the write and the run (the output came from their extract probe). Prefix scratch
   files with your task id (`t027_probe.py`).
+- (T025) When keyword-matching URLs, `urlsplit` BEFORE `unquote`: decoding first turns
+  `%23`/`%3F` into `#`/`?`, so `/a%23unsubscribe` moves the keyword into the fragment
+  and a substring check over path+query misses it.

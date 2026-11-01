@@ -18,6 +18,9 @@ from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from newsletter_digest.links import TRACKER_HOST_PREFIXES as TRACKER_HOST_PREFIXES
+from newsletter_digest.links import TRACKER_HOSTS as TRACKER_HOSTS
+from newsletter_digest.links import is_tracker_host
 from newsletter_digest.models import (
     AddResult,
     ArticleIn,
@@ -38,6 +41,10 @@ from newsletter_digest.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Tracker tables live in ``links`` (shared with article fetching); the old names
+# stay importable from here as the same objects.
+_is_tracker_host = is_tracker_host
 
 TRACKING_PARAM_PREFIX = "utm_"
 TRACKING_PARAMS: frozenset[str] = frozenset(
@@ -73,37 +80,6 @@ TRACKING_PARAMS: frozenset[str] = frozenset(
         "_bhlid",
         "rdt",
     }
-)
-# Email-service click-tracking / link-shortener hosts (matched exactly or as a parent
-# domain). Only used to prefer a real destination URL when two articles merge.
-TRACKER_HOSTS: frozenset[str] = frozenset(
-    {
-        "list-manage.com",
-        "mailchi.mp",
-        "flight.beehiiv.net",
-        "convertkit-mail.com",
-        "convertkit-mail2.com",
-        "sendgrid.net",
-        "mandrillapp.com",
-        "hubspotlinks.com",
-        "mlsend.com",
-        "rs6.net",
-        "t.co",
-        "lnkd.in",
-        "bit.ly",
-        "tinyurl.com",
-        "ow.ly",
-        "buff.ly",
-    }
-)
-TRACKER_HOST_PREFIXES: tuple[str, ...] = (
-    "link.",
-    "links.",
-    "click.",
-    "clicks.",
-    "email.",
-    "track.",
-    "tracking.",
 )
 DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
 
@@ -225,13 +201,6 @@ def _digit_tokens(tokens: list[str]) -> set[str]:
 def _host(url: str) -> str:
     """Host of an already-normalised URL ("" if none)."""
     return urlsplit(url).hostname or ""
-
-
-def _is_tracker_host(host: str) -> bool:
-    """True for click-tracking / shortener hosts (``TRACKER_HOSTS`` or prefixes)."""
-    if host.startswith(TRACKER_HOST_PREFIXES):
-        return True
-    return any(host == h or host.endswith(f".{h}") for h in TRACKER_HOSTS)
 
 
 def _newsletter_names(article: StoredArticle) -> list[str]:
