@@ -288,3 +288,15 @@
 - (T042) To mutation-test an AST guard without touching `src/`, read the source dir from a
   module global in a module-scoped fixture and let a scratch `-p` plugin overwrite it in
   `pytest_collection_modifyitems` (`item.module.SOURCE_DIR = Path(copy)`).
+- (T044 fix) Per-call state for an httpx request hook (e.g. the hops of one redirect
+  chain): pass a mutable object in `client.stream(..., extensions={key: obj})`. httpx
+  0.28 builds every redirect request with `extensions=request.extensions`, and the
+  timeout merge copies the dict but not its values, so the hook sees the same object on
+  every hop. httpcore ignores unknown extension keys.
+- (T044 fix) Never match bot-challenge markers (`captcha`) against raw HTML before
+  extraction: `g-recaptcha` / `recaptcha/api.js` on ordinary signup forms match. Decide
+  the challenge only when extraction found too little text.
+- (T045 fix) A pacer sleep is an await inside a held slot: re-check shared "stop" state
+  (a breaker) after every await that can take long, not only after acquiring the slot.
+  Test it deterministically by injecting a pacer `sleep` that waits on an `anyio.Event`
+  set when the failure is raised (no checkpoint between the raise and the breaker flag).

@@ -72,6 +72,12 @@ ARTICLE_HTML = (
     b"<body><article><p>" + b"Readable words. " * 40 + b"</p></article></body></html>"
 )
 TYPICAL_ARTICLE = Path(__file__).parent / "fixtures" / "pages" / "typical_article.html"
+LONG_ARTICLE = Path(__file__).parent / "fixtures" / "pages" / "long_article.html"
+RECAPTCHA_WIDGET = (
+    b'<form class="newsletter-signup"><div class="g-recaptcha captcha" '
+    b'data-sitekey="k"></div></form>'
+    b'<script src="https://www.google.com/recaptcha/api.js" async defer></script>'
+)
 
 Route = Callable[[httpx.Request], Awaitable[httpx.Response]]
 FetchResult = FetchedPage | FetchFailure
@@ -763,12 +769,49 @@ async def test_503_without_challenge_header_is_http_error() -> None:
         b"Enable JavaScript and cookies to continue",
     ],
 )
-async def test_short_challenge_body_is_blocked(marker: bytes) -> None:
-    extractor = FakeExtractor()
+@pytest.mark.parametrize(
+    "result", [None, text_of(MIN_TEXT_CHARS - 1)], ids=["no_text", "short_text"]
+)
+async def test_short_challenge_body_is_blocked(
+    marker: bytes, result: ExtractedText | None
+) -> None:
+    # T044 #1: the challenge is decided after extraction found too little text.
+    extractor = FakeExtractor(result=result)
     body = b"<html><body><h1>" + marker + b"</h1></body></html>"
     site = Site({ARTICLE_URL: page(body)})
     assert await fetch_one(site, extractor=extractor) is FetchFailure.BLOCKED
-    assert extractor.calls == []
+    assert len(extractor.calls) == 1
+
+
+async def test_challenge_marker_with_article_text_is_a_page() -> None:
+    extractor = FakeExtractor(result=text_of(MIN_TEXT_CHARS))
+    body = b"<html><body><h1>Please complete the CAPTCHA</h1></body></html>"
+    site = Site({ARTICLE_URL: page(body)})
+    assert isinstance(await fetch_one(site, extractor=extractor), FetchedPage)
+
+
+async def test_short_body_without_challenge_marker_is_too_short() -> None:
+    extractor = FakeExtractor(result=None)
+    site = Site({ARTICLE_URL: page(b"<html><body><p>hi</p></body></html>")})
+    assert await fetch_one(site, extractor=extractor) is FetchFailure.TOO_SHORT
+
+
+async def test_article_with_recaptcha_widget_is_a_page() -> None:
+    # T044 #1 regression: reCAPTCHA markup on a signup form is not a bot wall.
+    html = LONG_ARTICLE.read_bytes().replace(
+        b"</body>", RECAPTCHA_WIDGET + b"</body>", 1
+    )
+    assert RECAPTCHA_WIDGET in html
+    assert len(html) <= CHALLENGE_MAX_BYTES
+    site = Site({ARTICLE_URL: page(html)})
+    with anyio.fail_after(TIMEOUT_S):
+        async with PageFetcher(
+            make_config(max_bytes=DEFAULT_FETCH_MAX_BYTES),
+            transport=httpx.MockTransport(site),
+        ) as fetcher:
+            result = await fetcher.fetch(ARTICLE_URL)
+    assert isinstance(result, FetchedPage)
+    assert result.text.chars >= MIN_TEXT_CHARS
 
 
 async def test_challenge_marker_in_long_body_is_not_blocked() -> None:
@@ -1305,11 +1348,38 @@ async def test_failed_request_still_claims_its_url() -> None:
     assert site.requested == [ARTICLE_URL]
 
 
-async def test_redirect_back_to_requested_url_is_duplicate() -> None:
+async def test_redirect_back_to_requested_url_is_too_many_redirects() -> None:
+    # T044 #2: a loop inside one chain is a fetch failure, not a DUPLICATE.
     site = Site({ARTICLE_URL: redirect("https://news.example/b")})
     site.routes["https://news.example/b"] = redirect(ARTICLE_URL)
-    assert await fetch_one(site) is FetchFailure.DUPLICATE
+    assert await fetch_one(site) is FetchFailure.TOO_MANY_REDIRECTS
     assert site.requested == [ARTICLE_URL, "https://news.example/b"]
+
+
+async def test_redirect_loop_through_check_page_is_too_many_redirects() -> None:
+    check = "https://news.example/check"
+    site = Site(
+        {
+            TRACKER_1: redirect(ARTICLE_URL),
+            ARTICLE_URL: redirect(check),
+            check: redirect("https://NEWS.example/a#again"),
+        }
+    )
+    result = await fetch_one(site, TRACKER_1, config=make_config(max_redirects=10))
+    assert result is FetchFailure.TOO_MANY_REDIRECTS
+    assert site.requested == [TRACKER_1, ARTICLE_URL, check]
+
+
+async def test_redirect_into_another_fetchs_chain_is_duplicate() -> None:
+    check = "https://news.example/check"
+    site = Site(
+        {ARTICLE_URL: redirect(check), check: page(), TRACKER_1: redirect(check)}
+    )
+    with anyio.fail_after(TIMEOUT_S):
+        async with mock_fetcher(site) as fetcher:
+            assert isinstance(await fetcher.fetch(ARTICLE_URL), FetchedPage)
+            assert await fetcher.fetch(TRACKER_1) is FetchFailure.DUPLICATE
+    assert site.requested == [ARTICLE_URL, check, TRACKER_1]
 
 
 async def test_each_fetcher_has_its_own_ledger() -> None:

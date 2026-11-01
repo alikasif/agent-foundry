@@ -20,7 +20,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol
-from urllib.parse import urlsplit
 
 import anyio
 from langchain_core.language_models import BaseChatModel
@@ -28,7 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from newsletter_digest.config import Settings
 from newsletter_digest.fetch import USER_AGENT, FetchConfig, FetchedPage, PageFetcher
-from newsletter_digest.links import FETCHABLE_KINDS, classify_link
+from newsletter_digest.links import FETCHABLE_KINDS, classify_link, log_host
 from newsletter_digest.llm import ModelFactory
 from newsletter_digest.models import (
     ArticleSummary,
@@ -346,7 +345,7 @@ class _Run:
         LOGGER.debug(
             "Article %s from %s: %s, %d bytes, %d chars",
             item.id,
-            _host(item.url),
+            log_host(item.url),
             "summarised" if isinstance(outcome, FetchedContent) else outcome.name,
             0 if page is None else page.byte_count,
             0 if page is None else page.text.chars,
@@ -359,10 +358,12 @@ class _Run:
         # Selected items always have a URL (select_candidates).
         assert item.url is not None
         url = item.url
-        # Once the breaker is open no page could be summarised; skip the request.
-        if self._breaker_open:
-            return FetchFailure.RATE_LIMITED, None
         async with self._http_limiter:
+            # Checked after the slot is acquired: every task starts at once, so a
+            # check before the limiter would run before any 429 could arrive.
+            # Once the breaker is open no page could be summarised; skip the request.
+            if self._breaker_open:
+                return FetchFailure.RATE_LIMITED, None
             page = await fetcher.fetch(url)
         if isinstance(page, FetchFailure):
             return page, None
@@ -371,6 +372,9 @@ class _Run:
             if self._breaker_open:
                 return FetchFailure.RATE_LIMITED, page
             await self._pacer.wait()
+            # Another call may have hit a 429 while this one waited on the pacer.
+            if self._breaker_open:
+                return FetchFailure.RATE_LIMITED, page
             try:
                 summary = await self._get_summariser()(item.title, url, page.text.text)
             except SummaryError as exc:
@@ -407,13 +411,3 @@ def _log_stats(stats: FetchStats) -> None:
         stats.skipped,
         failed,
     )
-
-
-def _host(url: str | None) -> str:
-    """Host of `url` for log lines (never the full URL)."""
-    if url is None:
-        return "unknown host"
-    try:
-        return urlsplit(url).hostname or "unknown host"
-    except ValueError:
-        return "unknown host"

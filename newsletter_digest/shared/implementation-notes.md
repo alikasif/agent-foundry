@@ -1764,10 +1764,14 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   runs inside the LLM limiter slot, per AF-1 step 2.3.
 - **Breaker also skips the fetch (addition).** Once a 429 has opened the breaker, an item
   that has not started its request yet gets `RATE_LIMITED` without fetching the page,
-  since its page could never be summarised (saves publisher requests and time). Items
-  already waiting for an LLM slot re-check the breaker before and after the pacer wait.
-  Calls already in flight when the first 429 arrives still finish (with the default LLM
-  concurrency 2, at most one extra call).
+  since its page could never be summarised (saves publisher requests and time).
+  *Corrected in T045 round 1:* the original code checked the breaker before `async with
+  self._http_limiter`, which every task passes at start-up, so the skip never fired
+  (T039 strict xfail). The check now runs after the HTTP slot is acquired. Items that
+  already hold a page re-check the breaker after acquiring an LLM slot and again after
+  the pacer wait (the second re-check was also missing until T045 round 1). Calls
+  already in flight when the first 429 arrives still finish (with the default LLM
+  concurrency 2, at most one extra call); pages already being fetched still finish.
 - **429 detection**: duck-typed `exc.status_code == 429` or
   `exc.response.status_code == 429` (V19). Every other summariser exception, empty
   content and unparseable output give `SUMMARY_FAILED`. The reply text is
@@ -2134,3 +2138,60 @@ No change to `src/`, `pyproject.toml`, `uv.lock` or existing test files.
   2 deselected, 2 xfailed; flag-off identity green; ruff and pyrefly clean for this file
   (a pyrefly error seen during the run is in T041's in-progress `test_wiring_fetch.py`).
   Coverage of the test module 99 % (only the failure-message formatter is unhit).
+
+## T030 / T031 / T029 review fixes, round 1 (T044 #1 #2 #6, T045 #1 #2 #3, T046 #1 #3)
+
+- **Challenge markers decided after extraction (T044 #1, changes the T030 "order of
+  checks").** New order after the body read and sniff: extraction; JSON-LD paywall;
+  then, only when the extracted text is None or under `MIN_TEXT_CHARS`, the challenge
+  markers (body <= `CHALLENGE_MAX_BYTES` and `_CHALLENGE_RE` matches the raw bytes) ->
+  BLOCKED; otherwise TOO_SHORT. An article with a reCAPTCHA signup widget
+  (`g-recaptcha`, `recaptcha/api.js`) is now a page. Tradeoff: a challenge page is now
+  extracted before it is recognised (one worker-thread parse of <= 64 KiB, negligible).
+  A JSON-LD not-free page with a challenge marker is PAYWALLED, not BLOCKED (the
+  paywall check comes first, as the reviewer suggested).
+- **Redirect loops are TOO_MANY_REDIRECTS (T044 #2, changes the T030 "hook order"
+  note).** `_download` passes a fresh `set` in the request extension
+  `newsletter_digest.chain_hops`; httpx 0.28 hands the same extensions dict values to
+  every redirect request (`_build_redirect_request` uses `request.extensions`; the
+  timeout merge copies the dict but keeps the set). The hook order is now: URL policy ->
+  `NEVER_REQUEST_KINDS` (NOT_ARTICLE) -> `ledger_key` already in this chain
+  (TOO_MANY_REDIRECTS) -> ledger claim (DUPLICATE). DUPLICATE now only means the key was
+  claimed by another fetch. Chosen over a ContextVar for explicit data flow. Keys use
+  `links.ledger_key`, so `/a` and `HTTPS://NEWS.example/a#x` are the same hop.
+- **`abandon_on_cancel=True` on extraction (T044 #6).** A cancelled fetch no longer waits
+  for a running extraction; the thread finishes in the background and its result is
+  dropped. No test pins this yet (tester follow-up, optional).
+- **Breaker inside the HTTP limiter and after the pacer (T045 #1, #2).** See the corrected
+  T031 note. The strict xfail `test_open_breaker_skips_requests_of_items_queued_for_http`
+  is now a normal test, driven by an `anyio.Event` instead of sleeps (T045 #3): the
+  `FakeFetcherFactory` got an optional `gate` event that holds every fetch after the
+  first; it asserts exactly 2 page requests. New
+  `test_breaker_rechecked_after_pacer_wait`: real `RatePacer(0.25)` with an injected
+  sleep that waits for the 429 event, LLM concurrency 2, 4 items -> exactly one model
+  call and `RATE_LIMITED: 4`. Both tests fail against the old code (checked).
+- **`extract.default_extractor(html, max_chars, /)` (T046 #1).** Public, positional
+  adapter over `extract_article_text`; it is `PageFetcher`'s default extractor, and
+  `fetch._extract_text` is deleted (supersedes the T030 "Extractor signature mismatch"
+  note). The strict xfail in tests/test_extract.py became
+  `test_default_extractor_satisfies_extractor_alias` (binds positionally, typed as
+  `Extractor`, same result as `extract_article_text`). `extract_article_text` keeps its
+  keyword-only `max_chars` (AF-P5).
+- **`links.log_host(url: str | None)` (T046 #3).** One "log the host, never the URL"
+  helper; fetch.py and enrich.py use it and their `_host` copies (and `urlsplit`
+  imports) are gone. `store._host` stays (different semantics).
+- **Deferred (not done in this round, per the lead):** T046 #2 (`untrusted.py` shared
+  delimiter scrub), T046 #4 (skip-reason constants into models.py), T046 #5 (R-F2 is
+  documented only), T046 #6 (llm import in enrich), T046 #7 (README DNS64 note, docs),
+  T044 #3 (TLS `ssl_context` test, T036 tester), T044 #5 (Azure WireServer address,
+  optional). T045's `fetch_env=None` default vs AF-6 `{}`: deliberate, avoids a mutable
+  default argument; behaviour is the same.
+- **Tests touched (minimal):** test_fetch.py (`test_short_challenge_body_is_blocked`
+  now parametrised over None/short extraction and asserts one extractor call; new
+  `test_challenge_marker_with_article_text_is_a_page`,
+  `test_short_body_without_challenge_marker_is_too_short`,
+  `test_article_with_recaptcha_widget_is_a_page` (real extractor, long_article.html +
+  widget); `test_redirect_back_to_requested_url_is_duplicate` renamed to
+  `..._is_too_many_redirects`; new loop test `/tracker -> /a -> /check -> /a#again` and
+  `test_redirect_into_another_fetchs_chain_is_duplicate`), test_enrich.py, test_extract.py.
+  Full suite: 2407 passed, 2 deselected, 0 xfailed; ruff and pyrefly clean.

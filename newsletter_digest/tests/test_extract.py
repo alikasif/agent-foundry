@@ -32,6 +32,8 @@ from newsletter_digest.extract import (
     MIN_TEXT_CHARS,
     TRUNCATION_MARKER,
     ExtractedText,
+    Extractor,
+    default_extractor,
     extract_article_text,
 )
 
@@ -646,18 +648,14 @@ def test_max_chars_is_keyword_only() -> None:
         extract_article_text(b"<html></html>", 500)  # type: ignore[misc]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason=(
-        "AF-P5 contract conflict: Extractor = Callable[[bytes, int], ...] is "
-        "positional but extract_article_text takes max_chars keyword-only, so the "
-        "default `extractor: Extractor = extract_article_text` does not type-check "
-        "and a positional call fails"
-    ),
-)
-def test_extract_article_text_satisfies_extractor_alias() -> None:
-    inspect.signature(extract_article_text).bind(b"<html></html>", 500)
+def test_default_extractor_satisfies_extractor_alias() -> None:
+    # T046 #1: the positional `Extractor` contract has a public default in extract.py.
+    extractor: Extractor = default_extractor
+    inspect.signature(extractor).bind(b"<html></html>", 500)
+    html = (PAGES / "typical_article.html").read_bytes()
+    assert extractor(html, DEFAULT_MAX_CHARS) == extract_article_text(
+        html, max_chars=DEFAULT_MAX_CHARS
+    )
 
 
 # --- Purity: no network, thread safety, determinism

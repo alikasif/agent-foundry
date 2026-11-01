@@ -190,6 +190,8 @@ class FakeFetcher:
         """Return (or raise) the scripted outcome for `url` after a short delay."""
         owner = self._owner
         owner.calls.append(url)
+        if owner.gate is not None and len(owner.calls) > 1:
+            await owner.gate.wait()
         owner.in_flight += 1
         owner.peak = max(owner.peak, owner.in_flight)
         try:
@@ -207,10 +209,15 @@ class FakeFetcher:
 
 @dataclass
 class FakeFetcherFactory:
-    """`fetcher_factory` stand-in; unscripted URLs fetch and extract fine."""
+    """`fetcher_factory` stand-in; unscripted URLs fetch and extract fine.
+
+    With a `gate`, every fetch after the first waits for the event before it
+    completes.
+    """
 
     outcomes: dict[str, FetchOutcome] = field(default_factory=dict)
     delay: float = 0.005
+    gate: anyio.Event | None = None
     configs: list[FetchConfig] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
@@ -1328,11 +1335,18 @@ async def test_default_pacer_uses_fetch_llm_interval(
 # ================================================================ pipeline: breaker
 
 
-def rate_limit_first(error: Exception) -> Responder:
-    """Return a responder that raises `error` on the first call only."""
+def rate_limit_first(error: Exception, raised: anyio.Event | None = None) -> Responder:
+    """Return a responder that raises `error` on the first call only.
+
+    `raised` is set when the error is handed out. The error then reaches the
+    breaker with no checkpoint in between, so a task woken by the event already
+    sees the breaker open.
+    """
 
     def responder(index: int, messages: list[BaseMessage]) -> str | Exception:
         if index == 0:
+            if raised is not None:
+                raised.set()
             return error
         return summary_json(title_of(messages))
 
@@ -1370,19 +1384,13 @@ async def test_first_429_opens_breaker_for_all_queued_items(
 
 
 @pytest.mark.anyio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T031 notes claim an open breaker also skips the request of items that "
-        "have not started fetching, but every task checks the breaker before "
-        "queueing on the HTTP limiter, all at start-up, so queued items still "
-        "fetch (enrich.py _Run._process). Remove this marker when fixed."
-    ),
-)
 async def test_open_breaker_skips_requests_of_items_queued_for_http() -> None:
-    fetchers = FakeFetcherFactory(delay=0.03)
+    raised = anyio.Event()
+    # The second fetch is held until the 429 is raised, so the breaker opens while
+    # one page is in flight and the other four items are queued on the HTTP limiter.
+    fetchers = FakeFetcherFactory(gate=raised)
     factory = FakeModelFactory(
-        model=FakeChatModel(responder=rate_limit_first(StatusError(429)), delay=0.01)
+        model=FakeChatModel(responder=rate_limit_first(StatusError(429), raised))
     )
     items = [make_item(f"i{n}") for n in range(6)]
     settings = make_settings(fetch_concurrency=1, fetch_llm_concurrency=1)
@@ -1396,9 +1404,40 @@ async def test_open_breaker_skips_requests_of_items_queued_for_http() -> None:
     assert len(factory.model.calls) == 1
     assert result.fetch is not None
     assert result.fetch.failed == {"RATE_LIMITED": 6}
-    # One fetch at a time, 0.03 s each; the 429 arrives at about 0.04 s, while the
-    # second page is being fetched, so at most two pages should be requested.
-    assert len(fetchers.calls) <= 2
+    # The first page (summarised with the 429) and the one in flight when it came.
+    assert len(fetchers.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_breaker_rechecked_after_pacer_wait(fetchers: FakeFetcherFactory) -> None:
+    # T045 #2: the second task holds an LLM slot and sleeps in the pacer while the
+    # first call fails with 429; it must not make its summary call afterwards.
+    raised = anyio.Event()
+    pacer_sleeps: list[float] = []
+
+    async def sleep_until_raised(seconds: float) -> None:
+        pacer_sleeps.append(seconds)
+        await raised.wait()
+
+    factory = FakeModelFactory(
+        model=FakeChatModel(responder=rate_limit_first(StatusError(429), raised))
+    )
+    items = [make_item(f"i{n}") for n in range(4)]
+    settings = make_settings(fetch_concurrency=4, fetch_llm_concurrency=2)
+    result = await run_enrich(
+        make_list(items),
+        make_rankings(items),
+        settings,
+        fetchers=fetchers,
+        factory=factory,
+        pacer=RatePacer(0.25, sleep=sleep_until_raised),
+    )
+    assert len(factory.model.calls) == 1
+    assert len(pacer_sleeps) == 1
+    assert 0 < pacer_sleeps[0] <= 0.25
+    assert result.fetch is not None
+    assert result.fetch.failed == {"RATE_LIMITED": 4}
+    assert result.fetch.summarised == 0
 
 
 @pytest.mark.anyio

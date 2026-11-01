@@ -1,7 +1,7 @@
 """Pure URL classification for article fetching (FR-030).
 
-Role: link kinds, `classify_link`, `is_tracker_host` and the tracker, unsubscribe,
-preferences, social, pixel and sponsor tables. No I/O.
+Role: link kinds, `classify_link`, `is_tracker_host`, `ledger_key`, `log_host` and the
+tracker, unsubscribe, preferences, social, pixel and sponsor tables. No I/O.
 
 Allowed imports: stdlib only; no project modules.
 
@@ -295,3 +295,13 @@ def ledger_key(url: str) -> str:
     if port is not None and port != _DEFAULT_PORTS.get(scheme):
         netloc = f"{netloc}:{port}"
     return urlunsplit((scheme, netloc, parts.path or "/", parts.query, ""))
+
+
+def log_host(url: str | None) -> str:
+    """Host of ``url`` for log lines, never the full URL ("unknown host" if none)."""
+    if url is None:
+        return "unknown host"
+    try:
+        return urlsplit(url).hostname or "unknown host"
+    except ValueError:
+        return "unknown host"

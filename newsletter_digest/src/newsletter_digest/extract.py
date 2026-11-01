@@ -90,6 +90,15 @@ def extract_article_text(html: bytes, *, max_chars: int) -> ExtractedText | None
     return ExtractedText(text=text, truncated=True, chars=len(text))
 
 
+def default_extractor(html: bytes, max_chars: int, /) -> ExtractedText | None:
+    """`extract_article_text` with the positional signature of `Extractor`.
+
+    The production default of `fetch.PageFetcher`, which calls its extractor
+    positionally through `anyio.to_thread.run_sync`.
+    """
+    return extract_article_text(html, max_chars=max_chars)
+
+
 def _tidy_whitespace(text: str) -> str:
     """Normalise newlines, drop control characters and collapse spaces/blank lines."""
     text = _LINE_BREAK_RE.sub("\n", text)

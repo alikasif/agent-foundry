@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from types import TracebackType
 from typing import Self
-from urllib.parse import urlsplit
 
 import anyio
 import anyio.to_thread
@@ -27,9 +26,14 @@ from newsletter_digest.extract import (
     MIN_TEXT_CHARS,
     ExtractedText,
     Extractor,
-    extract_article_text,
+    default_extractor,
 )
-from newsletter_digest.links import NEVER_REQUEST_KINDS, classify_link, ledger_key
+from newsletter_digest.links import (
+    NEVER_REQUEST_KINDS,
+    classify_link,
+    ledger_key,
+    log_host,
+)
 from newsletter_digest.models import FetchFailure
 from newsletter_digest.netguard import (
     BlockedAddressError,
@@ -71,6 +75,10 @@ _CHALLENGE_RE = re.compile(
     re.IGNORECASE,
 )
 _HTML_SNIFF_RE = re.compile(rb"<html|<!doctype html", re.IGNORECASE)
+
+# Request extension carrying the `ledger_key`s of the hops of one `fetch` call; httpx
+# hands the same extensions (and so the same set) to every redirect request.
+_CHAIN_HOPS_EXTENSION = "newsletter_digest.chain_hops"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -148,18 +156,12 @@ class _Body:
     data: bytes
 
 
-def _extract_text(html: bytes, max_chars: int) -> ExtractedText | None:
-    # `extract_article_text` takes `max_chars` by keyword only, so it does not fit
-    # the positional `Extractor` signature that `to_thread.run_sync` calls.
-    return extract_article_text(html, max_chars=max_chars)
-
-
 class PageFetcher:
     """Async context manager owning the guarded `httpx.AsyncClient` of one run.
 
-    Every hop passes the URL policy, the link-class check and the request ledger
-    (request hook); every new connection passes the address policy (guarded
-    transport). `fetch` never raises `Exception`.
+    Every hop passes the URL policy, the link-class check, the redirect-loop check
+    and the request ledger (request hook); every new connection passes the
+    address policy (guarded transport). `fetch` never raises `Exception`.
     """
 
     def __init__(
@@ -169,7 +171,7 @@ class PageFetcher:
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Resolver | None = None,
         inner_backend: httpcore.AsyncNetworkBackend | None = None,
-        extractor: Extractor = _extract_text,
+        extractor: Extractor = default_extractor,
     ) -> None:
         self._config = config
         self._extractor = extractor
@@ -237,22 +239,34 @@ class PageFetcher:
         except Exception as exc:
             LOGGER.warning(
                 "Unexpected error fetching a page from %s: %s",
-                _host(url),
+                log_host(url),
                 type(exc).__name__,
             )
             return FetchFailure.ERROR
 
     async def _check_hop(self, request: httpx.Request) -> None:
-        """Request hook, run by httpx before every hop including redirects."""
+        """Request hook, run by httpx before every hop including redirects.
+
+        A hop already seen in this fetch's own chain is a redirect loop
+        (TOO_MANY_REDIRECTS); one claimed by another fetch is a DUPLICATE.
+        """
         check_url_policy(request.url)
         hop_url = str(request.url)
         if classify_link(hop_url) in NEVER_REQUEST_KINDS:
             raise _RejectedHop(FetchFailure.NOT_ARTICLE)
+        chain_hops: set[str] = request.extensions[_CHAIN_HOPS_EXTENSION]
+        key = ledger_key(hop_url)
+        if key in chain_hops:
+            raise _RejectedHop(FetchFailure.TOO_MANY_REDIRECTS)
+        chain_hops.add(key)
         if not await self._ledger.claim(hop_url):
             raise _RejectedHop(FetchFailure.DUPLICATE)
 
     async def _download(self, url: str) -> _Body | FetchFailure:
-        async with self._client.stream("GET", url) as response:
+        chain_hops: set[str] = set()
+        async with self._client.stream(
+            "GET", url, extensions={_CHAIN_HOPS_EXTENSION: chain_hops}
+        ) as response:
             failure = _classify_head(response, self._config.max_bytes)
             if failure is not None:
                 return failure
@@ -265,15 +279,27 @@ class PageFetcher:
             return _Body(str(response.url), response.status_code, content_type, data)
 
     async def _extract(self, body: _Body) -> FetchedPage | FetchFailure:
-        if len(body.data) <= CHALLENGE_MAX_BYTES and _CHALLENGE_RE.search(body.data):
-            return FetchFailure.BLOCKED
+        """Extract the text, then classify: paywall, challenge, too short, page.
+
+        The challenge markers are matched only when extraction found too little
+        text, so an article that embeds a captcha widget (`g-recaptcha` markup on
+        a signup form) is not mistaken for a bot wall. The result is useless once
+        the fetch is cancelled, so a running extraction is abandoned.
+        """
         text = await anyio.to_thread.run_sync(
-            self._extractor, body.data, self._config.max_chars
+            self._extractor,
+            body.data,
+            self._config.max_chars,
+            abandon_on_cancel=True,
         )
         chars = 0 if text is None else text.chars
         if chars < PAYWALL_TEXT_CHARS and _NOT_FREE_RE.search(body.data):
             return FetchFailure.PAYWALLED
         if text is None or chars < MIN_TEXT_CHARS:
+            if len(body.data) <= CHALLENGE_MAX_BYTES and _CHALLENGE_RE.search(
+                body.data
+            ):
+                return FetchFailure.BLOCKED
             return FetchFailure.TOO_SHORT
         return FetchedPage(
             url=body.url,
@@ -372,11 +398,3 @@ def _media_type(response: httpx.Response) -> str:
 def _header(response: httpx.Response, name: str) -> str:
     """Stripped, lower-cased header value ("" when missing)."""
     return response.headers.get(name, "").strip().lower()
-
-
-def _host(url: str) -> str:
-    """Host of `url` for log lines (never the full URL)."""
-    try:
-        return urlsplit(url).hostname or "unknown host"
-    except ValueError:
-        return "unknown host"
