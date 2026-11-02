@@ -210,3 +210,177 @@ surface: the argv comes from a resolved, user-chosen path, and no shell is used.
 
 NEEDS_CHANGES: fix finding 1 (BLOCKER) before keeping F002. Findings 2-5 are MINOR and
 can be fixed in the same pass. F003 can stay as is apart from finding 5.
+
+---
+
+## Round 2: commit ce999e3 (F002/F003 review fixes)
+
+**Status:** APPROVED for F002 and F003. One MINOR follow-up (R2-1) is not blocking.
+Separately, R2-2 files a pre-existing MAJOR in gmail_mcp.py, outside the scope of F002/F003.
+
+Gates (run by the reviewer on ce999e3):
+- `uv run pytest -q`: 2520 passed, 2 deselected.
+- `ruff check` and `ruff format --check`: clean.
+- `pyrefly check`: 0 errors.
+- No source or test line over 88 characters.
+- `test_architecture.py` (with the new rule) and `test_flag_off_identity.py` pass.
+
+### Round-1 findings
+
+| # | Round 1 | Status | Evidence |
+|---|---|---|---|
+| 1 | BLOCKER: quadratic html.parser on the loop, outside the deadline | **fixed** | Detector is now `extract.interstitial_target` on `lxml.html.document_fromstring`. `fetch.py` runs it inside `_follow_interstitial` through `anyio.to_thread.run_sync(..., abandon_on_cancel=True)`, in the same `anyio.fail_at(deadline)` block as the onward download. `lxml>=6.1.3` is a direct dependency. |
+| 2 | MINOR: `urljoin` ValueError gives ERROR | **fixed** | extract.py wraps `urljoin`/`urlsplit` in `except ValueError: return None`. Probe: `http://[::1` (anchor and meta) gives TOO_SHORT and only the tracker is requested. |
+| 3 | MINOR: any refresh delay is followed; self-refresh gives TOO_MANY_REDIRECTS | **fixed** | `MAX_REFRESH_DELAY_S = 10`. Probe: 10 is followed; 10.5, 600, -1 and a 5000-digit delay (float inf) are not. Self-target check `ledger_key(target) == ledger_key(body.url)`: probe with the same URL and with `#frag` gives TOO_SHORT and one request. |
+| 4 | MINOR: `fetch` too long | **fixed** | `PageFetcher._follow_interstitial` is about 30 lines. `fetch` is back to download, extract, follow. |
+| 5 | MINOR: `_run_quietly` strict decode crash | **fixed** | `encoding="utf-8", errors="surrogateescape"`, and `ValueError` is caught. Round-1 probe rerun with fake tools on a scratch PATH: both paths return normally, and the fake explorer.exe received the raw `0xff` byte unchanged (`C:\x\377y`). The new real-subprocess test pins this. |
+
+### Timing probe rerun (64 KB, end to end)
+
+Through `PageFetcher.fetch`, real extractor, `timeout=2.0`, with a concurrent
+`anyio.sleep(0.5)`:
+
+| body | round 1 (b94b3fc) | round 2 fetch | round 2 concurrent sleep |
+|---|---|---|---|
+| `<a ` repeated | 33-38 s, loop frozen 33 s | 11.2 ms | 0.502 s |
+| `<b ` repeated | ~38 s | 7.5 ms | 0.501 s |
+| `<div\n` repeated | ~12 s | 8.1 ms | 0.502 s |
+
+`interstitial_target` alone on 18 malformed 64 KB inputs (unclosed tags, comments,
+declarations, PIs, CDATA, char refs, unclosed quotes, bad UTF-8): every one takes 4 ms or
+less. The new tests `test_unclosed_start_tags_parse_in_linear_time` and
+`test_hostile_page_keeps_the_deadline_and_the_loop_responsive` pin this.
+
+### SSRF guards on the onward URL (re-checked)
+
+The onward hop still goes through `_download(target, chain_hops)`, so it uses the same
+client, request hook and transport.
+
+- **MockTransport probe**, results and requests made:
+  - `:8443`, `u:p@`, `localhost` and `2130706433` each give UNSAFE, and only the tracker
+    is requested.
+  - `/unsubscribe` and `/manage-preferences` each give NOT_ARTICLE and are not requested.
+  - `ftp://` gives TOO_SHORT.
+- **Real guarded transport probe** (FakeResolver and ScriptedBackend):
+  - `[::ffff:127.0.0.1]`, NAT64 `[64:ff9b::a00:5]`, a mixed public+private answer and a
+    host resolving to `169.254.169.254` each give UNSAFE. The tracker is the only dial.
+  - A public onward host gives a `FetchedPage` with 2 dials. So the onward hop reaches
+    `GuardedNetworkBackend`, including the connected-address check.
+- **Budget:** 2 redirects, the interstitial, 2 redirects, then a page. With
+  `max_redirects=4` this gives TOO_MANY_REDIRECTS after 5 requests. With 5 it gives a
+  `FetchedPage` after 6.
+- **Loop:** A redirects to B, and B is an interstitial pointing to A. This gives
+  TOO_MANY_REDIRECTS with 2 requests.
+- **One interstitial only:** a chain of 2 interstitials gives TOO_SHORT after 2 requests.
+- **Ledger and DUPLICATE:** `test_onward_url_claimed_by_another_fetch_is_duplicate`
+  passes.
+
+**Parser re-probe:**
+- All round-1 scheme tricks still return None: `javascript:` (whitespace, `\x01`, tab,
+  `&#x6a;`), `data:` and `http:evil`.
+- `<base href>` is ignored.
+- Anchors inside script and comments are not counted.
+- Text inside a comment, or only inside script or style, does not match.
+- An `<a>` inside `<noscript>` counts as a second anchor, so the page fails closed.
+- Empty and whitespace-only bodies give None.
+- A 12,000-deep `<div>` nest is fine.
+
+### Deviations reported by the coder
+
+- **(a) "Points back to the first URL" now needs an intermediate 302: accepted.** A page
+  whose only link is itself is a reload, not a redirect, so TOO_SHORT is the right result.
+  That is the round-1 finding 3 intent. A real loop through a redirect still gives
+  TOO_MANY_REDIRECTS (probe above). The self-check compares against the page's final URL,
+  so any earlier URL in the chain is still caught by `chain_hops`.
+- **(b) The html.parser ban covers only the fetching modules: accepted for this change.**
+  F002 is about fetched pages, and banning it in gmail_mcp.py would mean rewriting email
+  stripping, which is out of scope. But gmail_mcp has the same quadratic DoS: see R2-2.
+  The ALLOWED_CASES entry
+  `{"gmail_mcp": "from html.parser import P\n"}` should go once R2-2 is fixed, so that
+  the rule can become project-wide.
+
+### New findings
+
+**R2-1 [MINOR] `src/newsletter_digest/fetch.py:308-312`: regression introduced by the
+round-1 fix.** Detection now runs inside `anyio.fail_at(deadline)`. If the first
+download plus the first extraction already used up the deadline, the detection call
+raises TimeoutError, and **every** small, short page becomes TIMED_OUT. That includes
+pages that are not interstitials. Before F002 such pages were TOO_SHORT or BLOCKED. This
+goes against the T030 decision that extraction past the deadline does not turn a result
+into a timeout.
+
+Probe: a small plain page (no meta refresh, no anchors) served after 1.8 s of a 2.0 s
+budget, with a 0.3 s extractor, gives `timed out` where `no readable article text` is
+expected. The trigger is rare, because it needs download plus extraction close to the
+15 s limit. When it happens the user sees the wrong note.
+
+**Fix:** run only the detection under `with anyio.move_on_at(deadline) as scope:` and
+`return result` when `scope.cancelled_caught`. Keep `fail_at(deadline)` around the onward
+`_download`, so a real onward timeout is still TIMED_OUT. **Test:** the probe above, with
+`page(..., delay)` and a slow `FakeExtractor` on a non-interstitial short page, must give
+TOO_SHORT. My round-1 recommendation ("inside the deadline") did not consider this case.
+
+**R2-2 [MAJOR, pre-existing, not part of F002/F003; do not block on it]
+`src/newsletter_digest/gmail_mcp.py:16, 308-318, 345-410`: quadratic DoS on untrusted
+email HTML.** `html_to_text` runs the stdlib `HTMLParser` subclass `_TextExtractor` over
+the **whole** raw email body. `prepare_email_text` truncates to `max_email_chars` only
+after parsing, and it is called synchronously from the async `read_email` tool
+(tools.py:268), so it runs on the event loop.
+
+Measured on CPython 3.13.5:
+
+| input | 16 KB | 32 KB | 64 KB | 128 KB |
+|---|---|---|---|---|
+| `html_to_text`, `<a ` repeated | 4.3 s | 10.1 s | 37.0 s | 163 s |
+| `html_to_text`, `<b ` repeated | 2.0 s | 8.2 s | 34.3 s | 173 s |
+
+`prepare_email_text` on a 64 KB `<a ` email takes 55 s.
+
+There is no size cap before parsing. Gmail allows messages of about 25 MB, so one
+crafted email in the user's newsletter label can freeze the run for hours by
+extrapolation: about 11 minutes at 256 KB, about 3 hours at 1 MB. During that time the
+MCP stdio session, the reader-model calls and the deep-agent loop are all blocked. The
+sender must get mail into the label, but newsletter content is exactly the untrusted
+input this tool is built for.
+
+**Fix (new ad-hoc task, python-backend-coder):**
+1. Port `_TextExtractor` to lxml. Use `lxml.html.document_fromstring` and walk the tree
+   with the same skip, link, `li` and block rules. Keep the current outputs under the
+   existing gmail_mcp/tools tests and the flag-off goldens.
+2. As defence in depth, cap the HTML handed to the parser, for example `4 *
+   max_email_chars` or 1 MiB.
+3. Run the conversion via `anyio.to_thread.run_sync` in `read_email`.
+4. Then widen the architecture rule to ban `html.parser` project-wide, and drop the
+   gmail_mcp ALLOWED_CASES entry. lxml then also needs to be allowed in gmail_mcp, or
+   the email stripping moves into a shared parsing module.
+
+**Test:** `prepare_email_text` on 64 KB of `<a `, `<b ` and `<div\n` finishes in under
+1 s.
+
+**R2-3 [INFO]** No action needed:
+- `interstitial_target` returns None for a body with an XML declaration
+  (`<?xml ... encoding=...?>`), because lxml rejects encoding declarations in str input
+  with ValueError. Such pages stay TOO_SHORT, which fails closed. Decoding to bytes and
+  passing them with an explicit `HTMLParser(encoding="utf-8")` would accept them, but no
+  HubSpot page uses one.
+- A NUL in the body does not make lxml raise, contrary to the implementation note. The
+  note is inaccurate; the behaviour is harmless.
+
+**Security Notes (round 2):** No SSRF bypass. Every AF-3 guard still applies to the
+onward URL. The round-1 availability BLOCKER is fixed: the per-page time cap holds and
+the loop stays responsive. R2-2 is the same class of availability bug in a pre-existing
+module, on email input.
+
+**Positive Notes (round 2):** The fix follows the recommended shape exactly: a linear C
+parser, a worker thread, the shared deadline, a direct dependency and an enforcing
+architecture rule. The coder also caught the lxml latin-1 mojibake problem with an
+existing test and fixed it by decoding first. The new hostile-markup tests assert both
+the deadline and loop responsiveness, and per the notes they fail against b94b3fc's
+fetch.py. The F003 real-subprocess test proves that the exact path bytes reach
+explorer.exe.
+
+### Verdict (round 2)
+
+**APPROVED.** F002 and F003 can stay. R2-1 (MINOR) is a recommended follow-up. R2-2
+(MAJOR, pre-existing gmail_mcp DoS) should be scheduled as its own task and does not
+block F002/F003.
