@@ -384,3 +384,198 @@ explorer.exe.
 **APPROVED.** F002 and F003 can stay. R2-1 (MINOR) is a recommended follow-up. R2-2
 (MAJOR, pre-existing gmail_mcp DoS) should be scheduled as its own task and does not
 block F002/F003.
+
+---
+
+## Round 3: F005 (8548f1f, fix for R2-1) and F004 (e13a1b2, fix for R2-2)
+
+**Status:** APPROVED. One MINOR is a documentation follow-up and does not block.
+
+Gates (run by the reviewer on e13a1b2):
+- `uv run pytest -q`: 2622 passed, 2 deselected.
+- `ruff check` and `ruff format --check`: clean.
+- `pyrefly check`: 0 errors.
+- No line over 88 characters in `src/` or `tests/`.
+- `test_architecture.py`, `test_flag_off_identity.py` and `test_email_html.py`: 203
+  passed.
+
+### F005: R2-1 fixed
+
+`_follow_interstitial` (fetch.py, around lines 309-323) now works in three steps:
+1. Only `interstitial_target` runs under `anyio.move_on_at(deadline)`, in the worker thread
+   with `abandon_on_cancel=True`.
+2. `target` is set to `None` before that block, so a cancelled detection falls through to
+   `return result`.
+3. The onward `_download` stays under `anyio.fail_at(deadline)`.
+
+Near-deadline probe rerun (MockTransport, timeout 2.0 s):
+
+| case | result | requests |
+|---|---|---|
+| plain short page arriving at 1.8 s, 0.3 s extractor (round 2: `timed out`) | `no readable article text` | 1 |
+| real HubSpot interstitial, same timing | `no readable article text` | 1 |
+| interstitial fast, onward page takes 3 s | `timed out` at 2.00 s | 2 |
+| interstitial at 1.0 s, onward takes 1.5 s | `timed out` at 2.00 s | 2 |
+| interstitial fast, onward fast | `FetchedPage` | 2 |
+
+**Coder's choice: a real interstitial cut off by the deadline keeps TOO_SHORT. Accepted.**
+- It matches T030: once the budget is spent, the result already measured stands, and
+  nothing is requested after the deadline.
+- It is also what the user saw for these pages before F002.
+- TIMED_OUT would arguably hint "try again", but the honest statement is "we got a page
+  with no text and had no time left to look further". Either is defensible.
+- Once the onward hop has actually started, an overrun is still TIMED_OUT (rows 3 and
+  4), which keeps the time cap visible.
+- The only leftover is a race of about 1 ms. If detection finishes just before the
+  deadline, `fail_at` fires at once and the result is TIMED_OUT without a request. This
+  is harmless and needs no change.
+- The new test `test_detection_past_the_deadline_keeps_the_result` covers both the plain
+  page and the interstitial.
+- The R2-3 NUL comment in extract.py is corrected.
+
+### F004: R2-2 fixed
+
+**Timing, rerun from round 2.** Before F004, `html_to_text` took 4.3 s, 10.1 s, 37.0 s and
+163 s at 16, 32, 64 and 128 KB of `<a `, and `prepare_email_text` took 55 s at 64 KB.
+After F004:
+
+| input | `html_to_text` | `prepare_email_text` | `read_email` tool | concurrent `sleep(0.2)` |
+|---|---|---|---|---|
+| `<a `, 16-128 KB | 0.2-3.1 ms | 0.6-5.5 ms | 2-7 ms | 0.200-0.201 s |
+| `<a `, 1 MB / 4 MB | 12 / 39 ms | 46 / 149 ms | 14 / 9 ms (cap) | 0.201 s |
+| `<b `, 16-128 KB | 0.4-2.3 ms | 1.0-3.4 ms | 1.4-2.5 ms | 0.200-0.201 s |
+| `<b `, 1 MB / 4 MB | 7 / 39 ms | 18 / 54 ms | 8 / 9 ms | 0.201 s |
+| `<div\n`, 16-128 KB | 0.3-1.6 ms | 1.5-5.3 ms | 1.5-2.1 ms | 0.200-0.201 s |
+| `<div\n`, 1 MB / 4 MB | 7 / 22 ms | 35 / 119 ms | 7 / 8 ms | 0.201 s |
+
+**The tree walk is linear.** I measured 240k, 480k and 960k characters (the cap) of each
+of these:
+- `<li>`
+- `<li> </li>`
+- span-space runs before `<li>` (to stress `_at_line_start`)
+- linked anchors
+- `<p hidden><div>`
+
+Every series grows linearly, with at most 0.55 s at the cap, and that time is spent in
+the worker thread. A 200,000-deep `<div>` nest converts in 0.16 s with a 12 MB Python
+peak, and 320k elements peak at about 36 MB. The walk uses an explicit stack, so it never
+recurses and is bounded by the element count of at most 960k characters of markup.
+
+**Cap.**
+- `HTML_CAP_FACTOR * max_chars` is 960,000 **characters**. That is at most about 3.8 MB
+  of UTF-8, which is fine.
+- It is applied with a slice **before** `html_to_text` on both HTML paths:
+  - the "[Note: HTML-formatted" path, where the slice is taken after the note line;
+  - the 3-tag heuristic path.
+- `html_to_text` has no other caller in `src/`.
+- The plain-text path is not capped but only runs linear regexes, as before.
+- `max_email_chars` is a fixed setting (30,000), so the cap cannot be inflated through
+  configuration.
+
+**Thread.** tools.py runs the whole `prepare_email_text` in
+`anyio.to_thread.run_sync(partial(...), abandon_on_cancel=True)`. That includes header
+splitting, the tag count, the cap, parsing and delimiting. It is the only caller.
+
+**UTF-8 handling is correct.**
+- The text is encoded with `errors="replace"`, so a lone surrogate becomes `?`. Before,
+  it stayed in the text and could fail later when the model request was encoded.
+- It is parsed with `HTMLParser(encoding="utf-8")`, so both an
+  `<?xml ... encoding="iso-8859-1"?>` declaration and a wrong `<meta charset>` are
+  overridden. Probe: `café ’` comes out intact in both cases.
+- Empty input, whitespace, a lone comment, a lone doctype and a frameset each give `""`.
+
+**Goldens are faithful.** I extracted 8548f1f's `src/` with `git archive` and ran the old
+html.parser `html_to_text` and `prepare_email_text` on every fixture:
+- All 5 `<name>.txt` and all 10 `.prepared{30000,600}.txt` goldens match byte for byte.
+- All 61 snippets match, including `bad-ipv6-href` raising ValueError.
+- The fixtures were added only in e13a1b2, so they were never regenerated.
+
+Against the new code, exactly the documented set differs: `xhtml_declaration` (only the
+`<br />` blank lines; `.lxml.txt` overrides) and the 6 `CHANGED_BY_PORT` snippets.
+
+### Behaviour changes: impact on the reader model and on delimiting
+
+The delimiter neutralisation still runs **after** conversion and truncation
+(gmail_mcp.py:364, `_DELIMITER_RE.sub` on the final text). So whatever any entity decodes
+to is neutralised. Probe, old and new giving the same output: `&lt&lt&lt` without
+semicolons, `&#60;`, `&#x3c;`, HTML5 `&LT;`, `&ZeroWidthSpace;` and `&zwnj;` between `<<<`
+and `END EMAIL` all become `[delimiter removed]`.
+
+| change | assessment |
+|---|---|
+| `<br/>` gives one line break instead of a blank line | Better. Fewer spurious paragraph breaks. |
+| unclosed `<p>`/`<td>` get blank lines | Harmless spacing. |
+| stray end tags dropped (`text</div>more` gives `textmore`) | Words can run together on broken markup. Cosmetic, malformed input only. INFO. |
+| NUL becomes U+FFFD | Harmless. |
+| bad `[::1` href no longer fails the email | Better. One malformed link used to make the whole email unreadable (an availability bug). |
+| HTML5-only entities may stay literal | None of 9 probed entities (`&NewLine;`, `&check;`, `&LT;`, `&ZeroWidthSpace;`, `&quot` without semicolon, and so on) differed from the old output. If one does stay literal it is plain text, and the delimiter check runs after. INFO. |
+
+**Behaviour changes not recorded in the goldens**, found by an old/new comparison probe:
+- **Improvements:**
+  - an unclosed `<head>` no longer swallows the whole email (old gave `""`);
+  - an unclosed hidden `<div>` no longer swallows the rest (old gave `""`);
+  - an unclosed `<!--` no longer leaks the raw `<!-- ...` text into the model input;
+  - a lone surrogate is replaced.
+- **One regression, see R3-1.**
+
+### Findings
+
+**R3-1 [MINOR] gmail_mcp.py:367-398 and README "Email content is untrusted data": hidden
+content can now leak through invalid nesting.** libxml2 closes an open `<p>` when a block
+element starts, so a hidden paragraph that wraps a block loses its hiddenness:
+
+| input | old output | new output |
+|---|---|---|
+| `<p hidden><div>X</div></p>` | `Visible` | `X\n\nVisible` |
+| `<p style="display:none">x<table>...X...</table></p>` | `Visible` | `X\n\nVisible` |
+
+Hidden `<span>`, `<table>`, `<a>` and `<div>` wrappers are still dropped.
+
+This is not a delimiting or injection-boundary break:
+- the revealed text is still inside the `<<<EMAIL ... untrusted data>>>` wrapper;
+- an attacker could already reach the model with visible but unreadable text (white on
+  white, `font-size:0`), which was never stripped.
+
+It does contradict the README claim that hidden elements are stripped, and it adds hidden
+preheader-style noise when a template uses this invalid nesting.
+
+**Fix (docs and tests, not blocking):**
+- add a `CHANGED_BY_PORT` snippet pinning `<p hidden><div>X</div></p>`;
+- note in the README and the F004 implementation notes that hidden-element stripping is
+  best effort on invalid markup.
+
+A code fix is not worth it: the parser restructures the tree before the walk sees it.
+
+**R3-2 [INFO]** No action needed:
+- `_HTML_TAG_RE.findall(body)` runs on the uncapped body only to count tags. It is linear
+  and now runs in the worker thread. `len(...) >= 3` could stop at the third match
+  (`itertools.islice(finditer)`) to avoid building a list for a 25 MB email.
+- The full suite took 15-33 s across runs on this machine. No new test is slow: the
+  slowest new one, the F005 deadline test, takes 1.1 s.
+
+**Architecture.**
+- No module in `src/` imports `html.parser`.
+- `lxml` is imported only by extract.py:20-21 and gmail_mcp.py:23-24.
+- The rule in `test_architecture.py` is now project-wide, with violation cases for
+  gmail_mcp and render. The round-2 gmail_mcp exception was removed, as asked in round 2.
+- Layer order and Gmail isolation are unchanged (architecture tests pass).
+- Flag-off output is byte-identical (`test_flag_off_identity.py` passes). Email
+  conversion feeds the model, not the renderer.
+
+**Security Notes:** No SSRF or delimiting regression. The time cap holds for fetched pages
+(F005). Email conversion is linear, capped and off the event loop (F004). R3-1 weakens
+noise filtering, not a security boundary.
+
+**Positive Notes:**
+- The characterisation goldens are real: I regenerated them from the old code
+  independently and they match. The overrides are narrow and asserted, including that
+  the xhtml override differs only by blank lines.
+- The iterative walk keeps the old extractor's rules readable as `start`, `data` and
+  `end`.
+- F005 is a minimal, exact fix with a test covering both the plain page and the
+  interstitial.
+
+### Verdict (round 3)
+
+**APPROVED.** F005 and F004 fix R2-1 and R2-2. R3-1 (MINOR) is a recommended docs and test
+follow-up.
