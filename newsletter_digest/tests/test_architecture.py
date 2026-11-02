@@ -16,6 +16,9 @@ is imported or executed. The rules:
 4. Only `llm` references `ChatOpenAI` or imports `langchain_openai`.
 5. trafilatura: no downloader, crawler, feed or sitemap helper is referenced anywhere;
    only `extract` imports trafilatura, and it calls only `trafilatura.extract`.
+   HTML parsing of fetched pages stays in `extract` too: only it imports `lxml`, and
+   no fetching module imports stdlib `html.parser`, which is quadratic on hostile
+   markup (F002 review).
 6. httpx: no source passes `trust_env` as anything but a literal `False`;
    `httpx.AsyncClient` is built only in `fetch`, always with `trust_env=False`; the
    module-level request helpers and the sync `httpx.Client` are never called.
@@ -87,6 +90,7 @@ LANGCHAIN_FREE = (
 LANGCHAIN_CORE_USERS_AMONG_NEW = frozenset({"enrich"})
 
 TRAFILATURA_EXTRACT = "trafilatura.extract"
+HTML_PARSER_OWNER = "extract"
 TRAFILATURA_BANNED_SUBMODULES = (
     "trafilatura.downloads",
     "trafilatura.spider",
@@ -515,6 +519,24 @@ def find_trafilatura_usage_violations(modules: Modules) -> list[str]:
     return violations
 
 
+def find_html_parser_violations(modules: Modules) -> list[str]:
+    """Report `lxml` outside extract and `html.parser` in the fetching modules."""
+    violations: list[str] = []
+    for name, module in modules.items():
+        for ref in module.imports:
+            if ref.target == "html.parser" and name in NEW_MODULES:
+                violations.append(
+                    f"{name}.py:{ref.line}: imports {ref.target}; parse with lxml "
+                    f"in {HTML_PARSER_OWNER}.py"
+                )
+            elif _root(ref.target) == "lxml" and name != HTML_PARSER_OWNER:
+                violations.append(
+                    f"{name}.py:{ref.line}: only {HTML_PARSER_OWNER}.py may import "
+                    f"{ref.target}"
+                )
+    return violations
+
+
 def find_trust_env_violations(modules: Modules) -> list[str]:
     """Report `trust_env` given as anything but a literal False (kwarg or dict key)."""
     violations: list[str] = []
@@ -603,6 +625,7 @@ REAL_TREE_CHECKERS: list[Checker] = [
     find_chat_model_references,
     find_trafilatura_downloader_references,
     find_trafilatura_usage_violations,
+    find_html_parser_violations,
     find_trust_env_violations,
     find_http_client_violations,
     find_dynamic_imports,
@@ -641,6 +664,7 @@ def test_detector_sees_the_allowed_usages(package: dict[str, SourceModule]) -> N
     enrich_roots = {_root(r.target) for r in package["enrich"].imports}
     assert "ChatOpenAI" in llm_ids
     assert TRAFILATURA_EXTRACT in extract_calls
+    assert "lxml" in {_root(r.target) for r in package["extract"].imports}
     assert "langchain_core" in enrich_roots
     assert [name for name, _ in async_client_sites(package)] == ["fetch"]
 
@@ -649,6 +673,26 @@ def test_detector_sees_the_allowed_usages(package: dict[str, SourceModule]) -> N
 
 
 VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
+    (
+        find_html_parser_violations,
+        {"fetch": "from lxml import html\n"},
+        "only extract.py may import lxml",
+    ),
+    (
+        find_html_parser_violations,
+        {"fetch": "import lxml.etree as etree\n"},
+        "only extract.py may import lxml.etree",
+    ),
+    (
+        find_html_parser_violations,
+        {"fetch": "from html.parser import HTMLParser\n"},
+        "imports html.parser",
+    ),
+    (
+        find_html_parser_violations,
+        {"extract": "import html.parser\n"},
+        "imports html.parser",
+    ),
     (find_unranked_modules, {"newmod": ""}, "newmod: no tier"),
     (
         find_layer_violations,
@@ -884,6 +928,9 @@ def test_checker_reports_violation(
 
 
 ALLOWED_CASES: list[tuple[Checker, dict[str, str]]] = [
+    (find_html_parser_violations, {"extract": "from lxml import etree, html\n"}),
+    (find_html_parser_violations, {"fetch": "import html\nhtml.escape('x')\n"}),
+    (find_html_parser_violations, {"gmail_mcp": "from html.parser import P\n"}),
     (
         find_layer_violations,
         {

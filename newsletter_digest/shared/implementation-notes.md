@@ -2302,15 +2302,14 @@ Science links are HubSpot click trackers that answer 200 text/html (~8 KB) with 
 bot-check page ("You're being redirected" + one `click here` fallback anchor) instead of
 a 3xx. trafilatura got 81 chars, so TOO_SHORT.
 
-**What changed (fetch.py)**
-- New pure helper `interstitial_target(body, base_url) -> str | None`. Kept in fetch.py,
-  not links.py: links.py is URL-only classification, and parsing a response body is
-  response classification, which fetch.py owns. It uses stdlib `html.parser`, so
-  attribute order, quoting and HTML entities (`&amp;`, `&#39;`, `&rsquo;`) are handled
-  by the parser, and `<script>` contents are CDATA (an `<a href>` string inside the
-  fingerprinting script is not counted as an anchor).
+**What changed (fetch.py, extract.py)** (as of the review fixes below)
+- Pure helper `interstitial_target(body, base_url) -> str | None` in extract.py, built on
+  lxml's C HTML parser. (First version: stdlib `html.parser` in fetch.py; replaced after
+  review, see below.) The parser handles attribute order, quoting and HTML entities
+  (`&amp;`, `&#39;`, `&rsquo;`), and `<script>` contents are not elements, so an
+  `<a href>` string inside the fingerprinting script is not counted as an anchor.
 - Patterns: (a) the first `<meta http-equiv="refresh">` whose content is
-  `N; url=...` (also `N, url=`, quoted or not, any case); (b) visible text (outside
+  `N; url=...` with N <= 10 s (also `N, url=`, quoted or not, any case); (b) visible text (outside
   script/style) containing "You're being redirected" (straight or curly apostrophe,
   after entity decoding) AND exactly one `<a>` tag, which must have an href. The target
   is `urljoin(page_url, value)` and must be http/https with a host, otherwise None.
@@ -2353,7 +2352,7 @@ a 3xx. trafilatura got 81 chars, so TOO_SHORT.
 - No JS is run and HubSpot's `_jss=0` fallback is what we follow; if HubSpot changes the
   page shape, the result degrades to the old TOO_SHORT, not to an error.
 
-**Tests**: tests/test_fetch_interstitial.py (56 tests, offline). HubSpot fixture to a
+**Tests** (first version): tests/test_fetch_interstitial.py (56 tests, offline). HubSpot fixture to a
 real article with the real extractor; heading/entity forms; meta-refresh forms;
 non-interstitials (no URL, javascript:/data:/ftp:/mailto:, two anchors, no href, no
 text, binary); 500 and text/plain interstitials not followed; >64 KB page with the
@@ -2366,6 +2365,49 @@ fails at 2 and 1 and 0; shared deadline -> TIMED_OUT; onward body cap -> TOO_LAR
 Mutation check (scratch copy of fetch.py, restored afterwards): dropping the budget
 check, the size gate, the short-text gate, the one-hop limit, the shared chain set or
 the shared deadline each fails at least one test.
+
+**Review fixes (shared/reviews/F002_F003_review.md)**
+- #1 BLOCKER, quadratic parser on the event loop: CPython 3.13's `html.parser` rescans
+  unclosed start tags, so 64 KB of `<a ` took ~38 s, ran synchronously on the loop and
+  outside the deadline (froze every task, broke the per-page time cap). The detector
+  moved to extract.py (which already owns HTML parsing) and uses
+  `lxml.html.document_fromstring` (linear, ~1 ms for the same input). `lxml` is now a
+  direct dependency (`uv add lxml`, >=6.1.3, already installed via trafilatura).
+  `fetch._follow_interstitial` calls it via `anyio.to_thread.run_sync(...,
+  abandon_on_cancel=True)` inside `anyio.fail_at(deadline)`, the same deadline that
+  covers the onward download. Not just HTMLParser-in-a-thread: an abandoned thread would
+  keep burning CPU and anyio workers are non-daemon.
+  - The bytes are decoded by us (UTF-8, `errors="replace"`, as before) before lxml:
+    lxml guesses latin-1 for undeclared UTF-8, which turned `You’re` into mojibake and
+    missed the curly-apostrophe form (found by the existing test). A NUL or other
+    XML-incompatible character makes lxml raise ValueError, which fails closed (None).
+  - Script/style text is excluded by `drop_tree()` on a tree we own; comments are not
+    part of `text_content()`. `<base href>` is still ignored (we resolve against the
+    response URL, never `root.base_url`).
+  - Architecture rule added (test_architecture.py, rule 5): only `extract` imports
+    `lxml`, and no fetching module (`links`, `netguard`, `extract`, `fetch`, `enrich`)
+    imports `html.parser`. Scoped to the fetching modules because gmail_mcp.py uses
+    `html.parser` on email HTML (pre-existing, out of scope; flagged to the caller).
+- #2 `urljoin`/`urlsplit` ValueError (`http://[::1`) now returns None, so the page keeps
+  TOO_SHORT instead of ERROR.
+- #3 Meta refresh is followed only for delays <= `MAX_REFRESH_DELAY_S` (10 s); a longer
+  one falls through to pattern (b). An onward URL whose `ledger_key` equals the page's
+  own (including a `#fragment` self-link) returns the original result, so a JS shell
+  that reloads itself stays TOO_SHORT, not TOO_MANY_REDIRECTS. Consequence for the
+  original test list: "interstitial pointing back to the first URL" now needs a redirect
+  in between (tracker -302-> landing interstitial -> tracker) to give TOO_MANY_REDIRECTS;
+  a page pointing at itself is TOO_SHORT.
+- #4 The follow-up lives in `PageFetcher._follow_interstitial(body, result, chain_hops,
+  deadline)`; `fetch` is back to download, extract, follow.
+- Tests added: 64 KB `<a `, `<b `, `<div\n` bodies through `interstitial_target` (<1 s
+  each; measured 0.4-1.3 ms) and through `PageFetcher.fetch` with timeout 1.0 s while a
+  concurrent `anyio.sleep(0.2)` runs (fetch 5-15 ms, sleep 0.200-0.202 s); bad-IPv6
+  href and refresh; refresh delay 10 (followed), 10.5 and 600 (not); self-target with and
+  without fragment; reloading shell; `<base href>`; undeclared UTF-8 curly apostrophe;
+  redirect text only in script / only in style. With b94b3fc's fetch.py put back, the
+  `<div\n` fetch test fails (11.7 s, hit the 10 s test deadline). Mutation checks: dropping
+  the self-target check, the delay limit, the ValueError catch, the UTF-8 decode or the
+  script/style drop each fails at least one test.
 
 ## F003 — `--open` on WSL opens the Windows default browser (ad-hoc fix, not in task_list.json)
 
@@ -2413,3 +2455,14 @@ wslpath prints nothing; one-line hint when `webbrowser.open` returns False, rais
 cli.py, restored): requiring explorer exit 0, skipping WSL detection, a case-sensitive
 `/proc/version` match, dropping the hint, or not catching webbrowser errors each fail
 at least one test.
+
+**Review fix #5 (shared/reviews/F002_F003_review.md)**: `_run_quietly` used `text=True`
+(strict UTF-8). `wslpath -w` prints a raw non-UTF-8 byte for such a path, so a
+`UnicodeDecodeError` escaped `digest` after the path was printed (traceback, exit 1). It
+now decodes with `encoding="utf-8", errors="surrogateescape"` and also catches
+`ValueError`. surrogateescape (not `replace`) round-trips the byte: subprocess re-encodes
+the argument with the filesystem encoding, so explorer.exe gets the exact path bytes.
+Tests: a FakeShell wslpath raising `UnicodeDecodeError` falls back to `webbrowser`; a
+real-subprocess test with fake `wslpath` (prints `\\wsl\a<0xff>b.html`) and
+`explorer.exe` (records `$1`, exits 1) shows the byte reaches explorer unchanged and no
+hint is printed. Reverting to `text=True` fails 2 tests; `errors="replace"` fails 1.

@@ -16,13 +16,16 @@ import anyio
 import httpx
 import pytest
 
-from newsletter_digest.extract import ExtractedText
+from newsletter_digest.extract import (
+    MAX_REFRESH_DELAY_S,
+    ExtractedText,
+    interstitial_target,
+)
 from newsletter_digest.fetch import (
     CHALLENGE_MAX_BYTES,
     FetchConfig,
     FetchedPage,
     PageFetcher,
-    interstitial_target,
 )
 from newsletter_digest.models import FetchFailure
 from tests.test_fetch import (
@@ -153,6 +156,7 @@ def test_anchor_inside_script_is_not_counted() -> None:
             "https://news.example/a?x=1&y=2",
         ),
         ("0; url=/a", "https://news.example/a"),
+        (f"{MAX_REFRESH_DELAY_S:g}; url=/a", "https://news.example/a"),
     ],
 )
 def test_meta_refresh_forms(content: str, expected: str) -> None:
@@ -168,10 +172,21 @@ def test_meta_refresh_forms(content: str, expected: str) -> None:
         refresh_page("0; url=javascript:alert(1)"),
         refresh_page("0; url=data:text/html,hi"),
         refresh_page("0; url=ftp://news.example/a"),
+        refresh_page("0; url=http://[::1"),
+        refresh_page(f"{MAX_REFRESH_DELAY_S + 0.5}; url=https://news.example/a"),
+        refresh_page("600; url=https://news.example/a"),
         refresh_page("0; url=http:///a"),
         hubspot_page("javascript:alert(1)"),
         hubspot_page("mailto:a@news.example"),
+        hubspot_page("http://[::1"),
+        hubspot_page("https://[::1/a"),
         hubspot_page(ONWARD_URL, heading="Welcome back"),
+        hubspot_page(ONWARD_URL, heading="Welcome back").replace(
+            b"var w", b'var m = "You\'re being redirected"; var w'
+        ),
+        hubspot_page(ONWARD_URL, heading="Welcome back").replace(
+            b"</head>", b"<style>/* You're being redirected */</style></head>"
+        ),
         hubspot_page(ONWARD_URL).replace(b"</p>", b'<a href="/b">more</a></p>'),
         hubspot_page(ONWARD_URL).replace(b' href="', b' data-x="'),
         b"<html><body><p>You're being redirected</p></body></html>",
@@ -184,10 +199,17 @@ def test_meta_refresh_forms(content: str, expected: str) -> None:
         "refresh-javascript",
         "refresh-data",
         "refresh-ftp",
+        "refresh-bad-ipv6",
+        "refresh-delay-over-limit",
+        "refresh-delay-600",
         "refresh-no-host",
         "anchor-javascript",
         "anchor-mailto",
+        "anchor-bad-ipv6",
+        "anchor-bad-ipv6-path",
         "no-redirect-text",
+        "redirect-text-only-in-script",
+        "redirect-text-only-in-style",
         "two-anchors",
         "anchor-without-href",
         "no-anchor",
@@ -197,6 +219,22 @@ def test_meta_refresh_forms(content: str, expected: str) -> None:
 )
 def test_non_interstitials_have_no_target(body: bytes) -> None:
     assert interstitial_target(body, "https://news.example/start") is None
+
+
+def test_base_href_is_ignored() -> None:
+    body = hubspot_page("/b").replace(
+        b"<head>", b'<head><base href="https://evil.example/">'
+    )
+    assert interstitial_target(body, "https://news.example/a") == (
+        "https://news.example/b"
+    )
+
+
+def test_undeclared_utf8_curly_apostrophe_is_decoded() -> None:
+    # lxml alone would guess latin-1 for these bytes and miss U+2019.
+    body = hubspot_page(ONWARD_URL, heading="You\u2019re being redirected")
+    assert b"charset" not in body
+    assert interstitial_target(body, HUBSPOT_URL) == ONWARD_URL
 
 
 def test_relative_anchor_is_resolved_against_the_page_url() -> None:
@@ -368,8 +406,39 @@ async def test_interstitial_chain_stops_after_one_hop() -> None:
 
 
 async def test_interstitial_back_to_the_first_url_is_too_many_redirects() -> None:
-    site = Site({HUBSPOT_URL: page(hubspot_page(HUBSPOT_URL))})
+    landing = "https://newsletter.tds.example/landing"
+    site = Site(
+        {HUBSPOT_URL: redirect(landing), landing: page(hubspot_page(HUBSPOT_URL))}
+    )
     assert await fetch_with(site) is FetchFailure.TOO_MANY_REDIRECTS
+    assert site.requested == [HUBSPOT_URL, landing]
+
+
+@pytest.mark.parametrize("suffix", ["", "#top"])
+async def test_interstitial_pointing_at_itself_keeps_its_result(suffix: str) -> None:
+    site = Site({HUBSPOT_URL: page(hubspot_page(HUBSPOT_URL + suffix))})
+    assert await fetch_with(site) is FetchFailure.TOO_SHORT
+    assert site.requested == [HUBSPOT_URL]
+
+
+async def test_reloading_shell_page_keeps_too_short() -> None:
+    # A JS shell that reloads itself is not a redirect, so no "too many redirects".
+    site = Site({ARTICLE_URL: page(refresh_page(f"5; url={ARTICLE_URL}"))})
+    assert await fetch_with(site, ARTICLE_URL) is FetchFailure.TOO_SHORT
+    assert site.requested == [ARTICLE_URL]
+
+
+async def test_long_meta_refresh_delay_is_not_followed() -> None:
+    target = "https://news.example/next"
+    site = Site({ARTICLE_URL: page(refresh_page(f"600; url={target}")), target: page()})
+    assert await fetch_with(site, ARTICLE_URL) is FetchFailure.TOO_SHORT
+    assert site.requested == [ARTICLE_URL]
+
+
+@pytest.mark.parametrize("href", ["http://[::1", "https://[::1/a"])
+async def test_unparseable_onward_url_keeps_too_short(href: str) -> None:
+    site = Site({HUBSPOT_URL: page(hubspot_page(href))})
+    assert await fetch_with(site) is FetchFailure.TOO_SHORT
     assert site.requested == [HUBSPOT_URL]
 
 
@@ -468,3 +537,67 @@ async def test_onward_body_is_capped() -> None:
     result = await fetch_with(site, config=make_config(max_bytes=8 * 1024))
     assert result is FetchFailure.TOO_LARGE
     assert body.yielded <= 9
+
+
+# ------------------------------------------- hostile markup (review finding 1)
+
+DETECT_BUDGET_S = 1.0
+HOSTILE_FETCH_TIMEOUT_S = 1.0
+SLEEP_S = 0.2
+SLEEP_SLACK_S = 0.5
+HOSTILE_UNITS = ("<a ", "<b ", "<div\n")
+
+
+def hostile_body(unit: str) -> bytes:
+    """A 64 KB page of unclosed start tags after the redirect text."""
+    head = b"<p>You're being redirected</p>"
+    repeat = (CHALLENGE_MAX_BYTES - len(head)) // len(unit)
+    body = head + unit.encode() * repeat
+    assert CHALLENGE_MAX_BYTES - len(unit) < len(body) <= CHALLENGE_MAX_BYTES
+    return body
+
+
+@pytest.mark.parametrize("unit", HOSTILE_UNITS, ids=["a", "b", "div-newline"])
+def test_unclosed_start_tags_parse_in_linear_time(unit: str) -> None:
+    # stdlib html.parser took 37.6 s / 38.6 s / 12.3 s on these (review, F002 #1).
+    body = hostile_body(unit)
+    started = time.perf_counter()
+    assert interstitial_target(body, HUBSPOT_URL) is None
+    elapsed = time.perf_counter() - started
+    print(f"interstitial_target 64 KB {unit!r}: {elapsed:.4f} s")
+    assert elapsed < DETECT_BUDGET_S
+
+
+@pytest.mark.parametrize("unit", HOSTILE_UNITS, ids=["a", "b", "div-newline"])
+async def test_hostile_page_keeps_the_deadline_and_the_loop_responsive(
+    unit: str,
+) -> None:
+    site = Site({HUBSPOT_URL: page(hostile_body(unit))})
+    timings: dict[str, float] = {}
+    results: list[FetchedPage | FetchFailure] = []
+
+    async def do_fetch() -> None:
+        started = time.perf_counter()
+        async with PageFetcher(
+            make_config(timeout=HOSTILE_FETCH_TIMEOUT_S),
+            transport=httpx.MockTransport(site),
+        ) as fetcher:
+            results.append(await fetcher.fetch(HUBSPOT_URL))
+        timings["fetch"] = time.perf_counter() - started
+
+    async def do_sleep() -> None:
+        started = time.perf_counter()
+        await anyio.sleep(SLEEP_S)
+        timings["sleep"] = time.perf_counter() - started
+
+    with anyio.fail_after(TIMEOUT_S):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(do_fetch)
+            tg.start_soon(do_sleep)
+    print(
+        f"fetch 64 KB {unit!r}: fetch {timings['fetch']:.4f} s, "
+        f"concurrent sleep({SLEEP_S}) {timings['sleep']:.4f} s"
+    )
+    assert results == [FetchFailure.TOO_SHORT]
+    assert timings["fetch"] < 2 * HOSTILE_FETCH_TIMEOUT_S
+    assert timings["sleep"] < SLEEP_S + SLEEP_SLACK_S

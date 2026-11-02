@@ -1,9 +1,12 @@
 """Article text extraction for article fetching (FR-025, FR-032).
 
 Role: a thin wrapper over `trafilatura.extract` (never its downloaders) with
-whitespace tidying, delimiter scrubbing and truncation. Performs no network I/O.
+whitespace tidying, delimiter scrubbing and truncation, plus the redirect-interstitial
+detector `interstitial_target` (F002). Performs no network I/O.
 
-Allowed imports: stdlib and `trafilatura`; no project modules.
+Allowed imports: stdlib, `trafilatura` and `lxml`; no project modules. All HTML parsing
+lives here and uses lxml's C parser, which is linear on hostile markup (stdlib
+`html.parser` is quadratic on unclosed start tags).
 """
 
 import logging
@@ -11,8 +14,11 @@ import re
 from collections.abc import Callable
 from configparser import ConfigParser
 from dataclasses import dataclass
+from urllib.parse import urljoin, urlsplit
 
 import trafilatura
+from lxml import etree
+from lxml import html as lxml_html
 from trafilatura.settings import DEFAULT_CONFIG
 
 MIN_TEXT_CHARS = 400
@@ -36,6 +42,16 @@ _LINE_EDGE_SPACE_RE = re.compile(r" *\n *")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 _DELIMITER_RE = re.compile(r"<<<\s*(?:END[\s_-]*)?(?:ARTICLE|EMAIL)", re.IGNORECASE)
 _DELIMITER_REPLACEMENT = "[delimiter removed]"
+
+# Redirect interstitials (F002): a short meta refresh, or a "You're being redirected"
+# page (HubSpot click tracking) whose only anchor is the onward link. The text is
+# matched after lxml decoded entities, so `&#39;` and `&rsquo;` arrive as ' and U+2019.
+MAX_REFRESH_DELAY_S = 10.0
+_REFRESH_CONTENT_RE = re.compile(
+    r"\s*(\d+(?:\.\d+)?)\s*[;,]\s*url\s*=\s*['\"]?([^'\"\s]+)", re.IGNORECASE
+)
+_BEING_REDIRECTED_RE = re.compile(r"you['\u2019]re being redirected", re.IGNORECASE)
+_HTTP_SCHEMES = frozenset({"http", "https"})
 
 
 @dataclass(frozen=True)
@@ -121,3 +137,58 @@ def _truncate(text: str, max_chars: int) -> str:
     if word_end > 0:
         return window[:word_end].rstrip()
     return text[:max_chars]
+
+
+def interstitial_target(html: bytes, base_url: str) -> str | None:
+    """Onward URL of a redirect interstitial page, or None.
+
+    Recognised: a `<meta http-equiv="refresh" content="N; url=...">` with
+    N <= `MAX_REFRESH_DELAY_S`, or a page whose text (outside script and style)
+    says "You're being redirected" and that has exactly one `<a>`, with an href.
+    Entities are decoded by the parser, `<base href>` is ignored, and the URL is
+    resolved against `base_url` and must be absolute http(s) with a host. Pure
+    and thread-safe; the caller fetches the URL through its guarded client.
+    """
+    # Decoded here: lxml guesses latin-1 for undeclared UTF-8 bytes. NUL or other
+    # XML-incompatible characters make lxml raise ValueError, which fails closed.
+    try:
+        root = lxml_html.document_fromstring(html.decode("utf-8", errors="replace"))
+    except (etree.LxmlError, ValueError):
+        return None
+    candidate = _refresh_url(root)
+    if candidate is None:
+        candidate = _being_redirected_url(root)
+    if not candidate:
+        return None
+    try:
+        target = urljoin(base_url, candidate.strip())
+        parts = urlsplit(target)
+    except ValueError:
+        return None
+    if parts.scheme not in _HTTP_SCHEMES or not parts.netloc:
+        return None
+    return target
+
+
+def _refresh_url(root: lxml_html.HtmlElement) -> str | None:
+    """URL of the first meta refresh, if its delay is short enough."""
+    for meta in root.iter("meta"):
+        if (meta.get("http-equiv") or "").strip().lower() != "refresh":
+            continue
+        match = _REFRESH_CONTENT_RE.match(meta.get("content") or "")
+        if match is None or float(match.group(1)) > MAX_REFRESH_DELAY_S:
+            return None
+        return match.group(2)
+    return None
+
+
+def _being_redirected_url(root: lxml_html.HtmlElement) -> str | None:
+    """Href of the only anchor of a "You're being redirected" page."""
+    anchors = list(root.iter("a"))
+    if len(anchors) != 1:
+        return None
+    for source in list(root.iter("script", "style")):
+        source.drop_tree()
+    if not _BEING_REDIRECTED_RE.search(root.text_content()):
+        return None
+    return anchors[0].get("href")

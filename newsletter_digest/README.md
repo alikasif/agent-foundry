@@ -306,9 +306,10 @@ links.
   links are followed.
 - Some click trackers (HubSpot, used by Towards Data Science, for example) answer with a
   small "You're being redirected" page instead of a redirect. When a small HTML page gives
-  almost no text and is such a page (or a `<meta http-equiv="refresh">` page), its single
-  onward link is followed once, with the same safety checks as any redirect. That hop
-  counts towards the redirect limit and the per-page time limit.
+  almost no text and is such a page (or a `<meta http-equiv="refresh">` page with a
+  delay of at most 10 seconds), its single onward link is followed once, with the same
+  safety checks as any redirect. That hop counts towards the redirect limit and the
+  per-page time limit. A page that only points back at itself is not followed.
 - If ranking did not finish (the unranked fallback), nothing is fetched and the page header
   says "Article fetching was skipped: ranking was not completed."
 - Each URL is requested once per run; a second item that resolves to the same page keeps

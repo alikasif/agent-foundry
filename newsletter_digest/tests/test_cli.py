@@ -761,6 +761,10 @@ def test_open_on_wsl_falls_back_from_wslview_to_explorer(
             "on_path": {"wslpath": WSLPATH, "explorer.exe": EXPLORER},
             "errors": {WSLPATH: PermissionError("denied")},
         },
+        {
+            "on_path": {"wslpath": WSLPATH, "explorer.exe": EXPLORER},
+            "errors": {WSLPATH: UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")},
+        },
     ],
     ids=[
         "nothing-on-path",
@@ -769,6 +773,7 @@ def test_open_on_wsl_falls_back_from_wslview_to_explorer(
         "wslpath-fails",
         "explorer-times-out",
         "wslpath-not-executable",
+        "wslpath-undecodable",
     ],
 )
 def test_open_on_wsl_falls_back_to_webbrowser(
@@ -810,6 +815,34 @@ def test_open_on_wsl_skips_explorer_when_wslpath_prints_nothing(
     _, path = open_run(fake_run, ranked_list)
     assert shell.calls == [[WSLPATH, "-w", str(path)]]
     assert opened == [path.as_uri()]
+
+
+def test_open_on_wsl_passes_non_utf8_wslpath_output_through(
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    ranked_list: ReadingList,
+    opened: list[str],
+    wsl: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real subprocesses: a fake wslpath prints a raw 0xff byte (as the real one does
+    # for such a path); the fake explorer.exe records its argument and exits 1.
+    received = tmp_path / "explorer-arg"
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    wslpath = tools / "wslpath"
+    wslpath.write_bytes(b"#!/bin/sh\nprintf '\\\\\\\\wsl\\\\a\\377b.html\\n'\n")
+    explorer = tools / "explorer.exe"
+    explorer.write_text(f'#!/bin/sh\nprintf "%s" "$1" > "{received}"\nexit 1\n')
+    for tool in (wslpath, explorer):
+        tool.chmod(0o755)
+    on_path = {"wslpath": str(wslpath), "explorer.exe": str(explorer)}
+    monkeypatch.setattr(cli.shutil, "which", lambda name, *a, **k: on_path.get(name))
+    result, _ = open_run(fake_run, ranked_list)
+    assert received.read_bytes() == b"\\\\wsl\\a\xffb.html"
+    assert opened == []
+    assert "Could not open a browser" not in result.stderr
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,7 @@
 
 Role: `FetchConfig`, `PageFetcher` (owns one `httpx.AsyncClient`), response
 classification, the bounded body reader, the per-run request ledger and the
-redirect-interstitial detector (`interstitial_target`).
+one-hop follow-up of redirect interstitials (detected by `extract`).
 
 Allowed imports: project modules `netguard`, `extract`, `links`, `models` and
 `config`; external `httpx` and `anyio`.
@@ -12,11 +12,9 @@ import logging
 import re
 import zlib
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from types import TracebackType
 from typing import Self
-from urllib.parse import urljoin, urlsplit
 
 import anyio
 import anyio.to_thread
@@ -30,6 +28,7 @@ from newsletter_digest.extract import (
     ExtractedText,
     Extractor,
     default_extractor,
+    interstitial_target,
 )
 from newsletter_digest.links import (
     NEVER_REQUEST_KINDS,
@@ -78,13 +77,7 @@ _CHALLENGE_RE = re.compile(
     re.IGNORECASE,
 )
 _HTML_SNIFF_RE = re.compile(rb"<html|<!doctype html", re.IGNORECASE)
-# Redirect interstitials (F002): a meta refresh, or a "You're being redirected" page
-# (HubSpot click tracking) whose only anchor is the onward link. Matched against
-# parsed text, so `&#39;` and `&rsquo;` arrive here as ' and U+2019.
-_REFRESH_CONTENT_RE = re.compile(
-    r"^\s*\d+(?:\.\d+)?\s*[;,]\s*url\s*=\s*['\"]?([^'\"\s]+)", re.IGNORECASE
-)
-_BEING_REDIRECTED_RE = re.compile(r"you['\u2019]re being redirected", re.IGNORECASE)
+# Results after which a small page may be a redirect interstitial (F002).
 _SHORT_TEXT_FAILURES = frozenset({FetchFailure.TOO_SHORT, FetchFailure.BLOCKED})
 
 # Request extension carrying the `ledger_key`s of the hops of one `fetch` call; httpx
@@ -223,9 +216,9 @@ class PageFetcher:
         """Download `url`, classify the response and extract its main text.
 
         Returns the page or the AF-3.7 failure category. The total deadline
-        covers every hop and body read, including one redirect-interstitial hop;
-        extraction runs outside it in a worker thread. Cancellation and other
-        `BaseException`s propagate.
+        covers every hop and body read, plus the detection and download of one
+        redirect interstitial's onward page; text extraction runs outside it in
+        a worker thread. Cancellation and other `BaseException`s propagate.
         """
         try:
             deadline = anyio.current_time() + self._config.timeout
@@ -235,24 +228,7 @@ class PageFetcher:
             if isinstance(body, FetchFailure):
                 return body
             result = await self._extract(body)
-            small_short_page = (
-                result in _SHORT_TEXT_FAILURES and len(body.data) <= CHALLENGE_MAX_BYTES
-            )
-            target = (
-                interstitial_target(body.data, body.url) if small_short_page else None
-            )
-            if target is None:
-                return result
-            LOGGER.debug(
-                "Following a redirect interstitial from %s to %s",
-                log_host(body.url),
-                log_host(target),
-            )
-            with anyio.fail_at(deadline):
-                onward = await self._download(target, chain_hops)
-            if isinstance(onward, FetchFailure):
-                return onward
-            return await self._extract(onward)
+            return await self._follow_interstitial(body, result, chain_hops, deadline)
         except _RejectedHop as exc:
             return exc.category
         except (TimeoutError, httpx.TimeoutException):
@@ -312,6 +288,40 @@ class PageFetcher:
                 return FetchFailure.NOT_HTML
             return _Body(str(response.url), response.status_code, content_type, data)
 
+    async def _follow_interstitial(
+        self,
+        body: _Body,
+        result: FetchedPage | FetchFailure,
+        chain_hops: set[str],
+        deadline: float,
+    ) -> FetchedPage | FetchFailure:
+        """Follow one redirect interstitial (F002), or return `result` unchanged.
+
+        Only a small page with too little text qualifies. Detection runs in a
+        worker thread inside the fetch deadline; the onward page is downloaded
+        through the same guarded client and `chain_hops` (so the request hook's
+        loop, link-class, ledger and redirect-budget checks apply) and is never
+        checked for a second interstitial. A page that points at itself keeps
+        its own result.
+        """
+        if result not in _SHORT_TEXT_FAILURES or len(body.data) > CHALLENGE_MAX_BYTES:
+            return result
+        with anyio.fail_at(deadline):
+            target = await anyio.to_thread.run_sync(
+                interstitial_target, body.data, body.url, abandon_on_cancel=True
+            )
+            if target is None or ledger_key(target) == ledger_key(body.url):
+                return result
+            LOGGER.debug(
+                "Following a redirect interstitial from %s to %s",
+                log_host(body.url),
+                log_host(target),
+            )
+            onward = await self._download(target, chain_hops)
+        if isinstance(onward, FetchFailure):
+            return onward
+        return await self._extract(onward)
+
     async def _extract(self, body: _Body) -> FetchedPage | FetchFailure:
         """Extract the text, then classify: paywall, challenge, too short, page.
 
@@ -342,68 +352,6 @@ class PageFetcher:
             byte_count=len(body.data),
             text=text,
         )
-
-
-def interstitial_target(body: bytes, base_url: str) -> str | None:
-    """Onward URL of a redirect interstitial page, or None (F002).
-
-    Recognised: a `<meta http-equiv="refresh" content="N; url=...">`, or a page
-    saying "You're being redirected" with exactly one anchor (HubSpot click
-    tracking). The URL is HTML-unescaped (by the parser), resolved against
-    `base_url` and must be absolute http(s). It comes from untrusted content:
-    the caller fetches it through the guarded client like any other hop.
-    """
-    parser = _InterstitialParser()
-    parser.feed(body.decode("utf-8", errors="replace"))
-    parser.close()
-    candidate = None
-    refresh = _REFRESH_CONTENT_RE.match(parser.refresh[0]) if parser.refresh else None
-    if refresh is not None:
-        candidate = refresh.group(1)
-    elif len(parser.anchors) == 1 and _BEING_REDIRECTED_RE.search(parser.text()):
-        candidate = parser.anchors[0]
-    if not candidate:
-        return None
-    target = urljoin(base_url, candidate.strip())
-    parts = urlsplit(target)
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
-        return None
-    return target
-
-
-class _InterstitialParser(HTMLParser):
-    """Collects meta-refresh contents, anchor hrefs and the text outside scripts."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.refresh: list[str] = []
-        self.anchors: list[str | None] = []
-        self._text: list[str] = []
-        self._in_source = False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        """Record meta refresh and anchor attributes (already unescaped)."""
-        values = dict(attrs)
-        if tag == "a":
-            self.anchors.append(values.get("href"))
-        elif tag == "meta" and (values.get("http-equiv") or "").lower() == "refresh":
-            self.refresh.append(values.get("content") or "")
-        elif tag in {"script", "style"}:
-            self._in_source = True
-
-    def handle_endtag(self, tag: str) -> None:
-        """Leave a script or style element."""
-        if tag in {"script", "style"}:
-            self._in_source = False
-
-    def handle_data(self, data: str) -> None:
-        """Keep text that is not script or style source."""
-        if not self._in_source:
-            self._text.append(data)
-
-    def text(self) -> str:
-        """The collected text."""
-        return "".join(self._text)
 
 
 async def _drop_redirect_body(response: httpx.Response) -> None:

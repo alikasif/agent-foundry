@@ -269,18 +269,24 @@ def _open_on_windows(path: Path) -> bool:
 def _run_quietly(
     args: list[str], *, stdout: int = subprocess.DEVNULL
 ) -> subprocess.CompletedProcess[str] | None:
-    """Run `args` without a shell; None when it cannot start or times out."""
+    """Run `args` without a shell; None when it cannot start, times out or fails.
+
+    Output is decoded with `surrogateescape`, so a non-UTF-8 byte (as `wslpath -w`
+    prints for such a path) survives and is re-encoded unchanged when the string
+    is passed on as an argument. ValueError covers any decoding failure left.
+    """
     try:
         return subprocess.run(
             args,
             stdout=stdout,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
             timeout=OPEN_TIMEOUT_S,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
