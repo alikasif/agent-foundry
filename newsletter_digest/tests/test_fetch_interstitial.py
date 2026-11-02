@@ -34,6 +34,7 @@ from tests.test_fetch import (
     TIMEOUT_S,
     TYPICAL_ARTICLE,
     ChunkedBody,
+    FakeExtractor,
     FakeResolver,
     Route,
     ScriptedBackend,
@@ -527,6 +528,40 @@ async def test_interstitial_hop_shares_the_fetch_deadline() -> None:
     result = await fetch_with(site, config=make_config(timeout=0.1))
     assert result is FetchFailure.TIMED_OUT
     assert time.monotonic() - started < 2.0
+
+
+NEAR_DEADLINE_TIMEOUT_S = 1.0
+NEAR_DEADLINE_ARRIVAL_S = 0.8  # the page arrives inside the budget...
+NEAR_DEADLINE_EXTRACT_S = 0.3  # ...and extraction ends past it (F005, review R2-1)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<!doctype html><html><body><p>Short page.</p></body></html>",
+        hubspot_page(ARTICLE_URL),
+    ],
+    ids=["plain-short-page", "interstitial"],
+)
+async def test_detection_past_the_deadline_keeps_the_result(body: bytes) -> None:
+    # T030: extraction past the deadline never turns a result into a timeout, and
+    # interstitial detection after it must not either.
+    site = Site(
+        {HUBSPOT_URL: slow(page(body), NEAR_DEADLINE_ARRIVAL_S), ARTICLE_URL: page()}
+    )
+    extractor = FakeExtractor(
+        result=text_of(SHORT_CHARS), delay=NEAR_DEADLINE_EXTRACT_S
+    )
+    with anyio.fail_after(TIMEOUT_S):
+        async with PageFetcher(
+            make_config(timeout=NEAR_DEADLINE_TIMEOUT_S),
+            transport=httpx.MockTransport(site),
+            extractor=extractor,
+        ) as fetcher:
+            result = await fetcher.fetch(HUBSPOT_URL)
+    assert result is FetchFailure.TOO_SHORT
+    assert site.requested == [HUBSPOT_URL]
+    assert len(extractor.calls) == 1
 
 
 async def test_onward_body_is_capped() -> None:

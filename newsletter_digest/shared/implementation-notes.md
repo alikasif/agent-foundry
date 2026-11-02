@@ -2379,8 +2379,11 @@ the shared deadline each fails at least one test.
   keep burning CPU and anyio workers are non-daemon.
   - The bytes are decoded by us (UTF-8, `errors="replace"`, as before) before lxml:
     lxml guesses latin-1 for undeclared UTF-8, which turned `You’re` into mojibake and
-    missed the curly-apostrophe form (found by the existing test). A NUL or other
-    XML-incompatible character makes lxml raise ValueError, which fails closed (None).
+    missed the curly-apostrophe form (found by the existing test). lxml raises
+    ValueError for a str that carries an XML encoding declaration
+    (`<?xml ... encoding=...?>`) and ParserError for an empty document; both fail
+    closed (None). (Corrected in F005 / review R2-3: an earlier version said a NUL makes
+    lxml raise; it does not, lxml turns it into U+FFFD.)
   - Script/style text is excluded by `drop_tree()` on a tree we own; comments are not
     part of `text_content()`. `<base href>` is still ignored (we resolve against the
     response URL, never `root.base_url`).
@@ -2466,3 +2469,31 @@ Tests: a FakeShell wslpath raising `UnicodeDecodeError` falls back to `webbrowse
 real-subprocess test with fake `wslpath` (prints `\\wsl\a<0xff>b.html`) and
 `explorer.exe` (records `$1`, exits 1) shows the byte reaches explorer unchanged and no
 hint is printed. Reverting to `text=True` fails 2 tests; `errors="replace"` fails 1.
+
+## F005 — Interstitial detection never turns a result into a timeout (review R2-1)
+
+Round-2 review R2-1: after ce999e3 the detection ran inside `anyio.fail_at(deadline)`, so
+when the first download plus extraction had already used the deadline, EVERY small short
+page (interstitial or not) became TIMED_OUT instead of TOO_SHORT/BLOCKED. That broke the
+T030 decision that extraction past the deadline never turns a result into a timeout.
+
+**Change (fetch.py `_follow_interstitial`)**: only the detection runs under
+`anyio.move_on_at(deadline)`; `target` starts as None, so a cancelled detection returns
+the original `result`. The onward `_download` stays under `anyio.fail_at(deadline)`, so
+a real onward timeout is still TIMED_OUT (`test_interstitial_hop_shares_the_fetch_deadline`).
+The detection thread is still `abandon_on_cancel=True`; lxml finishes in milliseconds,
+so an abandoned thread does not linger.
+
+**Decision**: a page that IS an interstitial but whose detection is cut off by the
+deadline also keeps TOO_SHORT (not followed). Starting an onward download with no time
+left could only end in TIMED_OUT, which is the wrong note for that page.
+
+**Tests** (tests/test_fetch_interstitial.py): a plain short page and a HubSpot
+interstitial, each served after 0.8 s of a 1.0 s budget with a 0.3 s extractor, give
+TOO_SHORT with one request (scaled-down form of the reviewer's 1.8 s / 2.0 s / 0.3 s
+probe, keeping the same "arrives inside, extraction ends outside" shape). Mutants:
+detection under `fail_at` fails both; dropping the deadline around the onward download
+fails the shared-deadline test.
+
+Also R2-3: the extract.py comment and the F002 note above claimed a NUL makes lxml
+raise; both are corrected.

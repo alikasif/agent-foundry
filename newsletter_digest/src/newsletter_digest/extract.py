@@ -149,8 +149,9 @@ def interstitial_target(html: bytes, base_url: str) -> str | None:
     resolved against `base_url` and must be absolute http(s) with a host. Pure
     and thread-safe; the caller fetches the URL through its guarded client.
     """
-    # Decoded here: lxml guesses latin-1 for undeclared UTF-8 bytes. NUL or other
-    # XML-incompatible characters make lxml raise ValueError, which fails closed.
+    # Decoded here: lxml guesses latin-1 for undeclared UTF-8 bytes. lxml rejects a
+    # str with an XML encoding declaration (ValueError) and an empty document
+    # (ParserError); both fail closed. A NUL is replaced by U+FFFD, not an error.
     try:
         root = lxml_html.document_fromstring(html.decode("utf-8", errors="replace"))
     except (etree.LxmlError, ValueError):

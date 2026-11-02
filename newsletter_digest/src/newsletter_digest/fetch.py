@@ -298,25 +298,28 @@ class PageFetcher:
         """Follow one redirect interstitial (F002), or return `result` unchanged.
 
         Only a small page with too little text qualifies. Detection runs in a
-        worker thread inside the fetch deadline; the onward page is downloaded
-        through the same guarded client and `chain_hops` (so the request hook's
-        loop, link-class, ledger and redirect-budget checks apply) and is never
-        checked for a second interstitial. A page that points at itself keeps
-        its own result.
+        worker thread until the fetch deadline: if the deadline is reached first,
+        `result` stands (as for extraction, T030, a slow page is never turned into
+        a timeout). The onward page is downloaded under the deadline through the
+        same guarded client and `chain_hops` (so the request hook's loop,
+        link-class, ledger and redirect-budget checks apply) and is never checked
+        for a second interstitial. A page that points at itself keeps its result.
         """
         if result not in _SHORT_TEXT_FAILURES or len(body.data) > CHALLENGE_MAX_BYTES:
             return result
-        with anyio.fail_at(deadline):
+        target: str | None = None
+        with anyio.move_on_at(deadline):
             target = await anyio.to_thread.run_sync(
                 interstitial_target, body.data, body.url, abandon_on_cancel=True
             )
-            if target is None or ledger_key(target) == ledger_key(body.url):
-                return result
-            LOGGER.debug(
-                "Following a redirect interstitial from %s to %s",
-                log_host(body.url),
-                log_host(target),
-            )
+        if target is None or ledger_key(target) == ledger_key(body.url):
+            return result
+        LOGGER.debug(
+            "Following a redirect interstitial from %s to %s",
+            log_host(body.url),
+            log_host(target),
+        )
+        with anyio.fail_at(deadline):
             onward = await self._download(target, chain_hops)
         if isinstance(onward, FetchFailure):
             return onward
