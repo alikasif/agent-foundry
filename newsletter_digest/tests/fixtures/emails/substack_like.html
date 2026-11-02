@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Import AI 412: Small models, big claims</title>
+  <style>
+    body { font-family: Georgia, serif; }
+    .preview { display: none; }
+    a { color: #ff6719; }
+  </style>
+</head>
+<body>
+  <div class="preview" style="display:none;max-height:0;overflow:hidden">This week: distillation, eval contamination, and a robot that folds laundry&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
+  <table role="presentation" width="100%"><tr><td align="center">
+    <a href="https://importai.substack.com/p/import-ai-412?utm_source=email"><img src="https://substackcdn.com/image/header.png" alt="Import AI" width="600"></a>
+  </td></tr></table>
+  <h1 class="post-title"><a href="https://importai.substack.com/p/import-ai-412">Import AI 412: Small models, big claims</a></h1>
+  <h3 class="subtitle">Plus: why your benchmark is probably in the training set</h3>
+  <p>Welcome to Import&nbsp;AI, a newsletter about artificial intelligence. Forward this email to give your chums an AI upgrade. Subscribe <a href="https://importai.substack.com/subscribe?utm_medium=email">here</a>.</p>
+  <hr>
+  <h2>Distillation keeps eating the frontier</h2>
+  <p><strong>What happened:</strong> Researchers trained a 3B-parameter model on outputs from a much larger &ldquo;teacher&rdquo; and matched it on 7 of 9 reasoning benchmarks &mdash; at roughly 1/40th the inference cost. <a href="https://arxiv.org/abs/2610.01234">Read the paper (arXiv)</a>.</p>
+  <p><em>Why this matters:</em> If small students can absorb most of a teacher&rsquo;s skill, then the cost of deploying capable systems falls fast. That&#39;s good for access, and complicated for anyone trying to govern compute.</p>
+  <blockquote><p>&ldquo;We were surprised by how little data the student needed,&rdquo; the authors write.</p></blockquote>
+  <h2>Eval contamination, measured</h2>
+  <p>A new study checks 14 popular benchmarks for overlap with public pretraining corpora:</p>
+  <ul>
+    <li>9 of 14 had measurable overlap above 5%.</li>
+    <li>Two had <a href="https://example.org/contam?bench=gsm8k&amp;split=test">near-verbatim copies</a> of the test split.</li>
+    <li>Performance dropped 4&ndash;11 points on de-contaminated versions.</li>
+  </ul>
+  <p>Read more: <a href="https://github.com/example/contam-audit">contam-audit on GitHub</a><br>
+  Dataset: <a href="https://huggingface.co/datasets/example/clean-evals">clean-evals</a></p>
+  <h2>Tech Tales:</h2>
+  <p><em>The Laundry Robot</em><br>[2031, a flat in Leeds]</p>
+  <p>It folded the shirts the way my mother did, which was the strange part. I never told it how.</p>
+  <div class="footer" style="font-size:12px;color:#777">
+    <p>Thanks for reading Import AI! Subscribe for free to receive new posts.</p>
+    <p><a href="https://importai.substack.com/action/disable_email?token=abc">Unsubscribe</a> &middot; <a href="https://substack.com/app">Get the app</a></p>
+    <p>&copy; 2026 Jack Clark<br>548 Market Street PMB 72296, San Francisco, CA 94104</p>
+  </div>
+  <img src="https://eotrx.substackcdn.com/open?token=xyz" width="1" height="1" alt="" style="height:1px;width:1px">
+</body>
+</html>

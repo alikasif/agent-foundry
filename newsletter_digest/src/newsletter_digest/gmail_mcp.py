@@ -13,7 +13,6 @@ import re
 import shutil
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -21,6 +20,8 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
+from lxml import etree
+from lxml import html as lxml_html
 
 from newsletter_digest.config import GMAIL_MCP_PACKAGE, Settings
 from newsletter_digest.models import EmailRef
@@ -73,6 +74,10 @@ _BLANK_LINE_RE = re.compile(r"\n[ \t\r]*\n")
 HTML_NOTE_PREFIX = "[Note: This email is HTML-formatted"
 KEPT_HEADERS = ("Subject", "From", "Date")
 TRUNCATION_MARKER = "[...truncated]"
+# HTML handed to the parser is capped at this many characters per kept text character
+# (F004): newsletter markup is often 10-20x its text (inline CSS, layout tables), and
+# the text is truncated to `max_chars` anyway. 32 x the 30,000 default is ~1 MB.
+HTML_CAP_FACTOR = 32
 _HTML_TAG_RE = re.compile(r"<(html|body|table|div|p|a)\b", re.I)
 _HEADER_LINE_RE = re.compile(r"[A-Za-z][\w -]*:")
 _DELIMITER_RE = re.compile(r"<<<\s*(END\s+)?EMAIL", re.I)
@@ -307,14 +312,34 @@ def parse_search_results(text: str) -> list[EmailRef]:
 def html_to_text(html: str) -> str:
     """Convert email HTML to readable text, keeping http(s) link URLs.
 
-    Uses only the stdlib parser. Hidden and non-content elements are dropped,
-    links become ``text <URL>``, block tags become line breaks and list items
-    get a ``- `` prefix.
+    Hidden and non-content elements are dropped, links become ``text <URL>``,
+    block tags become line breaks and list items get a ``- `` prefix. Parsed with
+    lxml's C parser, which is linear on hostile markup (stdlib ``html.parser`` is
+    quadratic on unclosed start tags, F004). Pure and thread-safe.
     """
-    parser = _TextExtractor()
-    parser.feed(html)
-    parser.close()
-    return _tidy_text(parser.text())
+    # Encoded and parsed as UTF-8 explicitly: lxml rejects a str that carries an
+    # XML encoding declaration and would trust a page's own (often wrong) charset.
+    parser = lxml_html.HTMLParser(encoding="utf-8")
+    try:
+        root = lxml_html.document_fromstring(
+            html.encode("utf-8", errors="replace"), parser=parser
+        )
+    except etree.ParserError:  # empty document
+        return ""
+    extractor = _TextExtractor()
+    stack: list[tuple[Any, bool]] = [(root, False)]
+    while stack:
+        element, ended = stack.pop()
+        if ended:
+            extractor.end(element.tag)
+            extractor.data(element.tail)
+        elif isinstance(element.tag, str) and extractor.start(element):
+            stack.append((element, True))
+            extractor.data(element.text)
+            stack.extend((child, False) for child in reversed(element))
+        else:  # comment, processing instruction or skipped subtree
+            extractor.data(element.tail)
+    return _tidy_text(extractor.text())
 
 
 def prepare_email_text(raw: str, max_chars: int, *, email_id: str = "") -> str:
@@ -325,10 +350,11 @@ def prepare_email_text(raw: str, max_chars: int, *, email_id: str = "") -> str:
     result in untrusted-data delimiters.
     """
     headers, body = _split_headers(raw.replace("\r\n", "\n"))
+    html_cap = HTML_CAP_FACTOR * max_chars
     if body.lstrip().startswith(HTML_NOTE_PREFIX):
-        body = html_to_text(body.lstrip().partition("\n")[2])
+        body = html_to_text(body.lstrip().partition("\n")[2][:html_cap])
     elif len(_HTML_TAG_RE.findall(body)) >= 3:
-        body = html_to_text(body)
+        body = html_to_text(body[:html_cap])
     else:
         body = _tidy_text(body)
     text = "\n".join(headers) + "\n\n" + body if headers else body
@@ -342,71 +368,57 @@ def prepare_email_text(raw: str, max_chars: int, *, email_id: str = "") -> str:
     )
 
 
-class _TextExtractor(HTMLParser):
-    """Collects visible text and links from email HTML (see ``html_to_text``)."""
+class _TextExtractor:
+    """Collects visible text and links from an email's element events.
+
+    ``html_to_text`` walks the parsed tree and calls ``start``/``data``/``end`` in
+    document order; a ``start`` that returns False skips that element's subtree.
+    """
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
         self._out: list[str] = []
-        self._skip_tag: str | None = None
-        self._skip_depth = 0
         self._link_href: str | None = None
         self._link_parts: list[str] = []
         self._link_alt = ""
 
     def text(self) -> str:
-        """Return the collected text (call after ``close()``)."""
+        """Return the collected text (call after the walk)."""
         self._close_link()
         return "".join(self._out)
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        """Track skipped regions, links, images and block breaks."""
-        if self._skip_tag is not None:
-            if tag == "body":  # an unclosed <head> must not swallow the body
-                self._skip_tag = None
-            elif tag == self._skip_tag:
-                self._skip_depth += 1
-                return
-            else:
-                return
-        attributes = {name: value or "" for name, value in attrs}
+    def start(self, element: Any) -> bool:
+        """Handle a start tag; False when the element is hidden or non-content."""
+        tag: str = element.tag
+        attributes = element.attrib
         hidden = "hidden" in attributes or _HIDDEN_STYLE_RE.search(
             attributes.get("style", "")
         )
         if tag not in VOID_TAGS and (tag in SKIP_TAGS or hidden):
-            self._skip_tag, self._skip_depth = tag, 1
-            return
+            return False
         if tag == "a":
             self._close_link()
             self._link_href = attributes.get("href", "").strip()
-            return
-        if tag == "img":
+        elif tag == "img":
             if self._link_href is not None and not self._link_alt:
                 self._link_alt = attributes.get("alt", "").strip()
-            return
-        if tag == "li":
+        elif tag == "li":
             # A closed previous <li> already ended the line; avoid a blank line.
             self._emit("- " if self._at_line_start() else "\n- ")
         elif tag in BLOCK_TAGS:
             self._emit("\n")
+        return True
 
-    def handle_endtag(self, tag: str) -> None:
-        """Close skipped regions and links; end block elements with a break."""
-        if self._skip_tag is not None:
-            if tag == self._skip_tag:
-                self._skip_depth -= 1
-                if self._skip_depth == 0:
-                    self._skip_tag = None
-            return
+    def end(self, tag: str) -> None:
+        """Close links; end block elements with a break (void tags have no end)."""
         if tag == "a":
             self._close_link()
-        elif tag in BLOCK_TAGS:
+        elif tag in BLOCK_TAGS and tag not in VOID_TAGS:
             self._emit("\n")
 
-    def handle_data(self, data: str) -> None:
-        """Emit text outside skipped regions with source whitespace collapsed."""
-        if self._skip_tag is None:
-            self._emit(_WHITESPACE_RE.sub(" ", data))
+    def data(self, text: str | None) -> None:
+        """Emit text with source whitespace collapsed."""
+        if text:
+            self._emit(_WHITESPACE_RE.sub(" ", text))
 
     def _emit(self, text: str) -> None:
         if self._link_href is not None:
@@ -428,10 +440,18 @@ class _TextExtractor(HTMLParser):
         label = _WHITESPACE_RE.sub(" ", "".join(self._link_parts)).strip()
         label = label or self._link_alt
         self._link_href, self._link_parts, self._link_alt = None, [], ""
-        if urlsplit(href).scheme.lower() in LINK_SCHEMES and label:
+        if _is_web_link(href) and label:
             self._out.append(f" {label} <{href}> ")
         elif label:
             self._out.append(f" {label} ")
+
+
+def _is_web_link(href: str) -> bool:
+    """True for an http(s) href; an unparseable one (``http://[::1``) is not."""
+    try:
+        return urlsplit(href).scheme.lower() in LINK_SCHEMES
+    except ValueError:
+        return False
 
 
 def _split_headers(raw: str) -> tuple[list[str], str]:

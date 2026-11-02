@@ -4,9 +4,9 @@ Role: a thin wrapper over `trafilatura.extract` (never its downloaders) with
 whitespace tidying, delimiter scrubbing and truncation, plus the redirect-interstitial
 detector `interstitial_target` (F002). Performs no network I/O.
 
-Allowed imports: stdlib, `trafilatura` and `lxml`; no project modules. All HTML parsing
-lives here and uses lxml's C parser, which is linear on hostile markup (stdlib
-`html.parser` is quadratic on unclosed start tags).
+Allowed imports: stdlib, `trafilatura` and `lxml`; no project modules. All parsing of
+fetched pages lives here and uses lxml's C parser, which is linear on hostile markup
+(stdlib `html.parser` is quadratic on unclosed start tags).
 """
 
 import logging

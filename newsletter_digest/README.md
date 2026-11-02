@@ -402,8 +402,9 @@ The tool is designed so that a run can read your newsletters and nothing else.
   Gmail token, so the default `GMAIL_MCP_ARGS` names an exact release instead of letting
   `npx` fetch the latest one on every run. See
   [Pinned server version](#pinned-server-version).
-- **Email content is untrusted data.** Each email is stripped of HTML, hidden elements
-  and zero-width characters, truncated, and wrapped in markers that tell the model it is
+- **Email content is untrusted data.** Each email is stripped of HTML (with lxml's
+  linear-time parser, in a worker thread, so a crafted email cannot stall the run), hidden
+  elements and zero-width characters, truncated, and wrapped in markers that tell the model it is
   data and not instructions. The prompts tell the model to ignore instructions found in
   emails, and the model's tools are limited to recording articles and reading listed
   emails. Delimiter look-alikes inside an email are removed so it cannot close the wrapper.
@@ -499,7 +500,8 @@ Source lives in `src/newsletter_digest/`:
   a live Gmail account. Other versions (set through `GMAIL_MCP_ARGS`) may change tool or
   output formats.
 - Emails are truncated to 30,000 characters each; very long newsletters may lose their
-  tail.
+  tail. Before conversion, an HTML email is also cut to 32 times that limit (about 1 MB
+  of markup), which is far more markup than 30,000 characters of text need.
 - Extraction, de-duplication and ranking depend on the model, so results can vary between
   runs and models.
 - Testing-mode OAuth tokens expire after about 7 days (see Troubleshooting).

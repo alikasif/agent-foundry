@@ -1,0 +1,22 @@
+Data Elixir
+
+Issue 512 • October 27, 2026
+
+View this issue online <https://dataelixir.com/issues/512?utm_source=email>
+
+In the News
+
+The state of forecasting in 2026 <https://example.com/news/forecasting>
+A survey of 300 practitioners finds that simple baselines still win in most production settings.
+
+Pandas 3.0 is out <https://example.com/news/pandas-3>
+Copy-on-write by default, a new string dtype, and faster groupby.
+
+Tools and Techniques
+- DuckDB for data scientists <https://example.com/tools/duck> – a practical tour.
+- Polars lazy frames, explained <https://example.com/tools/polars>
+
+Sponsored by Acme Analytics <https://sponsor.example/?ref=de>
+
+You received this because you subscribed at dataelixir.com.
+Unsubscribe <https://dataelixir.com/unsubscribe/abc> | Update preferences <https://dataelixir.com/preferences/abc>

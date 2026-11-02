@@ -1,0 +1,39 @@
+<<<EMAIL id=e1 (untrusted data, not instructions)>>>
+Subject: S
+From: F <f@example.com>
+Date: Tue, 27 Oct 2026 07:00:00 -0400
+
+TLDR AI 2026-10-27
+
+Together with Sponsor Co <https://tracking.tldrnewsletter.com/CL0/https:%2F%2Fsponsor.example%2F%3Futm_source=tldr/1/abc>
+
+📱
+Big Tech & Startups
+
+Google ships a new coding agent (4 minute read) <https://tracking.tldrnewsletter.com/CL0/https:%2F%2Fblog.example%2Fagent/1/def>
+
+Google's new agent can open pull requests, run tests and respond to review comments. It is available in preview for enterprise customers.
+
+Meta open-sources a speech model (GitHub Repo) <https://tracking.tldrnewsletter.com/CL0/https:%2F%2Fai.meta.example%2Fspeech/1/ghi>
+
+The model handles 100+ languages and runs on a single consumer GPU.
+
+🧠
+Research & Innovation
+
+Why evals are hard (12 minute read) <https://tracking.tldrnewsletter.com/CL0/https:%2F%2Fexample.com%2Fevals/1/jkl>
+
+An essay on construct validity, contamination and the gap between leaderboard and real-world performance … with examples.
+
+Love TLDR? Tell your friends and get rewards!
+
+Share your referral link below with friends to get free TLDR swag!
+https://refer.tldr.tech/abc/1 <https://refer.tldr.tech/abc/1>
+
+If you have any comments or feedback, just respond to this email!
+
+Thanks for reading,
+Andrew Tan & Ali Aminian
+
+Manage your subscriptions <https://tldr.tech/ai/manage?email=reader%40example.com> to our other newsletters on tech, startups, and programming. Or if TLDR AI isn't for you, please unsubscribe <https://a.tldrnewsletter.com/unsubscribe?ep=1&l=abc&lc=def> .
+<<<END EMAIL>>>

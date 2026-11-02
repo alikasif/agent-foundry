@@ -2497,3 +2497,106 @@ fails the shared-deadline test.
 
 Also R2-3: the extract.py comment and the F002 note above claimed a NUL makes lxml
 raise; both are corrected.
+
+## F004 — Email HTML conversion on lxml, capped, off the event loop (review R2-2)
+
+Round-2 review R2-2 (MAJOR, pre-existing): `gmail_mcp.html_to_text` ran the stdlib
+`HTMLParser` subclass `_TextExtractor` over the whole untrusted email body,
+synchronously inside the async `read_email` tool, with no size cap before parsing.
+CPython 3.13's `html.parser` is quadratic on unclosed start tags.
+
+**Before / after** (64 KB bodies; "before" measured on 8548f1f with the html.parser code):
+
+| body | html_to_text before | prepare_email_text before | html_to_text after | prepare_email_text after | read_email after, concurrent sleep(0.2) |
+|---|---|---|---|---|---|
+| `<a ` repeated | 29.6 s | 30.5 s | 0.5 ms | 2.6 ms | 7.8 ms, 0.2006 s |
+| `<b ` repeated | 33.3 s | 34.7 s | 0.5 ms | 1.2 ms | 2.5 ms, 0.2012 s |
+| `<div\n` repeated | 13.6 s | 14.4 s | 0.3 ms | 2.3 ms | 2.0 ms, 0.2009 s |
+
+At the default cap (960,000 chars): realistic markup (the Mailchimp fixture repeated)
+18 ms, 1 MB of `<a ` 11 ms, of `<div\n` 4 ms. `prepare_email_text` on an 8 MB `<a `
+email takes 0.28 s, most of it the pre-existing linear `_HTML_TAG_RE.findall` over the
+whole body (left as is: linear, and now in the worker thread).
+
+**Where the code lives (layer order)**: kept in `gmail_mcp.py`, now importing lxml. I
+considered T021's suggested `email_text.py` split and moving the converter into
+`extract.py`, and rejected both for this fix. The change is a parser swap with the same
+public names (`html_to_text`, `prepare_email_text`) and callers, so leaving it in place
+adds no import edge and no module. T021 said to split the pure pipeline out "if it
+grows", and it did not grow. Moving it into `extract.py` (tier 6, below gmail_mcp, so
+the edge would be legal) would tie email stripping to the article-fetching module and its
+trafilatura import, which T046 keeps as a fetching-only concern. The architecture rule
+names the two HTML-parsing owners explicitly: `HTML_PARSER_OWNERS = {"extract",
+"gmail_mcp"}` may import lxml, and **no module** may import `html.parser` (the
+gmail_mcp exception from ce999e3 is gone; self-tests cover gmail_mcp and render).
+
+**Port (gmail_mcp.py)**: the same state machine (`_TextExtractor.start/end/data`, the
+same SKIP_TAGS / hidden / link / img-alt / `li` / BLOCK_TAGS rules and `_tidy_text`),
+driven by an explicit-stack walk over the lxml tree in document order: start, `.text`,
+children, end, `.tail`. A skipped element (SKIP_TAGS, `hidden`, `display:none`) drops
+its subtree but keeps its tail. That replaces html.parser's skip-by-tag-name depth
+counting and the "unclosed <head> ends at <body>" special case, both of which the tree
+handles. Void tags get no end event (html.parser never saw `</br>`). Comments and PIs
+are skipped and keep their tail. The walk is iterative, so 20,000 nested divs are fine.
+- Input: the str is encoded to UTF-8 and parsed with `HTMLParser(encoding="utf-8")`.
+  That avoids lxml's ValueError for a str with an XML declaration (realistic: the
+  XHTML fixture starts with `<?xml ... encoding="UTF-8"?>`) and lxml trusting a wrong
+  in-page `<meta charset>` (we already have decoded text). It also avoids the latin-1
+  guess seen in F002. Lone surrogates become `?` (`errors="replace"`). An empty document
+  (ParserError) gives "".
+- A new parser object per call (lxml parser objects are not meant to be shared across
+  threads; creating one is cheap).
+
+**Cap**: `HTML_CAP_FACTOR = 32`; `prepare_email_text` hands at most
+`32 * max_chars` characters of HTML to `html_to_text` (960,000 at the default 30,000,
+about 1 MB for ASCII markup), on both the HTML-note path and the tag-heavy path. Why
+32: newsletter markup is often 10-20x its visible text (inline CSS, nested layout
+tables; the hand-written Mailchimp fixture is only 3.4x, real templates with inline
+CSS on every cell run far higher), and the text is cut to `max_chars` anyway, so a
+32x cut removes only markup that could not have contributed. It counts characters, not
+bytes, because the MCP result is already a str; for ASCII HTML the two are equal.
+`html_to_text` itself is uncapped (it is linear now).
+
+**Thread**: `tools.read_email` runs `prepare_email_text` via
+`anyio.to_thread.run_sync(partial(...), abandon_on_cancel=True)`. A cancelled run does
+not wait for the conversion; the abandoned thread finishes in milliseconds (capped,
+linear).
+
+**Characterisation** (tests/test_email_html.py, written and run against the html.parser
+implementation first; goldens never regenerated): 5 realistic newsletter fixtures in
+tests/fixtures/emails/ (Substack-like, Mailchimp tables with MSO conditional comments and a
+hidden preheader, TLDR-style divs with emoji and `<![if !mso]>`, XHTML with an XML
+declaration, an entity/unicode page) checked through `html_to_text` and through
+`prepare_email_text` at max 30,000 and 600, plus 61 snippets (`snippets.json`: every
+existing unit-test input, well-formed variations and malformed markup). Results after
+the port:
+- Identical: 4 of 5 fixtures (all three outputs each) and 55 of 61 snippets, including
+  all existing gmail_mcp/tools tests and the flag-off goldens.
+- Changed, accepted and pinned (`CHANGED_BY_PORT`, `*.lxml.txt` overrides):
+  - `<br/>` / `<br />` gave a blank line in html.parser (it fires start AND end for a
+    self-closing tag, i.e. two BLOCK breaks) and now gives a line break, like `<br>`.
+    This is the only change in the XHTML fixture (3 fewer blank lines). A test proves its
+    non-blank lines are identical. A tree parser keeps no self-closing flag, so this
+    cannot be reproduced. Old behaviour depended on HTML vs XHTML spelling, not content.
+  - Malformed markup: unclosed `<p>`/`<td>` now get a blank line between items (lxml
+    closes the implied elements, so each emits its end break). Stray `</p>`/`</div>`
+    with no element are dropped instead of becoming breaks.
+  - NUL becomes U+FFFD (libxml2).
+  - Bug fixed: an href such as `http://[::1` made `urlsplit` raise ValueError, so the
+    whole email failed to read ("couldn't read"). The new `_is_web_link` treats it as a
+    non-web link (label only).
+- Entities: html.parser decodes HTML5 entities; libxml2 knows the HTML4 set plus
+  `&apos;`. Every entity in the fixtures (curly quotes, dashes, `&hellip;`, `&copy;`,
+  `&euro;`, `&frac12;`, `&zwnj;`, numeric and hex refs, astral emoji) decodes the same.
+  A rare HTML5-only entity could now stay literal; none were seen in the corpus.
+
+**Other tests**: 64 KB `<a `, `<b `, `<div\n` through `html_to_text` and
+`prepare_email_text` (<1 s each), and through the real `read_email` tool with a
+concurrent `anyio.sleep(0.2)` (read <1 s, sleep <0.7 s); conversion runs off the main
+thread; the cap applies on both paths; the default cap is ~1 MB; an XML declaration plus
+a wrong meta charset parse as UTF-8; degenerate input ("", whitespace, comment-only,
+lone surrogate) never raises; 20,000-deep nesting. Mutation checks: ending void tags,
+dropping the explicit UTF-8 parser, dropping the cap, not catching ValueError in
+`_is_web_link`, losing the tail after an element ends, ignoring `hidden`/`display:none`,
+or converting on the loop each fails at least one test. The generator script is not
+committed; the goldens record their source commit in `snippets.json`.

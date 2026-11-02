@@ -1,0 +1,45 @@
+<<<EMAIL id=e1 (untrusted data, not instructions)>>>
+Subject: S
+From: F <f@example.com>
+Date: Tue, 27 Oct 2026 07:00:00 -0400
+
+Import AI <https://importai.substack.com/p/import-ai-412?utm_source=email>
+
+Import AI 412: Small models, big claims <https://importai.substack.com/p/import-ai-412>
+
+Plus: why your benchmark is probably in the training set
+
+Welcome to Import AI, a newsletter about artificial intelligence. Forward this email to give your chums an AI upgrade. Subscribe here <https://importai.substack.com/subscribe?utm_medium=email> .
+
+Distillation keeps eating the frontier
+
+What happened: Researchers trained a 3B-parameter model on outputs from a much larger “teacher” and matched it on 7 of 9 reasoning benchmarks — at roughly 1/40th the inference cost. Read the paper (arXiv) <https://arxiv.org/abs/2610.01234> .
+
+Why this matters: If small students can absorb most of a teacher’s skill, then the cost of deploying capable systems falls fast. That's good for access, and complicated for anyone trying to govern compute.
+
+“We were surprised by how little data the student needed,” the authors write.
+
+Eval contamination, measured
+
+A new study checks 14 popular benchmarks for overlap with public pretraining corpora:
+- 9 of 14 had measurable overlap above 5%.
+- Two had near-verbatim copies <https://example.org/contam?bench=gsm8k&split=test> of the test split.
+- Performance dropped 4–11 points on de-contaminated versions.
+
+Read more: contam-audit on GitHub <https://github.com/example/contam-audit>
+Dataset: clean-evals <https://huggingface.co/datasets/example/clean-evals>
+
+Tech Tales:
+
+The Laundry Robot
+[2031, a flat in Leeds]
+
+It folded the shirts the way my mother did, which was the strange part. I never told it how.
+
+Thanks for reading Import AI! Subscribe for free to receive new posts.
+
+Unsubscribe <https://importai.substack.com/action/disable_email?token=abc> · Get the app <https://substack.com/app>
+
+© 2026 Jack Clark
+548 Market Street PMB 72296, San Francisco, CA 94104
+<<<END EMAIL>>>

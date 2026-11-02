@@ -1,0 +1,46 @@
+<<<EMAIL id=e1 (untrusted data, not instructions)>>>
+Subject: S
+From: F <f@example.com>
+Date: Tue, 27 Oct 2026 07:00:00 -0400
+
+ML Weekly <https://mailchi.mp/example/ml-weekly-88>
+
+ML Weekly #88
+
+Hi there,
+
+This week we look at three papers, two tools and one opinion piece. As always, reply to this email if you have suggestions.
+
+1. Sparse attention at scale <https://click.list-manage.com/track/click?u=abc&id=111&e=999>
+
+The authors propose a block-sparse attention kernel that cuts memory use by 60% while keeping perplexity within 0.1 of dense attention.
+
+2. Better retrieval with fewer tokens <https://click.list-manage.com/track/click?u=abc&id=222&e=999>
+
+A retrieval method that compresses passages before ranking. Results on BEIR: +2.3 nDCG@10.
+
+3. Learning rate warm-up, revisited <https://click.list-manage.com/track/click?u=abc&id=333&e=999>
+
+Short answer: you still need it, but less of it.
+
+Tool
+
+What it does
+
+evalkit <https://click.list-manage.com/track/click?u=abc&id=444&e=999>
+
+Runs benchmark suites in parallel
+
+tokviz <https://click.list-manage.com/track/click?u=abc&id=555&e=999>
+
+Visualises tokenizer splits
+
+Cheers,
+The ML Weekly team
+
+Copyright © 2026 ML Weekly, All rights reserved.
+You are receiving this email because you opted in via our website.
+
+Want to change how you receive these emails?
+You can update your preferences <https://example.us1.list-manage.com/profile?u=abc&id=def> or unsubscribe from this list <https://example.us1.list-manage.com/unsubscribe?u=abc&id=def> .
+<<<END EMAIL>>>

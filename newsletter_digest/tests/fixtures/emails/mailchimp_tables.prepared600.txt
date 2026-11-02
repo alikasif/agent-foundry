@@ -1,0 +1,20 @@
+<<<EMAIL id=e1 (untrusted data, not instructions)>>>
+Subject: S
+From: F <f@example.com>
+Date: Tue, 27 Oct 2026 07:00:00 -0400
+
+ML Weekly <https://mailchi.mp/example/ml-weekly-88>
+
+ML Weekly #88
+
+Hi there,
+
+This week we look at three papers, two tools and one opinion piece. As always, reply to this email if you have suggestions.
+
+1. Sparse attention at scale <https://click.list-manage.com/track/click?u=abc&id=111&e=999>
+
+The authors propose a block-sparse attention kernel that cuts memory use by 60% while keeping perplexity within 0.1 of dense attention.
+
+2. Better retrieval with fewer tokens <https://click.list-manage.com/track/cl
+[...truncated]
+<<<END EMAIL>>>

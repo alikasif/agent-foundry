@@ -18,8 +18,10 @@ import logging
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from functools import partial
 from typing import Any, TypeVar
 
+import anyio.to_thread
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field, ValidationError
 
@@ -265,7 +267,13 @@ def make_read_email_tool(
             store.mark_email_failed(email_id, reason)
             logger.warning("Could not read email %s: %s", email_id, reason)
             return _read_error(email_id, reason)
-        text = prepare_email_text(raw, settings.max_email_chars, email_id=email_id)
+        # Off the event loop: HTML conversion is CPU work on untrusted input (F004).
+        text = await anyio.to_thread.run_sync(
+            partial(
+                prepare_email_text, raw, settings.max_email_chars, email_id=email_id
+            ),
+            abandon_on_cancel=True,
+        )
         logger.debug(
             "Email %s: %d raw chars -> %d prepared chars", email_id, len(raw), len(text)
         )
