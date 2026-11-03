@@ -43,8 +43,8 @@
 | V26 | `link=` on `multi_cell` writes `/S /URI` annotations per wrapped line; `start_section` adds no annotation; builds are byte-identical with a fixed creation date | T052 |  |  | TODO |
 | V27 | httpx 0.28.1 logs the full URL at INFO on `httpx`; httpcore logger names; `exc.request.url` holds the token while `str(exc)` does not | T051 | httpx 0.28.1, httpcore 1.0.9 (uv.lock) | Offline scratch probe (`uv run python -I`, sockets patched to raise, `MockTransport`, fixture token); grep of `getLogger` in the installed packages | Confirmed: `httpx` INFO `HTTP Request: POST https://api.telegram.org/bot<token>/sendDocument "HTTP/1.1 200 OK"` with the raw token (`:` not percent-encoded); httpcore loggers are exactly `httpcore.connection/.http11/.http2/.proxy/.socks`, httpx only `httpx`; for a `ConnectError` `str(exc)` lacks the token, `str(exc.request.url)` has it; `raise_for_status()` message has it. `REDACTED_LOGGERS` filters remove it (smoke: 70 records, 0 leaks) |
 | V28 | `follow_redirects=False` returns a 3xx response unchanged; `AsyncHTTPTransport(retries=0)` signature; `MockTransport` sees multipart `chat_id`, `caption`, `document` parts | T051 | httpx 0.28.1 | Same offline probe; `inspect.signature(httpx.AsyncHTTPTransport.__init__)`; warnings as errors | Confirmed: a 302 comes back as the response (Location kept, `next_request` set, not sent); signature has `retries: int = 0` (also `verify=True`, `trust_env=True`, which we leave default); `data=` dict plus `files=` gives `multipart/form-data` with parts `chat_id`, `caption`, `document; filename=...` and `Content-Type: application/pdf`, no deprecation warning |
-| V29 | `import newsletter_digest.cli` loads neither `fpdf` nor `PIL`; `anyio.run` can run a second time after `run_digest` | T054 |  |  | TODO |
-| V30 | click 8.5: `is_flag` without `envvar` ignores env; `ctx.exit(3)` gives exit code 3 under `CliRunner` and the console script | T054 |  |  | TODO |
+| V29 | `import newsletter_digest.cli` loads neither `fpdf` nor `PIL`; `anyio.run` can run a second time after `run_digest` | T054 | fpdf2 2.8.9, pillow 13.0.0, anyio (uv.lock), Python 3.13 | `uv run python -I -c 'import newsletter_digest.cli, sys; print("fpdf" in sys.modules, "PIL" in sys.modules, ...)'`; offline CliRunner smoke (sockets patched to raise, `run_digest` faked through `anyio.run`, `telegram._default_transport` patched to a `MockTransport`) | Confirmed: prints `False False` and none of `newsletter_digest.delivery`/`.pdf`/`.telegram`/`fontTools` is loaded after importing cli. A second `anyio.run` after the `run_digest` one works in the same process: success (exit 0), 401 and 500x3 (exit 3) all ran the real `deliver_reading_list` + `TelegramClient` in the second loop |
+| V30 | click 8.5: `is_flag` without `envvar` ignores env; `ctx.exit(3)` gives exit code 3 under `CliRunner` and the console script | T054 | click 8.5.0 (uv.lock) | `cli.digest.params` inspection; CliRunner with `TELEGRAM=1`, `NEWSLETTER_TELEGRAM=1` and a malformed `TELEGRAM_BOT_TOKEN` but no flag; offline 401 run through CliRunner and through `cli.main()` (the console-script entry) in a subprocess | Confirmed: the option has `envvar=None` and the command no `auto_envvar_prefix`, so no env value turns it on (flag-off runs exit 0, one stdout line, no PDF). `click.get_current_context().exit(3)` inside `digest` gives `result.exit_code == 3` under CliRunner and process exit status 3 through `main()` (standalone mode), with no traceback |
 
 ## Task notes
 
@@ -3014,3 +3014,104 @@ left on, `markdown=True`, `safe_url` bypassed, `pdf_text` identity, Cf kept, ful
 empty `FETCH_NOTE_VERBS`, A4 page, no `set_lang`.
 
 No issues found in pdf.py.
+
+## T054 — cli.py wiring: --telegram flag, fail-fast env read, lazy delivery import, exit code 3
+
+- **Lazy import resolved per the lead's decision (T049 conflict):** `cli` never imports
+  `telegram`, not even nested. The one nested import is
+  `from newsletter_digest.delivery import deliver_reading_list, redact` (delivery
+  re-exports `redact`, T053), inside `_run_delivery`, reached only when `settings.telegram`
+  is True. It is in its own `try`, separate from the `anyio.run` call: `delivery` imports
+  `pdf` (and fpdf2) at module level, so when that import itself fails (broken or missing
+  fpdf2) `redact` is not available either, and the reason is **only the exception class
+  name** (e.g. `Telegram delivery failed (ImportError). Saved: <html>. ...`), no message
+  text, no PDF path, exit 3 (the HTML is already saved). Any `Exception` raised by the
+  delivery run itself is reported as `redact("<ExcClass>: <message>")`.
+- **Split into two helpers:** `_deliver_to_telegram` (output and exit code) and
+  `_run_delivery` (import + run, returns `(pdf_path, reason)`, reason None on success).
+  `DeliveryOutcome` is not named in cli (importing it at module level, or under
+  `TYPE_CHECKING`, would break the T049 eager-import rule), so the helper returns a plain
+  tuple.
+- **Safety-net reason format:** whitespace collapsed to one line, trailing `:`, `.` and
+  spaces stripped (so an empty message gives just the class name, matching T053), then
+  `redact()`. The PDF path is None in this branch: the only raise `deliver_reading_list`
+  can make for an expected input is its missing-settings `ValueError`, before any build, and
+  a file found on disk might be an earlier run's (T053 stale-PDF rule).
+- **DEBUG traceback for the safety net:** logged on `newsletter_digest.cli` as
+  `redact("".join(traceback.format_exception(exc)))` (TD-9), never `exc_info=`. Not logged
+  for the import-failure branch (no `redact` available).
+- **`soft_wrap=True` on the D-T3 failure line** (not in TD-11, which names only
+  `markup=False`, `highlight=False`): the line holds two full paths and is usually wider
+  than 80 columns, and Rich wraps at the console width (80 when stderr is not a terminal,
+  e.g. CliRunner or a pipe), which would split the "one line" message. The short `Sent ...`
+  line keeps the TD-11 arguments only.
+- **Success vs failure:** success = `outcome.reason is None` (delivery sets a reason on
+  every not-delivered outcome). The PDF path is echoed when `pdf_path` is set and
+  `exists()`; the `Sent` line is printed inside that branch (delivered implies the file was
+  just written atomically).
+- **Option placement:** `--telegram` sits after `--max-fetch`, before `--log-level`; the
+  `digest()` parameter follows the same order. `EXIT_NOT_DELIVERED = 3` is a module
+  constant. `tests/test_cli.py` not edited (T060 adds `--telegram` to `ALL_OPTIONS`).
+- **No `asdict`/deepcopy of `Settings`** anywhere in cli (learnings T055); only attribute
+  reads.
+- **Process note:** during V30 I ran `uv pip show click` once to read the version (read
+  only, nothing installed); the version was then taken from `uv.lock`. Use `uv.lock` or
+  `importlib.metadata` instead.
+- **Verification:** `tests/test_architecture.py`, `tests/test_flag_off_identity.py`,
+  `tests/test_cli.py`, `tests/test_wiring_fetch.py`: 385 passed; full suite 3337 passed,
+  2 deselected; `ruff format`, `ruff check .`, `pyrefly check` clean. Offline smoke
+  (scratch, sockets blocked, MockTransport via `_default_transport` patch): success exit 0
+  with two stdout lines and `Sent reading-list-2026-10-31.pdf to Telegram.`; 401 and 500x3
+  exit 3 with the D-T3 line naming both files; missing `TELEGRAM_CHAT_ID` exit 2 before
+  `run_digest`; flag off with a malformed token exit 0; an exploding
+  `deliver_reading_list` exit 3 with `bot***` redacted and one line; a broken `fpdf`
+  import exit 3 with `(ImportError)` only. The fixture token appeared in no output.
+
+## T056 — Offline Telegram client tests (MockTransport) and suite-wide real-transport guard
+
+- **conftest guard** (`tests/conftest.py`, additive only: one `typing.NoReturn` import, a
+  private `_refuse_real_telegram_transport` and the autouse `_no_real_telegram_transport`).
+  It uses `monkeypatch.setattr("newsletter_digest.telegram._default_transport", ...)` (the
+  string form), so `telegram` is imported lazily on the first test and conftest never
+  imports `pdf`/`fpdf`. `TelegramClient.__aenter__` looks `_default_transport` up at call
+  time, so a client built without `transport=` hits the guard (tested). The TD-12
+  "telegram absent from `sys.modules`" check is a subprocess test, so the import is safe.
+- **Isolation of module state.** `telegram._SECRETS` is a module-level registry that keeps
+  every token ever sent; an autouse fixture swaps in an empty set per test (private
+  attribute, test-only) so the "bare secret half is redacted only after the first send"
+  behaviour (T051 note) is testable and no test depends on order. A second autouse fixture
+  restores the six `REDACTED_LOGGERS` filters and levels after each test, so filters
+  installed here never leak into other modules' `caplog` tests.
+- **Harness.** `ScriptedTransport(httpx.MockTransport)` plays async steps (last repeats),
+  reads and records each request and counts `aclose()` calls (that is how "client always
+  closed" is asserted, not via the private `_client`). Multipart bodies are parsed with
+  `email` (`policy=email.policy.HTTP`) to assert exactly `chat_id`, `caption`, `document`,
+  the filename, `application/pdf` and byte-exact binary content. Per-request timeouts are
+  asserted through `request.extensions["timeout"] == HTTP_TIMEOUT.as_dict()`.
+- **Tested as implemented where TD-8 is silent** (all from the T051 notes): 400 without a
+  description is `BAD_REQUEST` (only the `HTTP 400: ` prefix is asserted); a 2xx with
+  `ok` not true and an int `error_code` in 400..599 is classified as that code (HTTP status
+  still wins when it is not 2xx); a non-transport `httpx.HTTPError` (DecodingError) is
+  `BAD_RESPONSE`, not retried; the budget stop keeps the last error's kind (e.g.
+  `SERVER_ERROR` after 2 attempts, waits `[2.0]` with `total_deadline=3`), DEADLINE only
+  when `move_on_after` fires; `send_document` outside `async with` raises `RuntimeError`.
+  Description cleaning is asserted by properties (no C* code points, no double spaces,
+  words kept), not by the exact space-vs-removal choice.
+- **Deadline tests use real (tiny) time**: a slow handler (`anyio.sleep(5)`) with a
+  0.05 s per-attempt or total budget, and `retry_after: 0` then a slow handler with a
+  0.2 s budget for "DEADLINE keeps the last error". The whole file runs in about 1 s.
+- **Not tested:** `_default_transport()` itself (calling it would build a real transport;
+  the T049 AST rules pin its body), `trust_env=False` behaviourally (with `transport=`
+  passed httpx ignores env proxies anyway; AST rule covers the literal), and the
+  `max_attempts=0` edge.
+- **Verification:** 206 tests; `telegram.py` line+branch coverage 98% via
+  `uv run --with coverage` (uncovered: `_default_transport` body, `max_attempts=0` loop
+  exit). Mutation check with a scratch `-p` plugin that execs a text-mutated copy of
+  `telegram.py` into the module (no source edit): 51/51 mutants killed (truncation,
+  parse_mode, follow_redirects, UA, timeout, aclose, MIME, cap `>`/`>=`, bool/range
+  `retry_after`, backoff values/index, attempt cap, budget check, both deadlines, retry
+  flags per row, 403/404 texts, chat case, status-vs-JSON order, `ok is True`, message_id
+  bool, description truncate/clean/redact order, registry/half/empty-part registration,
+  regex, filter no-op/args kept, idempotence, httpcore names, install on enter,
+  TelegramError self-redaction, chaining, class-name-only reasons, unredacted DEBUG,
+  DEADLINE last error, default transport, WARNING level, base URL).

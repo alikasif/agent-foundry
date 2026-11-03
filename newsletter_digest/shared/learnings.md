@@ -363,3 +363,17 @@
   for a per-string coverage lookup) makes the run hang; build it once outside the lambda.
 - (T057) `from __future__ import annotations` binds the name `annotations` in the module:
   a helper named `annotations()` passes at runtime but pyrefly reports `_Feature` not callable.
+- (T054) Rich `Console.print` wraps at the console width, which is 80 columns when stderr
+  is not a terminal (CliRunner, pipes, CI). For a message that must stay one line (two
+  full paths), pass `soft_wrap=True`.
+- (T054) A lazy import that is also the route to a helper (`redact` via `delivery`) needs
+  its own `try`: if the import fails, the helper is missing too, so the `except` must not
+  use it. Keep the import `try` separate from the call `try`.
+- (T056) To mutation-test a module whose names tests import at collection time, a scratch
+  `-p` plugin can `exec(compile(mutated_source, mod.__file__, "exec"), mod.__dict__)` at
+  plugin import: it runs before the test module's `from mod import ...`, so every class
+  and function (including exception classes) is the mutated one and identity checks hold.
+  No source edit, safe with parallel agents.
+- (T056) `telegram._SECRETS` persists across tests (every token ever sent stays
+  registered); swap it for an empty set per test with `monkeypatch.setattr` and restore
+  the six redacted loggers' filters afterwards, or redaction tests become order-dependent.

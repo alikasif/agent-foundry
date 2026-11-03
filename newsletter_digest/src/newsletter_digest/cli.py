@@ -1,15 +1,26 @@
 """Command line interface: ``newsletter-digest``.
 
 Parses options (CLI flag > env var > default), builds :class:`Settings`, runs the
-digest and writes the HTML reading list. Exit codes: 0 success (including the
-empty and the unranked-fallback list), 1 runtime failure, 2 usage/config error.
+digest and writes the HTML reading list. With ``--telegram`` it then saves a PDF copy
+next to the HTML and sends it to the user's own Telegram chat.
+
+Exit codes:
+    0: success (including the empty and the unranked-fallback list); with
+       ``--telegram`` the PDF was also delivered.
+    1: runtime failure; no digest saved, nothing sent.
+    2: usage or config error (including missing or invalid Telegram variables with
+       ``--telegram``), before any work starts.
+    3: the digest is saved (the HTML, and the PDF when it was built), but Telegram
+       delivery failed or was skipped.
 """
 
 import logging
 import os
 import shutil
 import subprocess
+import traceback
 import webbrowser
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -27,6 +38,7 @@ from newsletter_digest.config import (
     MAX_MAX_FETCH,
     MIN_MAX_EMAILS,
     MIN_MAX_FETCH,
+    TELEGRAM_ENV_VARS,
     ConfigError,
     Settings,
 )
@@ -49,6 +61,9 @@ OPEN_TIMEOUT_S = 10.0
 console = Console(stderr=True)
 
 CLI_LOG_LEVELS = LOG_LEVELS[:4]  # DEBUG, INFO, WARNING, ERROR
+
+# Exit code when the digest is saved but the Telegram delivery failed (TD-11).
+EXIT_NOT_DELIVERED = 3
 
 
 def main() -> None:
@@ -143,6 +158,14 @@ def _setup_logging(log_level: str) -> logging.Logger:
     help="Maximum number of article pages to fetch (with --fetch-articles).",
 )
 @click.option(
+    "--telegram",
+    is_flag=True,
+    help="Also send a PDF copy of the reading list to your own Telegram chat "
+    "(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from .env). Privacy: titles, "
+    "summaries, links and newsletter names are sent to Telegram's servers; bot "
+    "chats are not end-to-end encrypted.",
+)
+@click.option(
     "--log-level",
     type=click.Choice(CLI_LOG_LEVELS, case_sensitive=False),
     default="INFO",
@@ -160,6 +183,7 @@ def digest(
     open_browser: bool,
     fetch_articles: bool,
     max_fetch: int,
+    telegram: bool,
     log_level: str,
 ) -> None:
     """Turn a Gmail newsletter label into a ranked HTML reading list.
@@ -172,6 +196,9 @@ def digest(
     NEWSLETTER_FETCH_MAX_REDIRECTS, NEWSLETTER_FETCH_MAX_BYTES,
     NEWSLETTER_FETCH_MAX_CHARS, NEWSLETTER_FETCH_CONCURRENCY,
     NEWSLETTER_FETCH_LLM_CONCURRENCY and NEWSLETTER_FETCH_LLM_INTERVAL.
+
+    With --telegram, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are read from the
+    environment (or .env) and checked before the run; without it they are never read.
     """
     logger = _setup_logging(log_level)
     try:
@@ -192,6 +219,12 @@ def digest(
             fetch_articles=fetch_articles,
             max_fetch=max_fetch,
             fetch_env={name: os.environ.get(name) for name in FETCH_ENV_VARS},
+            telegram=telegram,
+            telegram_env=(
+                {name: os.environ.get(name) for name in TELEGRAM_ENV_VARS}
+                if telegram
+                else None
+            ),
         )
     except ConfigError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -213,6 +246,65 @@ def digest(
     click.echo(str(path))
     if settings.open_browser:
         _open_in_browser(path.resolve())
+    if settings.telegram:
+        _deliver_to_telegram(reading_list, path, settings)
+
+
+def _deliver_to_telegram(
+    reading_list: ReadingList, html_path: Path, settings: Settings
+) -> None:
+    """Save and send the PDF copy; exit 3 (no traceback) when it is not delivered.
+
+    The PDF path goes to stdout (line 2) whenever the file exists. stderr gets
+    ``Sent <name> to Telegram.`` or one line saying why delivery failed and which
+    files are saved.
+    """
+    pdf_path, reason = _run_delivery(reading_list, html_path, settings)
+    saved = [str(html_path)]
+    if pdf_path is not None and pdf_path.exists():
+        click.echo(str(pdf_path))
+        if reason is None:
+            console.print(
+                f"Sent {pdf_path.name} to Telegram.", markup=False, highlight=False
+            )
+            return
+        saved.append(str(pdf_path))
+    console.print(
+        f"Telegram delivery failed ({reason}). Saved: {', '.join(saved)}. "
+        "See README > Telegram delivery.",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    click.get_current_context().exit(EXIT_NOT_DELIVERED)
+
+
+def _run_delivery(
+    reading_list: ReadingList, html_path: Path, settings: Settings
+) -> tuple[Path | None, str | None]:
+    """Run the delivery; return the PDF path (or None) and the failure reason.
+
+    The reason is None on success. ``delivery`` (and with it fpdf2) is imported
+    only here, so a run without ``--telegram`` never loads it (TD-12). Any exception
+    becomes a failure: redacted ``<ExcClass>: <message>``, or only the class name
+    when the import itself failed and ``redact`` is not available.
+    """
+    try:
+        from newsletter_digest.delivery import deliver_reading_list, redact
+    except Exception as exc:
+        return None, type(exc).__name__
+    try:
+        outcome = anyio.run(
+            partial(deliver_reading_list, reading_list, html_path, settings)
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "Telegram delivery raised:\n%s",
+            redact("".join(traceback.format_exception(exc))),
+        )
+        line = " ".join(f"{type(exc).__name__}: {exc}".split()).rstrip(": .")
+        return None, redact(line)
+    return outcome.pdf_path, outcome.reason
 
 
 def _open_in_browser(path: Path) -> None:
