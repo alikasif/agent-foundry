@@ -20,10 +20,20 @@ is imported or executed. The rules:
    `lxml`, and no module imports stdlib `html.parser`, which is quadratic on hostile
    markup (F002 review, F004).
 6. httpx: no source passes `trust_env` as anything but a literal `False`;
-   `httpx.AsyncClient` is built only in `fetch`, always with `trust_env=False`; the
-   module-level request helpers and the sync `httpx.Client` are never called.
+   `httpx.AsyncClient` is built only in `fetch` (and `telegram`, rule 8), always with
+   `trust_env=False`; the module-level request helpers and the sync `httpx.Client` are
+   never called.
 7. No dynamic imports (`importlib.import_module`, `__import__`) that would hide an edge
    from the graph.
+8. Telegram delivery (TD-2, TD-9, TD-12, TD-13): `delivery`, `pdf` and `telegram`
+   import only their listed project modules and are imported only by their listed
+   importers; only `pdf` imports fpdf, and it uses no HTML, image, attachment, shaping
+   or page-alias API and no `markdown=` other than a literal `False`;
+   `httpx.AsyncClient` is also allowed in `telegram`, with literal `trust_env=False`
+   and `follow_redirects=False` and an explicit `transport=`; a real
+   `httpx.AsyncHTTPTransport` is built only in `telegram._default_transport` (netguard
+   subclasses it); `telegram` passes no `verify=`; `cli` imports the delivery modules
+   and fpdf only inside functions; and only `telegram` calls `SecretToken.reveal()`.
 
 Each checker is a pure function over parsed modules, so the self-tests at the end feed
 it synthetic sources and prove that every rule can fail.
@@ -66,8 +76,17 @@ TIER_RANKS: dict[str, int] = {
     "links": 7,
 }
 
-NEW_MODULES = ("links", "netguard", "extract", "fetch", "enrich")
+DELIVERY_MODULES = ("delivery", "pdf", "telegram")
+NEW_MODULES = ("links", "netguard", "extract", "fetch", "enrich", *DELIVERY_MODULES)
 GMAIL_SIDE = frozenset({"gmail_mcp", "tools", "store", "agent"})
+DELIVERY_BANNED = GMAIL_SIDE | {
+    "fetch",
+    "enrich",
+    "netguard",
+    "extract",
+    "llm",
+    "prompts",
+}
 FORBIDDEN_PROJECT_IMPORTS: dict[str, frozenset[str]] = {
     "enrich": GMAIL_SIDE,
     "fetch": GMAIL_SIDE | {"render"},
@@ -76,6 +95,19 @@ FORBIDDEN_PROJECT_IMPORTS: dict[str, frozenset[str]] = {
     "links": GMAIL_SIDE,
     "store": frozenset({"fetch"}),
     "render": frozenset({"fetch"}),
+    "delivery": DELIVERY_BANNED,
+    "pdf": DELIVERY_BANNED,
+    "telegram": DELIVERY_BANNED,
+}
+ONLY_PROJECT_IMPORTS: dict[str, frozenset[str]] = {
+    "telegram": frozenset({"config"}),
+    "pdf": frozenset({"models", "render"}),
+    "delivery": frozenset({"pdf", "telegram", "models", "config"}),
+}
+ALLOWED_IMPORTERS: dict[str, frozenset[str]] = {
+    "delivery": frozenset({"cli"}),
+    "pdf": frozenset({"delivery"}),
+    "telegram": frozenset({"delivery"}),
 }
 NO_PROJECT_IMPORTS = ("netguard", "extract", "links")
 STDLIB_ONLY = ("links",)
@@ -89,6 +121,7 @@ LANGCHAIN_FREE = (
     "store",
     "render",
     "prompts",
+    *DELIVERY_MODULES,
 )
 LANGCHAIN_CORE_USERS_AMONG_NEW = frozenset({"enrich"})
 
@@ -131,6 +164,28 @@ HTTPX_BANNED_CALLS = frozenset(
 DYNAMIC_IMPORT_CALLS = frozenset(
     {"importlib.import_module", "importlib.__import__", "builtins.__import__"}
 )
+
+FPDF_OWNER = "pdf"
+FPDF_BANNED_NAMES = frozenset(
+    {
+        "write_html",
+        "HTMLMixin",
+        "image",
+        "embed_file",
+        "file_attachment_annotation",
+        "set_text_shaping",
+        "alias_nb_pages",
+    }
+)
+FPDF_BANNED_SUBMODULES = ("fpdf.html",)
+ASYNC_CLIENT_OWNERS = frozenset({"fetch", "telegram"})
+TELEGRAM_MODULE = "telegram"
+REAL_TRANSPORT = "httpx.AsyncHTTPTransport"
+REAL_TRANSPORT_FACTORY = "_default_transport"
+TRANSPORT_SUBCLASS_OWNERS = frozenset({"netguard"})
+LAZY_IMPORTER = "cli"
+SECRET_REVEAL = "reveal"
+SECRET_OWNER = "telegram"
 
 
 class ImportRef(NamedTuple):
@@ -313,6 +368,103 @@ def _is_false(node: ast.expr) -> bool:
 def _is_langchain_family(root: str) -> bool:
     """Return True for langchain*, langgraph*, deepagents and mcp packages."""
     return root.startswith(("langchain", "langgraph")) or root in {"deepagents", "mcp"}
+
+
+_DOCSTRING_OWNERS = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _docstring_ids(tree: ast.Module) -> set[int]:
+    """Return the ids of the docstring constants of modules, classes and functions."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, _DOCSTRING_OWNERS) or not node.body:
+            continue
+        first = node.body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                ids.add(id(first.value))
+    return ids
+
+
+def code_strings(module: SourceModule) -> Iterator[tuple[str, int]]:
+    """Yield string constants used in code; docstrings (and comments) are skipped."""
+    skip = _docstring_ids(module.tree)
+    for node in ast.walk(module.tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in skip:
+                yield node.value, node.lineno
+
+
+def resolved_references(module: SourceModule) -> Iterator[tuple[str, ast.expr]]:
+    """Yield `(dotted_target, node)` for every Name/Attribute that resolves."""
+    bindings = import_bindings(module)
+    for node in ast.walk(module.tree):
+        if not isinstance(node, ast.Name | ast.Attribute):
+            continue
+        target = resolve(node, bindings)
+        if target is not None:
+            yield target, node
+
+
+def top_level_function_nodes(module: SourceModule, function: str) -> set[int]:
+    """Return the ids of every node inside module-level function `function`."""
+    return {
+        id(node)
+        for stmt in module.tree.body
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef)
+        and stmt.name == function
+        for node in ast.walk(stmt)
+    }
+
+
+def module_level_imports(module: SourceModule) -> list[ImportRef]:
+    """Return the imports outside every function body (module, `if`, class bodies)."""
+    statements: list[ast.stmt] = []
+    pending: list[ast.AST] = [module.tree]
+    while pending:
+        node = pending.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, _FUNCTIONS):
+                continue
+            if isinstance(child, ast.Import | ast.ImportFrom):
+                statements.append(child)
+            pending.append(child)
+    shell = ast.Module(body=statements, type_ignores=[])
+    return sorted(_collect_imports(module.name, shell), key=lambda ref: ref.line)
+
+
+def _lazy_only_targets(ref: ImportRef) -> list[str]:
+    """Return the delivery modules or fpdf paths that import `ref` loads."""
+    if _root(ref.target) == "fpdf":
+        return [ref.target]
+    if ref.target == PACKAGE:
+        return [f"{PACKAGE}.{n}" for n in ref.names if n in DELIVERY_MODULES]
+    parts = ref.target.split(".")
+    if parts[0] == PACKAGE and parts[1] in DELIVERY_MODULES:
+        return [ref.target]
+    return []
+
+
+def _non_false_keyword_sites(name: str, module: SourceModule, key: str) -> list[str]:
+    """Report `key=` keywords and `{"key": ...}` entries that are not literal False."""
+    violations: list[str] = []
+    for node in ast.walk(module.tree):
+        if isinstance(node, ast.Call):
+            violations.extend(
+                f"{name}.py:{node.lineno}: {key}={ast.unparse(kw.value)}"
+                for kw in node.keywords
+                if kw.arg == key and not _is_false(kw.value)
+            )
+        elif isinstance(node, ast.Dict):
+            violations.extend(
+                f"{name}.py:{node.lineno}: '{key}': {ast.unparse(value)}"
+                for k, value in zip(node.keys, node.values, strict=True)
+                if isinstance(k, ast.Constant)
+                and k.value == key
+                and not _is_false(value)
+            )
+    return violations
 
 
 # ------------------------------------------------------------------------- checkers
@@ -571,21 +723,63 @@ def async_client_sites(modules: Modules) -> list[tuple[str, ast.Call]]:
     ]
 
 
+def _telegram_client_violations(where: str, call: ast.Call) -> list[str]:
+    """Report a telegram AsyncClient that may follow redirects or lacks `transport=`."""
+    violations: list[str] = []
+    redirects = [kw for kw in call.keywords if kw.arg == "follow_redirects"]
+    if not redirects or not all(_is_false(kw.value) for kw in redirects):
+        violations.append(f"{where}: httpx.AsyncClient without follow_redirects=False")
+    if not any(kw.arg == "transport" for kw in call.keywords):
+        violations.append(f"{where}: httpx.AsyncClient without an explicit transport=")
+    return violations
+
+
+def _real_transport_violations(modules: Modules) -> list[str]:
+    """Report `httpx.AsyncHTTPTransport` outside `telegram._default_transport`."""
+    violations: list[str] = []
+    for name, module in modules.items():
+        if name in TRANSPORT_SUBCLASS_OWNERS:
+            continue
+        allowed: set[int] = set()
+        if name == TELEGRAM_MODULE:
+            allowed = top_level_function_nodes(module, REAL_TRANSPORT_FACTORY)
+        violations.extend(
+            f"{name}.py:{node.lineno}: {REAL_TRANSPORT} used outside "
+            f"{TELEGRAM_MODULE}.{REAL_TRANSPORT_FACTORY}()"
+            for target, node in resolved_references(module)
+            if target == REAL_TRANSPORT and id(node) not in allowed
+        )
+    return violations
+
+
 def find_http_client_violations(modules: Modules) -> list[str]:
-    """Report AsyncClient outside fetch or without trust_env=False; httpx helpers."""
+    """Report unsafe or misplaced AsyncClient, httpx helpers and real transports."""
     violations: list[str] = []
     for name, call in async_client_sites(modules):
         where = f"{name}.py:{call.lineno}"
-        if name != "fetch":
-            violations.append(f"{where}: httpx.AsyncClient built outside fetch.py")
+        if name not in ASYNC_CLIENT_OWNERS:
+            violations.append(
+                f"{where}: httpx.AsyncClient built outside fetch.py and telegram.py"
+            )
         explicit = [kw for kw in call.keywords if kw.arg == "trust_env"]
         if not explicit or not all(_is_false(kw.value) for kw in explicit):
             violations.append(f"{where}: httpx.AsyncClient without trust_env=False")
+        if name == TELEGRAM_MODULE:
+            violations.extend(_telegram_client_violations(where, call))
     for name, module in modules.items():
         violations.extend(
             f"{name}.py:{call.lineno}: calls {target} (own client, env proxies)"
             for target, call in resolved_calls(module)
             if target in HTTPX_BANNED_CALLS
+        )
+    violations.extend(_real_transport_violations(modules))
+    if TELEGRAM_MODULE in modules:
+        violations.extend(
+            f"{TELEGRAM_MODULE}.py:{node.lineno}: verify= passed; keep httpx's "
+            "default certificate verification"
+            for node in ast.walk(modules[TELEGRAM_MODULE].tree)
+            if isinstance(node, ast.Call)
+            and any(kw.arg == "verify" for kw in node.keywords)
         )
     return violations
 
@@ -598,6 +792,120 @@ def find_dynamic_imports(modules: Modules) -> list[str]:
         for target, call in resolved_calls(module)
         if target in DYNAMIC_IMPORT_CALLS
     ]
+
+
+def _edge_label(target: str) -> str:
+    """Name an edge target for messages (`ROOT` reads as the package root)."""
+    return "the package root" if target == ROOT else target
+
+
+def find_only_project_import_violations(modules: Modules) -> list[str]:
+    """Report project imports outside a delivery module's `ONLY_PROJECT_IMPORTS`."""
+    violations: list[str] = []
+    for edge in all_edges(modules):
+        allowed = ONLY_PROJECT_IMPORTS.get(edge.source)
+        if allowed is None or edge.target in allowed:
+            continue
+        violations.append(
+            f"{edge.source}.py:{edge.line}: {edge.source} -> "
+            f"{_edge_label(edge.target)}: {edge.source} may import only "
+            f"{', '.join(sorted(allowed))}"
+        )
+    return violations
+
+
+def find_importer_violations(modules: Modules) -> list[str]:
+    """Report imports of a delivery module by a module not in `ALLOWED_IMPORTERS`."""
+    violations: list[str] = []
+    for edge in all_edges(modules):
+        importers = ALLOWED_IMPORTERS.get(edge.target)
+        if importers is None or edge.source in importers:
+            continue
+        violations.append(
+            f"{edge.source}.py:{edge.line}: {edge.source} -> {edge.target}: only "
+            f"{', '.join(sorted(importers))} may import {edge.target}"
+        )
+    return violations
+
+
+def _fpdf_imports_outside_owner(name: str, module: SourceModule) -> list[ImportRef]:
+    """Return the fpdf imports (any nesting) of `module` unless it is `pdf`."""
+    if name == FPDF_OWNER:
+        return []
+    return [ref for ref in module.imports if _root(ref.target) == "fpdf"]
+
+
+def find_fpdf_violations(modules: Modules) -> list[str]:
+    """Report fpdf outside pdf, unsafe fpdf APIs in pdf and non-False `markdown=`."""
+    violations: list[str] = []
+    for name, module in modules.items():
+        violations.extend(
+            f"{name}.py:{ref.line}: only pdf.py may import {ref.target}"
+            for ref in _fpdf_imports_outside_owner(name, module)
+        )
+        violations.extend(_non_false_keyword_sites(name, module, "markdown"))
+    pdf = modules.get(FPDF_OWNER)
+    if pdf is None:
+        return violations
+    for ref in pdf.imports:
+        paths = [ref.target, *(f"{ref.target}.{n}" for n in ref.names)]
+        violations.extend(
+            f"pdf.py:{ref.line}: imports {path}"
+            for path in paths
+            if any(
+                path == b or path.startswith(f"{b}.") for b in FPDF_BANNED_SUBMODULES
+            )
+        )
+    violations.extend(
+        f"pdf.py:{line}: references fpdf {ident}"
+        for ident, line in code_identifiers(pdf)
+        if ident in FPDF_BANNED_NAMES
+    )
+    violations.extend(
+        f"pdf.py:{line}: string {text!r}"
+        for text, line in code_strings(pdf)
+        if text in FPDF_BANNED_NAMES
+    )
+    return violations
+
+
+def find_eager_delivery_imports(modules: Modules) -> list[str]:
+    """Report module-level delivery/fpdf imports in cli and fpdf outside pdf (TD-12)."""
+    violations: list[str] = []
+    cli = modules.get(LAZY_IMPORTER)
+    if cli is not None:
+        violations.extend(
+            f"{LAZY_IMPORTER}.py:{ref.line}: module-level import of {target}; import "
+            "it inside the function that needs it (TD-12)"
+            for ref in module_level_imports(cli)
+            for target in _lazy_only_targets(ref)
+        )
+    for name, module in modules.items():
+        violations.extend(
+            f"{name}.py:{ref.line}: {ref.target} imported outside pdf.py (TD-12)"
+            for ref in _fpdf_imports_outside_owner(name, module)
+        )
+    return violations
+
+
+def find_secret_reveal_violations(modules: Modules) -> list[str]:
+    """Report `.reveal` references outside telegram (TD-9: one reveal site)."""
+    violations: list[str] = []
+    for name, module in modules.items():
+        if name == SECRET_OWNER:
+            continue
+        violations.extend(
+            f"{name}.py:{node.lineno}: references .{SECRET_REVEAL}(); only "
+            f"{SECRET_OWNER}.py may reveal the bot token"
+            for node in ast.walk(module.tree)
+            if isinstance(node, ast.Attribute) and node.attr == SECRET_REVEAL
+        )
+        violations.extend(
+            f"{name}.py:{line}: string {text!r}; only {SECRET_OWNER}.py may reveal"
+            for text, line in code_strings(module)
+            if text == SECRET_REVEAL
+        )
+    return violations
 
 
 def _report(violations: list[str]) -> str:
@@ -631,6 +939,11 @@ REAL_TREE_CHECKERS: list[Checker] = [
     find_trust_env_violations,
     find_http_client_violations,
     find_dynamic_imports,
+    find_only_project_import_violations,
+    find_importer_violations,
+    find_fpdf_violations,
+    find_eager_delivery_imports,
+    find_secret_reveal_violations,
 ]
 
 
@@ -669,10 +982,88 @@ def test_detector_sees_the_allowed_usages(package: dict[str, SourceModule]) -> N
     for owner in sorted(HTML_PARSER_OWNERS):
         assert "lxml" in {_root(r.target) for r in package[owner].imports}, owner
     assert "langchain_core" in enrich_roots
-    assert [name for name, _ in async_client_sites(package)] == ["fetch"]
+    sites = [name for name, _ in async_client_sites(package)]
+    assert "fetch" in sites and set(sites) <= {"fetch", "telegram"}, sites
 
 
 # ---------------------------------------------------------------- checker self-tests
+
+
+STUB_DELIVERY_TREE: dict[str, str] = {
+    "cli": "from newsletter_digest.agent import run_digest\n",
+    "agent": "",
+    "delivery": '"""Allowed project imports: pdf, telegram, models and config."""\n',
+    "pdf": '"""Allowed project imports: models and render (safe_url only)."""\n',
+    "telegram": '"""Allowed project imports: config."""\n',
+}
+"""The T048 docstring-only delivery stubs, as the negative rules first see them."""
+
+FINAL_DELIVERY_TREE: dict[str, str] = {
+    "cli": """
+        import anyio
+        from newsletter_digest.agent import run_digest
+        from newsletter_digest.config import Settings
+
+        def _deliver_to_telegram(reading_list, html_path, settings: Settings) -> None:
+            try:
+                from newsletter_digest.delivery import deliver_reading_list
+
+                anyio.run(deliver_reading_list, reading_list, html_path, settings)
+            except Exception as exc:
+                from newsletter_digest.delivery import redact
+
+                print(redact(f"{type(exc).__name__}: {exc}"))
+        """,
+    "agent": "",
+    "config": """
+        class SecretToken:
+            def reveal(self) -> str:
+                return self._value
+        """,
+    "models": "",
+    "render": "def safe_url(url: str) -> str | None: ...\n",
+    "delivery": """
+        from newsletter_digest.config import SecretToken, Settings
+        from newsletter_digest.models import ReadingList
+        from newsletter_digest.pdf import build_pdf
+        from newsletter_digest.telegram import TelegramClient, redact
+        """,
+    "pdf": """
+        from fpdf import FPDF
+        from newsletter_digest.models import ReadingList
+        from newsletter_digest.render import safe_url
+
+        def draw_pdf(url: str) -> bytes:
+            doc = FPDF(format=(100, 178))
+            doc.str_alias_nb_pages = None
+            doc.multi_cell(0, 5, "x", link=safe_url(url) or "", markdown=False)
+            return bytes(doc.output())
+        """,
+    "telegram": """
+        import httpx
+        from newsletter_digest.config import SecretToken
+
+        def _default_transport() -> httpx.AsyncBaseTransport:
+            return httpx.AsyncHTTPTransport(retries=0)
+
+        class TelegramClient:
+            def __init__(self, token: SecretToken, *, transport=None) -> None:
+                self._token = token
+                self._transport = transport
+
+            async def __aenter__(self) -> "TelegramClient":
+                self._client = httpx.AsyncClient(
+                    transport=self._transport or _default_transport(),
+                    trust_env=False,
+                    follow_redirects=False,
+                )
+                return self
+
+            def _url(self) -> str:
+                return f"https://api.telegram.org/bot{self._token.reveal()}/x"
+        """,
+}
+"""A synthetic tree shaped like the TP-5 contracts, which every new rule must allow."""
 
 
 VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
@@ -925,6 +1316,380 @@ VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
         {"agent": "m = __import__('newsletter_digest.tools')\n"},
         "dynamic import via builtins.__import__",
     ),
+    # ---- Telegram delivery (TD-2, TD-9, TD-12, TD-13)
+    (
+        find_forbidden_project_imports,
+        {"delivery": "from newsletter_digest.agent import run_digest\n"},
+        "delivery -> agent is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {"pdf": "from newsletter_digest.fetch import PageFetcher\n"},
+        "pdf -> fetch is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {"telegram": "def f() -> None:\n    import newsletter_digest.netguard\n"},
+        "telegram -> netguard is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {"delivery": "from newsletter_digest import llm\n", "llm": ""},
+        "delivery -> llm is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {"pdf": "from .prompts import SYSTEM\n"},
+        "pdf -> prompts is banned",
+    ),
+    (
+        find_gmail_parameters,
+        {"delivery": "async def f(gmail_tools: list[object]) -> None: ...\n"},
+        "delivery.py:1: parameter 'gmail_tools'",
+    ),
+    (
+        find_gmail_parameters,
+        {"telegram": "class C:\n    def __init__(self, gmail: object) -> None: ...\n"},
+        "telegram.py:2: parameter 'gmail'",
+    ),
+    (
+        find_langchain_imports,
+        {"pdf": "from langchain_core.messages import M\n"},
+        "LangChain-free pdf imports langchain_core.messages",
+    ),
+    (
+        find_langchain_imports,
+        {"telegram": "import mcp\n"},
+        "LangChain-free telegram imports mcp",
+    ),
+    (
+        find_langchain_imports,
+        {"delivery": "from langgraph.graph import StateGraph\n"},
+        "LangChain-free delivery imports langgraph.graph",
+    ),
+    (
+        find_only_project_import_violations,
+        {"telegram": "from newsletter_digest.models import ReadingList\n"},
+        "telegram -> models: telegram may import only config",
+    ),
+    (
+        find_only_project_import_violations,
+        {"telegram": "from newsletter_digest import __version__\n"},
+        "telegram -> the package root: telegram may import only config",
+    ),
+    (
+        find_only_project_import_violations,
+        {"pdf": "from newsletter_digest.config import Settings\n"},
+        "pdf -> config: pdf may import only models, render",
+    ),
+    (
+        find_only_project_import_violations,
+        {"delivery": "from newsletter_digest.render import write_reading_list\n"},
+        "delivery -> render: delivery may import only config, models, pdf, telegram",
+    ),
+    (
+        find_only_project_import_violations,
+        {"delivery": "def f() -> None:\n    from newsletter_digest import links\n"},
+        "delivery.py:2: delivery -> the package root",
+    ),
+    (
+        find_importer_violations,
+        {"tools": "from newsletter_digest.pdf import build_pdf\n"},
+        "tools -> pdf: only delivery may import pdf",
+    ),
+    (
+        find_importer_violations,
+        {
+            "cli": (
+                "def f() -> None:\n    from newsletter_digest.telegram import redact\n"
+            )
+        },
+        "cli.py:2: cli -> telegram: only delivery may import telegram",
+    ),
+    (
+        find_importer_violations,
+        {"agent": "from newsletter_digest import delivery\n", "delivery": ""},
+        "agent -> delivery: only cli may import delivery",
+    ),
+    (
+        find_importer_violations,
+        {"render": "from .pdf import build_pdf\n"},
+        "render -> pdf: only delivery may import pdf",
+    ),
+    (
+        find_fpdf_violations,
+        {"render": "from fpdf import FPDF\n"},
+        "render.py:1: only pdf.py may import fpdf",
+    ),
+    (
+        find_fpdf_violations,
+        {"delivery": "def f() -> None:\n    import fpdf.enums\n"},
+        "delivery.py:2: only pdf.py may import fpdf.enums",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "from fpdf import FPDF\nFPDF().write_html('<b>x</b>')\n"},
+        "pdf.py:2: references fpdf write_html",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "from fpdf.html import HTMLMixin\n"},
+        "pdf.py:1: imports fpdf.html",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "from fpdf import HTMLMixin as Mixin\n"},
+        "references fpdf HTMLMixin",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "def f(doc: object) -> None:\n    doc.image('x.png')\n"},
+        "pdf.py:2: references fpdf image",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "def f(doc: object) -> None:\n    doc.embed_file('x')\n"},
+        "references fpdf embed_file",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "def f(doc: object) -> None:\n    doc.file_attachment_annotation()\n"},
+        "references fpdf file_attachment_annotation",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "def f(doc: object) -> None:\n    doc.set_text_shaping(True)\n"},
+        "references fpdf set_text_shaping",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "def f(doc: object) -> None:\n    doc.alias_nb_pages()\n"},
+        "references fpdf alias_nb_pages",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "def f(doc: object) -> None:\n    getattr(doc, 'image')('x')\n"},
+        "pdf.py:2: string 'image'",
+    ),
+    (
+        find_fpdf_violations,
+        {
+            "pdf": (
+                "def f(doc: object) -> None:\n"
+                "    doc.multi_cell(0, 5, 'x', markdown=True)\n"
+            )
+        },
+        "pdf.py:2: markdown=True",
+    ),
+    (
+        find_fpdf_violations,
+        {
+            "pdf": (
+                "def f(doc: object, md: bool) -> None:\n"
+                "    doc.cell(text='x', markdown=md)\n"
+            )
+        },
+        "pdf.py:2: markdown=md",
+    ),
+    (
+        find_fpdf_violations,
+        {"pdf": "OPTIONS = {'markdown': True}\n"},
+        "pdf.py:1: 'markdown': True",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "import httpx\nc = httpx.AsyncClient(transport=t, trust_env=False)\n"
+            )
+        },
+        "telegram.py:2: httpx.AsyncClient without follow_redirects=False",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "from httpx import AsyncClient\n"
+                "AsyncClient(transport=t, trust_env=False, follow_redirects=True)\n"
+            )
+        },
+        "httpx.AsyncClient without follow_redirects=False",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "import httpx\nhttpx.AsyncClient(transport=t, follow_redirects=False)\n"
+            )
+        },
+        "telegram.py:2: httpx.AsyncClient without trust_env=False",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "import httpx\n"
+                "httpx.AsyncClient(trust_env=False, follow_redirects=False)\n"
+            )
+        },
+        "telegram.py:2: httpx.AsyncClient without an explicit transport=",
+    ),
+    (
+        find_http_client_violations,
+        {"delivery": "import httpx\nhttpx.AsyncClient(trust_env=False)\n"},
+        "delivery.py:2: httpx.AsyncClient built outside fetch.py and telegram.py",
+    ),
+    (
+        find_http_client_violations,
+        {"telegram": "import httpx\nT = httpx.AsyncHTTPTransport(retries=0)\n"},
+        "telegram.py:2: httpx.AsyncHTTPTransport used outside "
+        "telegram._default_transport()",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "import httpx\n"
+                "def make() -> httpx.AsyncBaseTransport:\n"
+                "    return httpx.AsyncHTTPTransport()\n"
+            )
+        },
+        "telegram.py:3: httpx.AsyncHTTPTransport used outside",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "from httpx import AsyncHTTPTransport\n"
+                "class C:\n"
+                "    def _default_transport(self) -> AsyncHTTPTransport:\n"
+                "        return AsyncHTTPTransport()\n"
+            )
+        },
+        "telegram.py:4: httpx.AsyncHTTPTransport used outside",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "import httpx\nclass Raw(httpx.AsyncHTTPTransport):\n    pass\n"
+            )
+        },
+        "telegram.py:2: httpx.AsyncHTTPTransport used outside",
+    ),
+    (
+        find_http_client_violations,
+        {"delivery": "import httpx\nt = httpx.AsyncHTTPTransport()\n"},
+        "delivery.py:2: httpx.AsyncHTTPTransport used outside",
+    ),
+    (
+        find_http_client_violations,
+        {
+            "telegram": (
+                "import httpx\n"
+                "def _default_transport() -> httpx.AsyncBaseTransport:\n"
+                "    return httpx.AsyncHTTPTransport(verify=False)\n"
+            )
+        },
+        "telegram.py:3: verify= passed",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "from newsletter_digest.delivery import deliver_reading_list\n"},
+        "cli.py:1: module-level import of newsletter_digest.delivery",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "from newsletter_digest import delivery\n"},
+        "cli.py:1: module-level import of newsletter_digest.delivery",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "import os\nfrom .telegram import redact\n"},
+        "cli.py:2: module-level import of newsletter_digest.telegram",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "import newsletter_digest.pdf as pdf\n"},
+        "cli.py:1: module-level import of newsletter_digest.pdf",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "import fpdf\n"},
+        "cli.py:1: module-level import of fpdf",
+    ),
+    (
+        find_eager_delivery_imports,
+        {
+            "cli": (
+                "from typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING:\n"
+                "    from newsletter_digest.delivery import DeliveryOutcome\n"
+            )
+        },
+        "cli.py:3: module-level import of newsletter_digest.delivery",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "class C:\n    from newsletter_digest import pdf\n"},
+        "cli.py:2: module-level import of newsletter_digest.pdf",
+    ),
+    (
+        find_eager_delivery_imports,
+        {
+            "cli": (
+                "try:\n"
+                "    import newsletter_digest.delivery\n"
+                "except ImportError:\n"
+                "    pass\n"
+            )
+        },
+        "cli.py:2: module-level import of newsletter_digest.delivery",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"agent": "def f() -> None:\n    from fpdf import FPDF\n"},
+        "agent.py:2: fpdf imported outside pdf.py",
+    ),
+    (
+        find_secret_reveal_violations,
+        {"delivery": "def f(token: object) -> str:\n    return token.reveal()\n"},
+        "delivery.py:2: references .reveal(); only telegram.py may reveal",
+    ),
+    (
+        find_secret_reveal_violations,
+        {
+            "cli": (
+                "def f(s: object) -> None:\n    print(s.telegram_bot_token.reveal())\n"
+            )
+        },
+        "cli.py:2: references .reveal()",
+    ),
+    (
+        find_secret_reveal_violations,
+        {
+            "config": (
+                "class T:\n"
+                "    def __str__(self) -> str:\n"
+                "        return self.reveal()\n"
+            )
+        },
+        "config.py:3: references .reveal()",
+    ),
+    (
+        find_secret_reveal_violations,
+        {"delivery": "def f(token: object) -> object:\n    return token.reveal\n"},
+        "delivery.py:2: references .reveal()",
+    ),
+    (
+        find_secret_reveal_violations,
+        {
+            "delivery": (
+                "def f(token: object) -> str:\n    return getattr(token, 'reveal')()\n"
+            )
+        },
+        "delivery.py:2: string 'reveal'",
+    ),
 ]
 
 
@@ -1000,6 +1765,91 @@ ALLOWED_CASES: list[tuple[Checker, dict[str, str]]] = [
         {"fetch": "import httpx\nr = httpx.Request('GET', 'u')\n"},
     ),
     (find_dynamic_imports, {"agent": "import importlib.metadata\n"}),
+    # ---- Telegram delivery (TD-2, TD-9, TD-12, TD-13)
+    (find_forbidden_project_imports, dict(STUB_DELIVERY_TREE)),
+    (find_forbidden_project_imports, dict(FINAL_DELIVERY_TREE)),
+    (find_only_project_import_violations, dict(STUB_DELIVERY_TREE)),
+    (find_only_project_import_violations, dict(FINAL_DELIVERY_TREE)),
+    (
+        find_only_project_import_violations,
+        {"agent": "from newsletter_digest import __version__, store\n", "store": ""},
+    ),
+    (find_importer_violations, dict(STUB_DELIVERY_TREE)),
+    (find_importer_violations, dict(FINAL_DELIVERY_TREE)),
+    (find_layer_violations, dict(FINAL_DELIVERY_TREE)),
+    (find_cycles, dict(FINAL_DELIVERY_TREE)),
+    (find_gmail_parameters, dict(FINAL_DELIVERY_TREE)),
+    (find_langchain_imports, dict(FINAL_DELIVERY_TREE)),
+    (find_fpdf_violations, dict(STUB_DELIVERY_TREE)),
+    (find_fpdf_violations, dict(FINAL_DELIVERY_TREE)),
+    (
+        find_fpdf_violations,
+        {
+            "pdf": (
+                '"""Never write_html, image(), embed_file or HTMLMixin."""\n'
+                "# no doc.image() or alias_nb_pages() here either\n"
+                "from fpdf import FPDF\n"
+                "from fpdf.enums import XPos, YPos\n"
+                "def f() -> None:\n"
+                '    """image"""\n'
+                "    doc = FPDF(format=(100, 178))\n"
+                "    doc.str_alias_nb_pages = None\n"
+                "    doc.multi_cell(0, 5, 'x', markdown=False, new_x=XPos.LMARGIN)\n"
+                "    doc.cell(text='y', markdown=False, new_y=YPos.NEXT)\n"
+            )
+        },
+    ),
+    (find_fpdf_violations, {"cli": "console.print('x', markup=False)\n"}),
+    (find_http_client_violations, dict(STUB_DELIVERY_TREE)),
+    (find_http_client_violations, dict(FINAL_DELIVERY_TREE)),
+    (
+        find_http_client_violations,
+        {
+            "fetch": (
+                "import httpx\n"
+                "c = httpx.AsyncClient(transport=t, trust_env=False, "
+                "follow_redirects=True)\n"
+            ),
+            "netguard": (
+                "import httpx\nclass Guarded(httpx.AsyncHTTPTransport):\n    pass\n"
+            ),
+        },
+    ),
+    (
+        find_http_client_violations,
+        {"fetch": "import httpx\nhttpx.AsyncClient(trust_env=False, verify=True)\n"},
+    ),
+    (find_eager_delivery_imports, dict(STUB_DELIVERY_TREE)),
+    (find_eager_delivery_imports, dict(FINAL_DELIVERY_TREE)),
+    (
+        find_eager_delivery_imports,
+        {
+            "cli": (
+                "import anyio\n"
+                "from newsletter_digest.render import write_reading_list\n"
+                "async def _later() -> None:\n"
+                "    import newsletter_digest.telegram\n"
+                "class C:\n"
+                "    def m(self) -> None:\n"
+                "        from newsletter_digest import pdf\n"
+            )
+        },
+    ),
+    (find_secret_reveal_violations, dict(STUB_DELIVERY_TREE)),
+    (find_secret_reveal_violations, dict(FINAL_DELIVERY_TREE)),
+    (
+        find_secret_reveal_violations,
+        {
+            "delivery": '"""Never calls .reveal(); only telegram does."""\n',
+            "config": (
+                "class SecretToken:\n"
+                '    """Call reveal() only in telegram."""\n'
+                "    def reveal(self) -> str:\n"
+                '        """reveal"""\n'
+                "        return self._value\n"
+            ),
+        },
+    ),
 ]
 
 

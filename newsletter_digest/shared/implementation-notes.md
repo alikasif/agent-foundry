@@ -2635,3 +2635,81 @@ committed; the goldens record their source commit in `snippets.json`.
 - **SecretToken:** has no `__eq__`/`__hash__` override (identity semantics), so `Settings.__eq__` compares tokens by identity. `__reduce__` raising also makes `copy.copy`/`copy.deepcopy` raise `TypeError`. No `src/` code copies or pickles `Settings` (grep). The value stays reachable as `._value` by design; the AST rule polices `.reveal()` only.
 - **Addition:** private `_TELEGRAM_SETUP_HINT = "See README > Telegram delivery > Telegram setup."` shared by the three messages. No other public names beyond TP-5.
 - **No `reveal()` call** in config.py (definition only). `.env.example` not touched (T064).
+
+## T049 — Architecture guard rules first: TD-2 negative import rules and self-tests
+
+**Hunks changed in `tests/test_architecture.py`** (TP-6 item 2; diff against `6c79855`,
+which only added the T048 `TIER_RANKS` lines to `5b9f838`). Every existing checker, test,
+`VIOLATION_CASES` entry and `ALLOWED_CASES` entry is unchanged; the new cases are appended,
+so the existing parametrize ids stay the same.
+1. Module docstring: rule 6 notes `telegram`; new rule 8 summarises the delivery rules.
+2. Constants: `DELIVERY_MODULES`; `NEW_MODULES` gains `*DELIVERY_MODULES`; `DELIVERY_BANNED`
+   (= `GMAIL_SIDE | {fetch, enrich, netguard, extract, llm, prompts}`) plus three
+   `FORBIDDEN_PROJECT_IMPORTS` entries; new `ONLY_PROJECT_IMPORTS` and `ALLOWED_IMPORTERS`;
+   `LANGCHAIN_FREE` gains `*DELIVERY_MODULES`; fpdf/http/lazy-import/reveal constants after
+   `DYNAMIC_IMPORT_CALLS`.
+3. New analysis helpers after `_is_langchain_family`: `code_strings` (skips docstrings),
+   `resolved_references`, `top_level_function_nodes`, `module_level_imports`,
+   `_lazy_only_targets`, `_non_false_keyword_sites`.
+4. `find_http_client_violations` (the only changed checker): owners are `{fetch, telegram}`;
+   the message is now `built outside fetch.py and telegram.py` (still contains the old
+   `built outside fetch.py`, so the existing self-tests are untouched); telegram clients
+   also need a literal `follow_redirects=False` and an explicit `transport=`; real
+   transport rule; `verify=` ban in telegram. New helpers `_telegram_client_violations`,
+   `_real_transport_violations`.
+5. New checkers after `find_dynamic_imports`: `find_only_project_import_violations`,
+   `find_importer_violations`, `find_fpdf_violations`, `find_eager_delivery_imports`,
+   `find_secret_reveal_violations`; all five added to `REAL_TREE_CHECKERS`.
+6. `test_detector_sees_the_allowed_usages`: `== ["fetch"]` relaxed to
+   `"fetch" in sites and set(sites) <= {"fetch", "telegram"}` (T063 tightens it).
+7. New `STUB_DELIVERY_TREE` (T048 docstring stubs) and `FINAL_DELIVERY_TREE` (a synthetic
+   tree shaped like the TP-5 contracts) before `VIOLATION_CASES`; every new rule must allow
+   both, so the rules are stub-safe and will not reject the planned code.
+8. 58 new `VIOLATION_CASES` and 25 new `ALLOWED_CASES` (54 -> 112, 20 -> 45); file tests
+   92 -> 180.
+
+**Decisions not covered by the spec (all stricter, all pass on the stubs and on the
+in-progress `pdf.py`):**
+- `telegram`'s `httpx.AsyncClient` must pass an explicit `transport=`. Without it httpx
+  builds its own real transport, which would bypass `_default_transport` and the T056
+  conftest guard (TD-13).
+- Real transport: any reference to `httpx.AsyncHTTPTransport` (call, subclass base,
+  alias) is reported in every module except inside the **module-level** function
+  `telegram._default_transport` (a method with that name does not count). `netguard` is
+  exempt because its `GuardedTransport` subclasses it. TD-2 words this only for telegram;
+  TD-13 says the AST rule makes `_default_transport` "the only place a real transport can
+  be built", so the rule is package-wide.
+- fpdf: banned names are matched as names, attributes and import aliases, plus string
+  constants on exact equality (`getattr(doc, "image")`), with docstrings and comments
+  skipped (learnings T042). `str_alias_nb_pages` (needed by V24) is not banned (exact
+  match). Importing `fpdf.html` from `pdf` is also reported.
+- `markdown=` must be a literal `False` in **every** module, as a keyword and as a
+  `{"markdown": ...}` dict entry (same shape as the trust_env rule). No module uses it today.
+- `.reveal()`: any `.reveal` attribute outside telegram is reported, called or not (a
+  bound-method alias would otherwise escape), plus the string `'reveal'` (getattr). The
+  `def reveal` in `config.SecretToken` is a definition, not an attribute, so it passes.
+- Eager imports: "module level" means anything outside a function body, so `if
+  TYPE_CHECKING:` blocks, `try:` blocks and class bodies in cli are reported too.
+- `verify=` is banned on any call in telegram, not only on httpx calls.
+- `ONLY_PROJECT_IMPORTS` checks modules, not imported names (`render.safe_url` only,
+  `config.SecretToken` only). The task fixes module sets only; T063 or a review may
+  tighten it.
+
+**Spec conflict for T054 / the lead (not resolved here):** TP-5 says cli imports `redact`
+lazily in its `except` branch, while TD-2 `ALLOWED_IMPORTERS` (implemented as written)
+allows only `delivery` to import `telegram`. So `cli` may not import
+`newsletter_digest.telegram` even nested (`find_importer_violations` reports it; there is a
+self-test for exactly this). `FINAL_DELIVERY_TREE` therefore gets `redact` through
+`delivery` (delivery re-exports it). Caveat: if the `except` is reached because importing
+`delivery` raised `ImportError` (broken fpdf2), a second `from newsletter_digest.delivery
+import redact` raises again. Options: add `cli` to `ALLOWED_IMPORTERS["telegram"]` (the
+eager rule still keeps it nested), or let cli fall back without `redact` when the import
+itself failed. Lead decision needed before T054.
+
+**Verification:** `tests/test_architecture.py` 180 passed; full suite 2710 passed,
+2 deselected; `tests/test_flag_off_identity.py` 13 passed; `ruff format`, `ruff check .`
+and `pyrefly check` clean. The checkers report nothing on the committed HEAD stub tree
+(`git archive` copy). Six scratch-copy mutants were each caught by the intended rule:
+module-level delivery import in cli, nested fpdf in agent, `.reveal()` in delivery,
+telegram client without `follow_redirects=False`, `markdown=True` + `image` + a config
+import in pdf, and tools importing telegram.
