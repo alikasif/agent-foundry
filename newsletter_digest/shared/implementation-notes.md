@@ -2636,6 +2636,81 @@ committed; the goldens record their source commit in `snippets.json`.
 - **Addition:** private `_TELEGRAM_SETUP_HINT = "See README > Telegram delivery > Telegram setup."` shared by the three messages. No other public names beyond TP-5.
 - **No `reveal()` call** in config.py (definition only). `.env.example` not touched (T064).
 
+## T052 — pdf.py: plain-text PDF builder over ReadingList (fpdf2, DejaVu, safe links)
+
+V-row results (fpdf2 2.8.9 as pinned; probed offline with sockets patched to raise, pypdf
+6.21 extraction, scratch script outside the repo). The V23-V26 table rows above are left
+untouched so this shared file is only appended to; these are the results:
+- **V23 DONE.** Installed `fpdf2 2.8.9`. Signatures match the verified facts:
+  `multi_cell(w, h=None, text='', ..., link=None, ..., markdown=False, ..., dry_run=False,
+  output=PAGE_BREAK, ...)`, `cell(..., link='', ..., markdown=False, ...)`,
+  `add_font(family, style, fname, ...)`, `set_display_mode(zoom, layout='continuous')`,
+  `start_section(name, level=0, strict=True)`, `will_page_break(height)`,
+  `set_creation_date(date)`, `set_lang(lang)`. `markdown` defaults to False (we pass it
+  explicitly anyway). `MethodReturnValue.HEIGHT` exists (used for the dry-run title height).
+- **V24 DONE.** `str_alias_nb_pages` defaults to `'{nb}'`; setting it to `None` keeps
+  `{nb}` literal (21 of 21 hostile `{nb}` occurrences survived extraction).
+- **V25 DONE.** `pdf.fonts` keys are `"dejavu"` and `"dejavuB"` (family lowercased + style);
+  both are `fpdf.fonts.TTFFont` with a `cmap` dict (5,918 entries in Regular). Intersection
+  of Regular and Bold = 5,778 code points; U+0416 covered, U+4E2D not. The missing-glyph
+  warning is emitted on logger **`fpdf.output`** (a child of `fpdf`) at WARNING during
+  `output()`; with `pdf_text` applied no such record appears on the hostile fixture
+  (emoji, ZWJ family, flag, CJK, Arabic, Hebrew, Devanagari, Cyrillic, NUL, bidi
+  overrides, lone surrogate, 600-char word). The fontTools getBestCmap fallback was not
+  needed.
+- **V26 DONE.** `link=` on `multi_cell` writes `/Link` annotations with `/S /URI` per
+  wrapped line (28 annotations on the hostile fixture, all http/https; `javascript:`,
+  `data:`, `vbscript:`, `" javascript:"` and `None` URLs produced none). `start_section`
+  adds outline entries only (7 entries, no extra annotation). Two builds are
+  byte-identical. 100 items with ~250-char titles and 300-char summaries: 0.57 s,
+  100 pages, 222 KB. Full text, "Read here" and DUPLICATE notes are absent.
+
+Decisions not covered by the spec:
+- **Sanitise in `draw_pdf`, not in the layout.** `layout_reading_list` returns raw model
+  text (pure, no fpdf2 and no font loading); `draw_pdf` runs `pdf_text` on every block text,
+  the section outline name and the document title right before fpdf2 sees them. One choke
+  point means a hand-built `Block` list is also safe. Tests that compare `Block.text` see
+  the unsanitised strings; tests on extracted PDF text see sanitised ones.
+- **`pdf_text` steps 2 and 3 are applied in one per-character pass before the whitespace
+  collapse** (the TD-4 order would leave a double space where a dropped joiner sat between
+  two spaces). The visible result is otherwise identical to steps 1-4 in order.
+- **Coverage loaded lazily** via `functools.cache` on a throwaway `FPDF()` with both fonts
+  added, so `pdf_text` works without a build (plan addition). `draw_pdf` still adds the
+  fonts to its own `FPDF` each build (font parsing is part of the 0.57 s for 100 items).
+- **`Generated` line uses `strftime("%Y-%m-%d %H:%M")`** as TD-6 and the task specify.
+  The HTML footer uses `isoformat(sep=" ", timespec="minutes")`, which appends the UTC
+  offset for aware datetimes (`2026-10-31 09:30+01:00`). The parity test (T058) should
+  compare the `YYYY-MM-DD HH:MM` prefix. The HTML footer's second sentence ("Summaries come
+  from newsletter emails..." / "Items with key points...") is not in the PDF: TD-6 lists
+  `Generated` as the last line and does not mention it.
+- **Empty-state query** is drawn as plain text (the HTML wraps it in `<code>`).
+- **Header line, note, empty-state and footer typography** (TD-6 only fixes title,
+  section, item, summary, meta and Why): header lines 10 pt `#555555`, notes and fetch
+  notes `#6b5300` (the template's note colour), empty state 11 pt `#555555`, `Generated`
+  line 9 pt, page number 8 pt centred 6 mm from the bottom edge. Line heights ~1.35 x size.
+- **Orphan control also for section headings**: a heading moves to a new page unless the
+  heading, one item-title line and one body line fit. Item titles use the dry-run height of
+  the whole wrapped title plus one body line (TD-6). The 3 mm item gap is 1.5 mm, the
+  0.2 mm `#dddddd` rule, 1.5 mm; the first item of a section gets only the 1.5 mm gap.
+- **Bold-underline only for linked titles** (`BU`); unlinked titles are bold
+  `#1a1a1a`. A block's `link` is passed as `link=block.link or ""` (fpdf2 treats `""` as
+  no link; the bundled pyrefly stub types `link` as `int | str`).
+- **Typing workarounds for pyrefly's bundled fpdf2 stub** (it is older than 2.8.9):
+  colours are passed as RGB int tuples instead of hex strings, the size is set with
+  `set_font_size` (the stub types `set_font(size=int)`; runtime accepts float 9.5/10.5),
+  font styles are `Literal` values, the coverage fonts are `cast(TTFFont, ...)`, and
+  `str_alias_nb_pages = None` carries `# pyrefly: ignore[bad-assignment]`.
+- **`created_at` naive datetimes**: fpdf2 calls `astimezone()` on a naive date (machine
+  local zone). `DigestMeta.generated_at` is always aware in this project, so builds stay
+  deterministic; recorded in case a caller passes a naive value.
+
+Tradeoffs:
+- No hanging indent for wrapped key points: the bullet and its continuation lines share
+  the 3 mm indent (fpdf2 `multi_cell` has no hanging-indent option; a two-cell layout
+  would complicate page breaks for little gain).
+- fontTools logs many DEBUG records (table reads) on every build; they surface only if a
+  caller sets the root logger to DEBUG. Left to delivery/cli logging config (T053/T054).
+
 ## T049 — Architecture guard rules first: TD-2 negative import rules and self-tests
 
 **Hunks changed in `tests/test_architecture.py`** (TP-6 item 2; diff against `6c79855`,

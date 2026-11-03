@@ -313,3 +313,25 @@
   wheel (checked with `uv build --wheel` + `python3 -I -m zipfile -l`).
 - (T048) Download untrusted archives into a fresh scratch dir, check the zip sha256
   before extracting, extract with `python3 -I -m zipfile -e`, then check each member.
+- (T050) Before "appending" dataclass fields, grep the tests for `dataclasses.fields(...)`
+  order assertions: `test_config_fetch.py` pins the fetch fields as the last `Settings`
+  fields, so later additions have to go before `reader_parallelism`.
+- (T050) When an `__reduce__` raises `TypeError`, `copy.copy`/`copy.deepcopy` of the object
+  (and of any dataclass holding it) raise too. Use `dataclasses.replace`, which does not copy.
+- (T052) pyrefly bundles an fpdf2 stub older than 2.8.9: it types `set_font(size)` as
+  int, colours as int (no hex strings), `multi_cell(link)` as `int | str`, and
+  `str_alias_nb_pages` as str. Use RGB int tuples, `set_font_size(float)`, `link=x or ""`
+  and one `# pyrefly: ignore[bad-assignment]` for the alias; runtime accepts all of them.
+- (T052) fpdf2 2.8.9 font keys in `pdf.fonts` are the lowercased family plus the style
+  (`"dejavu"`, `"dejavuB"`). The missing-glyph WARNING is logged on `fpdf.output` during
+  `output()`, and fontTools logs dozens of DEBUG table reads per build (noise at root
+  DEBUG level).
+- (T049) A "module-level import" AST rule must treat `if TYPE_CHECKING:`, `try:` and class
+  bodies as module level: walk with `ast.iter_child_nodes`, skip only FunctionDef,
+  AsyncFunctionDef and Lambda, then reuse the existing import collector on
+  `ast.Module(body=<found imports>, type_ignores=[])`.
+- (T049) Stub-first guard rules: keep a synthetic "final shape" tree built from the API
+  contract next to the stub tree, and assert every new rule allows both. It catches rules
+  that would reject the planned code before any coder writes it, and surfaced a
+  TP-5/TD-2 conflict (cli's lazy `redact` import vs `telegram` importable only by
+  `delivery`).
