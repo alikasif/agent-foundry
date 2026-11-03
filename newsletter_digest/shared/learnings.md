@@ -308,3 +308,8 @@
   `anyio.from_thread.run_sync(started.set)` and then block on a `threading.Event` that
   is set only at fixture teardown. Cancel once `started` fires and time the return. If
   the source drops the flag, the cancel waits for the thread's bounded wait (3 s).
+- (T048) Wheel packaging of non-Python package data needs no hatch change when
+  `packages = ["src/newsletter_digest"]` is set: `fonts/*.ttf` and `LICENSE` land in the
+  wheel (checked with `uv build --wheel` + `python3 -I -m zipfile -l`).
+- (T048) Download untrusted archives into a fresh scratch dir, check the zip sha256
+  before extracting, extract with `python3 -I -m zipfile -e`, then check each member.

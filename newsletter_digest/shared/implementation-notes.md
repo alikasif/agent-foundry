@@ -31,6 +31,21 @@
 | V19 | Exception raised by `ChatOpenAI.ainvoke` on HTTP 429 after `max_retries` exposes `status_code == 429` | T031 | langchain-openai 1.7.3, openai 3.41.0, langchain-core 1.7.3 | Read `langchain_openai/chat_models/base.py` (`_handle_openai_api_error`) and `openai/_exceptions.py`; offline probe: `ChatOpenAI(max_retries=3, http_async_client=httpx2.AsyncClient(transport=httpx2.MockTransport(...)))` answering every request with 429 | Confirmed. After 4 requests (1 + 3 retries) `ainvoke` raises `langchain_openai...OpenAIRateLimitError`, a subclass of both `openai.RateLimitError` (`APIStatusError`) and `langchain_core.exceptions.ModelRateLimitError`; `exc.status_code == 429` and `exc.response.status_code == 429`. enrich checks both attributes duck-typed (no openai import). Note: openai 3.x uses its own `httpx2` package, not `httpx`; and its client stops retrying early when `Retry-After` exceeds its maximum delay, which only makes the 429 arrive sooner |
 | V20 | click 8.5 `is_flag` + `envvar` parsing of `NEWSLETTER_FETCH_ARTICLES` (`1/true/yes/0/false/""`) | T032 | click 8.5.0 | Scratch command with the same two option declarations, run through `CliRunner(env=...)` for 16 values; plus the real `digest` command with a fake `run_digest` | Unset, `""` and `" "` -> False; `1`, `true`, `True`, `yes`, `y`, `t`, `on` -> True; `0`, `false`, `no`, `off` -> False (case-insensitive, stripped). Any other value (`2`, `garbage`, `maybe`) -> exit 2: `Invalid value for '--fetch-articles' (env var: 'NEWSLETTER_FETCH_ARTICLES'): 'maybe' is not a valid boolean.` The CLI flag wins over the env var (`--fetch-articles` with `NEWSLETTER_FETCH_ARTICLES=0` -> True); there is no `--no-fetch-articles` to turn an env `1` off on the command line. `NEWSLETTER_MAX_FETCH` goes through `IntRange(1, 50)`: `0`, `51`, `abc` -> exit 2 naming both the option and the env var; `""` -> default 15. So `Settings.build`'s own `max_fetch` range check is not reachable from the CLI |
 
+## Library verification (Telegram delivery, 2026-11-02)
+
+| ID | Item | Owner task | Version | How checked | Result/consequence |
+|---|---|---|---|---|---|
+| V21 | Versions pinned by `uv add` (fpdf2, pillow, fonttools, defusedxml; dev pypdf) and `uv lock --check` | T048 | fpdf2 2.8.9, pillow 13.0.0, fonttools 4.68.0, defusedxml 0.7.1; dev pypdf 6.21.4 | `uv add "fpdf2>=2.8.9,<2.9"`, `uv add --dev "pypdf>=6.21,<7"`, `uv lock --check`, `uv run python -c 'import fpdf, pypdf'`, diff of uv.lock package names | Done. uv.lock gained exactly those five packages (lock 114 packages), nothing else; `uv lock --check` passes; imports print `2.8.9 6.21.4`. Matches verified_facts. |
+| V22 | DejaVu 2.37 zip sha256 and per-file sha256 match `verified_facts.md`; `LICENSE` copied verbatim; `uv build --wheel` contains `newsletter_digest/fonts/*` | T048 | DejaVu Sans 2.37 | Downloaded the release zip into a scratch dir, `sha256sum` before extraction, `python3 -I -m zipfile -e`, `sha256sum`/`stat` of both TTFs, `cp` to fonts/, `uv build --wheel` + `python3 -I -m zipfile -l` | Done. Zip, DejaVuSans.ttf (757,076 B) and DejaVuSans-Bold.ttf (705,684 B) all match the pinned sha256; LICENSE copied verbatim; wheel lists the three files under `newsletter_digest/fonts/` with no hatch config change. |
+| V23 | fpdf2 signatures on the pinned version: `FPDF(...)`, `multi_cell`, `cell`, `add_font`, `set_display_mode`, `start_section`, `will_page_break`, `set_creation_date`, `set_lang`; `markdown` default False | T052 |  |  | TODO |
+| V24 | `str_alias_nb_pages = None` keeps `{nb}` literal | T052 |  |  | TODO |
+| V25 | `pdf.fonts[<family>].cmap` exists; U+0416 covered, U+4E2D not; missing-glyph log goes to logger `fpdf` | T052 |  |  | TODO |
+| V26 | `link=` on `multi_cell` writes `/S /URI` annotations per wrapped line; `start_section` adds no annotation; builds are byte-identical with a fixed creation date | T052 |  |  | TODO |
+| V27 | httpx 0.28.1 logs the full URL at INFO on `httpx`; httpcore logger names; `exc.request.url` holds the token while `str(exc)` does not | T051 |  |  | TODO |
+| V28 | `follow_redirects=False` returns a 3xx response unchanged; `AsyncHTTPTransport(retries=0)` signature; `MockTransport` sees multipart `chat_id`, `caption`, `document` parts | T051 |  |  | TODO |
+| V29 | `import newsletter_digest.cli` loads neither `fpdf` nor `PIL`; `anyio.run` can run a second time after `run_digest` | T054 |  |  | TODO |
+| V30 | click 8.5: `is_flag` without `envvar` ignores env; `ctx.exit(3)` gives exit code 3 under `CliRunner` and the console script | T054 |  |  | TODO |
+
 ## Task notes
 
 ### T001 — Scaffold
@@ -2600,3 +2615,13 @@ dropping the explicit UTF-8 parser, dropping the cap, not catching ValueError in
 `_is_web_link`, losing the tail after an element ends, ignoring `hidden`/`display:none`,
 or converting on the loop each fails at least one test. The generator script is not
 committed; the goldens record their source commit in `snippets.json`.
+
+### T048 — Scaffold (Telegram delivery)
+
+- **Pre-check:** `tests/test_flag_off_identity.py` passed (13) and `git diff --quiet 5b9f838 -- newsletter_digest/src newsletter_digest/tests` was clean before any change.
+- **Heading level:** `###` under "Task notes", like the other task sections (the task text says `##`).
+- **Dependencies:** only fpdf2 2.8.9, pillow 13.0.0, fonttools 4.68.0, defusedxml 0.7.1 and dev pypdf 6.21.4 were added to uv.lock. No other package moved.
+- **Fonts:** bundled unmodified from the pinned release; every checksum matched, so no fallback source was needed. `fonts/` has no `__init__.py` (package data like `templates/`); hatch's `packages = ["src/newsletter_digest"]` already ships it, so pyproject has no hatch change.
+- **Stubs:** `pdf.py`, `telegram.py`, `delivery.py` hold only a docstring (role and allowed imports per TD-2).
+- **TIER_RANKS:** added `delivery: 1`, `pdf: 4`, `telegram: 6`; no other test change.
+- **task_list.json:** edited with `json.dump(indent=2, ensure_ascii=True)` so the diff is the status line only.
