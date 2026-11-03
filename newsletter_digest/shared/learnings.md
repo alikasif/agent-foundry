@@ -335,3 +335,6 @@
   that would reject the planned code before any coder writes it, and surfaced a
   TP-5/TD-2 conflict (cli's lazy `redact` import vs `telegram` importable only by
   `delivery`).
+- (T055) A `SecretToken` whose `__reduce__` raises also blocks `copy.deepcopy` and
+  `dataclasses.asdict` of any dataclass holding it (`copy.copy` and `replace` still
+  work). Do not `asdict`/deepcopy a flag-on `Settings`.

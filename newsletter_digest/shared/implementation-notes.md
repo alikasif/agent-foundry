@@ -2788,3 +2788,46 @@ and `pyrefly check` clean. The checkers report nothing on the committed HEAD stu
 module-level delivery import in cli, nested fpdf in agent, `.reveal()` in delivery,
 telegram client without `follow_redirects=False`, `markdown=True` + `image` + a config
 import in pdf, and tools importing telegram.
+
+## T055 — Tests for Telegram settings: SecretToken, fail-fast validation, safe_summary
+
+New file `tests/test_config_telegram.py` (187 tests, offline, no network, no `.env`).
+
+**Decisions not covered by the spec**
+- The `build_kwargs` / `make_settings` fixtures are duplicated from `tests/test_config.py`
+  instead of imported: existing test files may not be edited, and pyrefly cannot resolve
+  `from tests.x import` (import root is `src`).
+- Blank forms tested for each variable: key absent, `None`, `""`, spaces, `"\t\n"`,
+  `" \r\n "`; the both-missing case runs the full 6x6 matrix plus `telegram_env=None` and
+  `{}`, and asserts the exact TD-10 sentence. The singular case asserts the wording
+  pieces (`<VAR> is not set`, `add it to .env`, the other variable absent, ends with the
+  setup hint) because TD-10 gives only "singular wording", not the exact text.
+- When both values are malformed the test accepts either variable being named (TD-10
+  does not fix the order) but asserts neither value is echoed. "Missing" beats
+  "malformed" (TD-10 lists the missing check first) and is asserted.
+- Copy refusal (`copy.copy`/`copy.deepcopy` of a `SecretToken` raise `TypeError`) is
+  asserted from the `SecretToken` docstring; TD-9 only says "no pickling".
+- `config` must read only the given `telegram_env`, never `os.environ`: asserted with
+  valid values in the real environment and `{}` passed in.
+- Precedence is a 9x3 matrix: every existing check (API key none/blank, model, window,
+  max_emails, log level, MCP args, max_fetch, fetch env) against a missing, a malformed
+  token and a malformed chat ID; the message must not mention `TELEGRAM`.
+- `# noqa: UP031/UP030/UP032` on the `%`-format and `str.format` render cases on
+  purpose: those paths are what is being tested.
+- No duplicate of T049's `.reveal()` AST rule here.
+
+**Mutation check** (scratch `-p` plugin, `MUTANT` env, no source edit): 16/16 killed:
+loose token regex, unbounded secret length, negative and zero-allowing chat regexes,
+repr/str/format leaks, pickling allowed, summary showing the chat ID, the token, or
+`telegram` while False, value echoed in the error, no strip, flag off validating,
+Telegram checked before the existing checks, only the first missing variable named.
+
+**Finding for review (not a test failure):** with the flag on,
+`dataclasses.asdict(settings)` and `copy.deepcopy(settings)` raise `TypeError` (the
+token refuses copying); `copy.copy` and `dataclasses.replace` work. Nothing in `src/`
+calls them today; later code must not `asdict` a flag-on `Settings`.
+
+**Verification:** `tests/test_config_telegram.py` 187 passed; `config.py` 95% line
+coverage from this file alone (`uv run --with coverage`; misses are pre-existing
+window/fetch/query lines only); full suite 2897 passed, 2 deselected; `ruff format`,
+`ruff check .` and `pyrefly check` clean.
