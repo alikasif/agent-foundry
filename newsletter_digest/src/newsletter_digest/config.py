@@ -9,9 +9,9 @@ import logging
 import re
 import shlex
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import TypeVar
+from typing import NoReturn, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +70,54 @@ FETCH_CONCURRENCY_RANGE = (1, 16)
 FETCH_LLM_CONCURRENCY_RANGE = (1, 8)
 FETCH_LLM_INTERVAL_RANGE: tuple[float, float] = (0, 60)
 
+# Telegram delivery (TD-10). Env-only; read by the CLI only when --telegram is set.
+TELEGRAM_ENV_VARS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+# Token and chat ID are always hidden from safe_summary(); `telegram` while False.
+TELEGRAM_SUMMARY_FIELDS = frozenset(
+    {"telegram", "telegram_bot_token", "telegram_chat_id"}
+)
+_TELEGRAM_SETUP_HINT = "See README > Telegram delivery > Telegram setup."
+# Both are used with fullmatch. The strict token character set also keeps "/", "?",
+# "#" and ".." out of the request URL; positive chat IDs are private (own) chats.
+_BOT_TOKEN_RE = re.compile(r"[0-9]{1,20}:[A-Za-z0-9_-]{20,128}")
+_CHAT_ID_RE = re.compile(r"[1-9][0-9]{0,19}")
+
 _DAYS_WINDOW_RE = re.compile(r"(\d+)d")
 _Number = TypeVar("_Number", int, float)
 
 
 class ConfigError(ValueError):
     """Invalid or missing configuration; the message tells the user how to fix it."""
+
+
+class SecretToken:
+    """A secret string that never shows its value (TD-9).
+
+    ``repr``, ``str`` and any format spec (f-strings included) give ``"***"``, and
+    pickling or copying raises ``TypeError``. Only the Telegram client calls
+    :meth:`reveal`, to build the request URL.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        """Return the secret value; call it only where the value is sent."""
+        return self._value
+
+    def __repr__(self) -> str:
+        return "***"
+
+    def __str__(self) -> str:
+        return "***"
+
+    def __format__(self, format_spec: str) -> str:
+        return "***"
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("SecretToken cannot be pickled or copied")
 
 
 def window_to_days(window: str) -> int:
@@ -151,7 +193,8 @@ class Settings:
     """Immutable run configuration assembled from env vars and CLI flags.
 
     Build it with :meth:`Settings.build`, which applies defaults and validates.
-    The API key is excluded from ``repr`` and from :meth:`safe_summary`.
+    The API key and the Telegram bot token are excluded from ``repr`` and from
+    :meth:`safe_summary`; the Telegram chat ID is excluded from the summary.
     """
 
     openrouter_api_key: str = field(repr=False)
@@ -170,6 +213,10 @@ class Settings:
     gmail_mcp_command: str = DEFAULT_MCP_COMMAND
     gmail_mcp_args: tuple[str, ...] = (DEFAULT_MCP_ARGS,)
     max_email_chars: int = 30_000
+    # Before reader_parallelism: the fetch fields stay last (test_config_fetch.py).
+    telegram: bool = False
+    telegram_bot_token: SecretToken | None = field(default=None, repr=False)
+    telegram_chat_id: str | None = None
     reader_parallelism: int = 5
     fetch_articles: bool = False
     max_fetch: int = DEFAULT_MAX_FETCH
@@ -188,13 +235,17 @@ class Settings:
         return max(100, self.max_emails * 8)
 
     def safe_summary(self) -> dict[str, object]:
-        """Return every setting except the API key, safe to log.
+        """Return every setting except the secrets, safe to log.
 
-        While ``fetch_articles`` is False the fetch settings (``fetch_articles``,
-        ``max_fetch`` and every ``fetch_*`` field) are left out too, so the
-        summary, and the INFO log line built from it, matches the pre-fetching one.
+        The API key, ``telegram_bot_token`` and ``telegram_chat_id`` are always
+        left out. While ``fetch_articles`` is False the fetch settings
+        (``fetch_articles``, ``max_fetch`` and every ``fetch_*`` field) are left out
+        too, and so is ``telegram`` while it is False, so the flag-off summary, and
+        the INFO log line built from it, matches the pre-feature one.
         """
-        hidden = {"openrouter_api_key"}
+        hidden = {"openrouter_api_key", *TELEGRAM_SUMMARY_FIELDS}
+        if self.telegram:
+            hidden.discard("telegram")
         if not self.fetch_articles:
             hidden |= FETCH_SUMMARY_FIELDS
         return {
@@ -221,6 +272,8 @@ class Settings:
         fetch_articles: bool = False,
         max_fetch: int = DEFAULT_MAX_FETCH,
         fetch_env: Mapping[str, str | None] | None = None,
+        telegram: bool = False,
+        telegram_env: Mapping[str, str | None] | None = None,
     ) -> Settings:
         """Apply defaults, validate and build ``Settings`` (CLI > env > default).
 
@@ -231,11 +284,17 @@ class Settings:
         fails the run; ``max_fetch`` is otherwise unused while the flag is off.
         ``fetch_llm_interval`` defaults to 3.1 s for a ``:free`` reader model.
 
+        ``telegram_env`` maps the names in :data:`TELEGRAM_ENV_VARS` to their raw
+        values. It is ignored entirely while ``telegram`` is False; with the flag on
+        it is stripped and validated after every other check.
+
         Raises:
             ConfigError: with an actionable message for a missing API key or model,
                 an invalid window, ``max_emails`` outside 1..200, an unknown log
-                level, unparsable MCP args, ``max_fetch`` outside 1..50 or a fetch
-                env var that does not parse or is out of range.
+                level, unparsable MCP args, ``max_fetch`` outside 1..50, a fetch
+                env var that does not parse or is out of range or, with
+                ``telegram``, a missing, blank or malformed Telegram variable (the
+                value is never echoed).
         """
         key = (api_key or "").strip()
         if not key:
@@ -306,7 +365,7 @@ class Settings:
             )
         resolved_label = explicit_label or DEFAULT_LABEL
 
-        return cls(
+        settings = cls(
             openrouter_api_key=key,
             api_base=(api_base or "").strip() or DEFAULT_API_BASE,
             model=main_model,
@@ -369,3 +428,43 @@ class Settings:
                 FETCH_LLM_INTERVAL_RANGE,
             ),
         )
+        if not telegram:
+            return settings
+        token, chat_id = _telegram_values(telegram_env or {})
+        return replace(
+            settings,
+            telegram=True,
+            telegram_bot_token=SecretToken(token),
+            telegram_chat_id=chat_id,
+        )
+
+
+def _telegram_values(env: Mapping[str, str | None]) -> tuple[str, str]:
+    """Return the stripped, validated ``(bot token, chat ID)`` from ``env``.
+
+    Raises:
+        ConfigError: naming every missing or blank variable at once, or the first
+            malformed one; the values themselves are never part of the message.
+    """
+    token, chat_id = ((env.get(name) or "").strip() for name in TELEGRAM_ENV_VARS)
+    missing = [
+        name for name, value in zip(TELEGRAM_ENV_VARS, (token, chat_id)) if not value
+    ]
+    if missing:
+        verb, pronoun = ("is", "it") if len(missing) == 1 else ("are", "them")
+        raise ConfigError(
+            f"{' and '.join(missing)} {verb} not set (needed by --telegram); add "
+            f"{pronoun} to .env. {_TELEGRAM_SETUP_HINT}"
+        )
+    if not _BOT_TOKEN_RE.fullmatch(token):
+        raise ConfigError(
+            "TELEGRAM_BOT_TOKEN does not look like a bot token from @BotFather "
+            f"(<digits>:<letters, digits, _ or ->). {_TELEGRAM_SETUP_HINT}"
+        )
+    if not _CHAT_ID_RE.fullmatch(chat_id):
+        raise ConfigError(
+            "TELEGRAM_CHAT_ID must be your own numeric chat ID (message.chat.id from "
+            "getUpdates); group and channel IDs are not supported. "
+            f"{_TELEGRAM_SETUP_HINT}"
+        )
+    return token, chat_id

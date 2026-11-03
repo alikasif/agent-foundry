@@ -2625,3 +2625,13 @@ committed; the goldens record their source commit in `snippets.json`.
 - **Stubs:** `pdf.py`, `telegram.py`, `delivery.py` hold only a docstring (role and allowed imports per TD-2).
 - **TIER_RANKS:** added `delivery: 1`, `pdf: 4`, `telegram: 6`; no other test change.
 - **task_list.json:** edited with `json.dump(indent=2, ensure_ascii=True)` so the diff is the status line only.
+
+## T050 — config.py: SecretToken, Telegram settings, fail-fast validation, safe_summary hiding
+
+- **Deviation (field position):** TP-5/TD-10 say the three Telegram fields are "appended after the existing ones". The existing, non-editable `tests/test_config_fetch.py::test_fetch_fields_follow_existing_fields` requires the fetch fields to be the *last* dataclass fields with `reader_parallelism` immediately before them. The fields therefore sit between `max_email_chars` and `reader_parallelism` (with a comment saying why). Nothing builds `Settings` positionally (grep), every field from `max_emails` on has a default, and the flag-off `safe_summary()` order is unchanged (`test_safe_summary_flag_off_order_is_unchanged` passes). Only the `repr(Settings)` and flag-on summary order differ from "appended", and neither has a golden.
+- **Precedence:** `build` constructs the existing `Settings` first (so every existing check runs, including the fetch env vars parsed inside the constructor call), then for `telegram=True` validates and returns `dataclasses.replace(settings, ...)`. Flag off returns before `telegram_env` is touched.
+- **Validation order with the flag on:** missing/blank (all names in one message, `TELEGRAM_ENV_VARS` order, "is ... it" vs "are ... them"), then token format, then chat-ID format. A malformed token is reported before a malformed chat ID. `telegram_env=None` with the flag on counts as both missing.
+- **Stripping:** `str.strip()` (Unicode whitespace). The regexes use `[0-9]` rather than `\d`, so non-ASCII digits (e.g. Arabic-Indic) are rejected. Leading zeros and `0` are rejected by `_CHAT_ID_RE`.
+- **SecretToken:** has no `__eq__`/`__hash__` override (identity semantics), so `Settings.__eq__` compares tokens by identity. `__reduce__` raising also makes `copy.copy`/`copy.deepcopy` raise `TypeError`. No `src/` code copies or pickles `Settings` (grep). The value stays reachable as `._value` by design; the AST rule polices `.reveal()` only.
+- **Addition:** private `_TELEGRAM_SETUP_HINT = "See README > Telegram delivery > Telegram setup."` shared by the three messages. No other public names beyond TP-5.
+- **No `reveal()` call** in config.py (definition only). `.env.example` not touched (T064).
