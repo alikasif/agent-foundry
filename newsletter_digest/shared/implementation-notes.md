@@ -2977,3 +2977,40 @@ Tradeoffs:
   x3, network error x3, build failure with and without an earlier PDF, write failure
   (PDF path is a directory), oversize, and an exploding factory; HTML unchanged, no
   `.part` left, token absent from all DEBUG logs. Real tests are T059.
+
+## T057 — PDF builder tests: structure, Unicode, hostile input, annotations, determinism
+
+`tests/test_pdf.py` (new, 195 tests, ~5 s). pdf.py line coverage from this file alone: 100%
+(`uv run --with coverage`). Full suite green, ruff and pyrefly clean, no source edits.
+
+Decisions not covered by the spec:
+- **Socket guard is module-scoped** (`pytest.MonkeyPatch.context()` in an autouse
+  `scope="module"` fixture), not function-scoped: the hostile and ranked PDFs are built once
+  in module-scoped fixtures (bytes are immutable, so sharing is safe), and a function-scoped
+  guard would not cover those builds. A self-test proves the guard raises.
+- **Expected PDF text is `pdf_text(expected)` compared after whitespace collapse**, since
+  `Block.text` is raw and `draw_pdf` sanitises (T052 note). RTL words (Arabic, Hebrew) are
+  accepted in either logical or reversed order (TD-3); the 600-character word is checked by
+  counting `x` with all whitespace removed, because character-level wrapping inserts breaks.
+- **Missing-glyph test has a positive control**: with `pdf.pdf_text` monkeypatched to the
+  identity, a CJK block makes fpdf2 log the WARNING on `fpdf.output`, so the "no record"
+  assertion cannot pass just because capture is misconfigured. Records are matched on
+  logger `fpdf` and its children (the warning comes from `fpdf.output`, V25).
+- **`test_font_coverage_sanity` reads the private `pdf._font_coverage()`** (the TD-4 name
+  for the check), plus the public `pdf_text` view. An extra test checks the fpdf2 cmap
+  intersection equals fontTools `getBestCmap()` of both TTFs (5,778 code points), so a
+  change in fpdf2's `TTFFont.cmap` (TD-16 risk) fails loudly.
+- **Beyond the TD-13 list**: catalog has no `/Names`, `/AA`, `/AcroForm`, `/JavaScript`
+  (`/OpenAction` exists for `fullwidth` zoom and must be a destination array); `/Lang` is
+  `en`; no `/Author`/`/Subject`/`/Keywords`; every link action has only `/S /URI` keys;
+  wrapped linked-title annotations stay within the 6 mm margins; footer is the bare page
+  number; outline titles equal the SECTION blocks; extracted text follows the layout block
+  order; a changed `generated_at` changes the bytes and the `/CreationDate`.
+
+Mutation check (scratch `-p` plugin patching `newsletter_digest.pdf` in `pytest_configure`
+so module-scoped fixtures see the mutant; no source edited): 13/13 killed — `{nb}` alias
+left on, `markdown=True`, `safe_url` bypassed, `pdf_text` identity, Cf kept, full coverage
+(no U+FFFD), badge at N >= 1, full_text added, DUPLICATE note shown, creation date unset,
+empty `FETCH_NOTE_VERBS`, A4 page, no `set_lang`.
+
+No issues found in pdf.py.

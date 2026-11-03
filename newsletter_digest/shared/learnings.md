@@ -356,3 +356,10 @@
 - (T053) For an atomic `.part` + `os.replace` write, unlink the `.part` in `finally` with
   `missing_ok=True` (after a successful replace it is already gone) and suppress OSError
   there, so cleanup can never mask the original error.
+- (T057) A monkeypatch mutant applied in a function-scoped autouse fixture does not reach
+  module-scoped fixtures (they are built first): patch in the plugin's `pytest_configure`
+  instead, or the mutant falsely "survives" (the no-`set_lang` mutant did until then).
+- (T057) A mutant that rebuilds a big constant per call (`lambda: frozenset(range(0x110000))`
+  for a per-string coverage lookup) makes the run hang; build it once outside the lambda.
+- (T057) `from __future__ import annotations` binds the name `annotations` in the module:
+  a helper named `annotations()` passes at runtime but pyrefly reports `_Feature` not callable.
