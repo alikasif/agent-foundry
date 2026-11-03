@@ -350,3 +350,9 @@
   `move_on_after` scope still measures real loop time, so "delay exceeds the remaining
   budget" is testable with a small `total_deadline` (e.g. 3 s with 2 s/4 s backoff stops
   after the 2 s wait) and zero real waiting.
+- (T053) fpdf2 2.8.9 writes page objects uncompressed, so
+  `len(re.findall(rb"/Type\s*/Page(?![A-Za-z])", data))` equals pypdf's page count on the
+  fixtures; good enough for a log line without parsing the PDF.
+- (T053) For an atomic `.part` + `os.replace` write, unlink the `.part` in `finally` with
+  `missing_ok=True` (after a successful replace it is already gone) and suppress OSError
+  there, so cleanup can never mask the original error.

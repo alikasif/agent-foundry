@@ -2921,3 +2921,59 @@ Tradeoffs:
   `TelegramError`).
 - Verified offline only (scratch smoke script over every TD-8 row, both deadlines, the
   budget stop, request shape, redaction and filter idempotence); real tests are T056.
+
+## T053 — delivery.py: build, atomic write, size gate, caption and send orchestration
+
+- **Module-level imports of `pdf` and `telegram`** (TD-2, TD-12 and the T049 final-shape
+  tree): the binding default `builder=build_pdf` needs `build_pdf` at definition time, so
+  `pdf` (and with it fpdf) is not imported lazily inside `delivery`. Consequence for T054:
+  if fpdf2 is broken, `from newsletter_digest.delivery import redact` fails too, and the CLI
+  falls back to the class name only (as the T054 task already says).
+- **`redact` re-exported** through `delivery` (listed in `__all__` with the public names)
+  so `cli` never imports `telegram` (T049 `ALLOWED_IMPORTERS`).
+- **Builder runs in the event loop, not `anyio.to_thread.run_sync`.** Nothing else runs
+  concurrently during delivery, the build is about 0.4 s for 100 items, and a direct call
+  keeps fpdf2 and the `functools.cache` font coverage on one thread and the test seam
+  simple.
+- **Stale-PDF rule on build or write failure:** `pdf_path` is set only when a PDF for this
+  date already exists on disk (`is_file()`), and the reason then ends with
+  `; kept the previous PDF for this date`, so the CLI's "Saved: ..., <pdf>" never presents
+  an earlier run's file as new. With no earlier file, `pdf_path` is None.
+- **Write failures:** any `Exception` from the `.part` write or `os.replace` is a failure,
+  reason `could not write the PDF (<ExcClass>[: <strerror>])`. The strerror (e.g. "No
+  space left on device") is added for `OSError`; the file name never is. The `.part` file
+  is removed in a `finally` (unlink errors suppressed), so it is gone after success,
+  failure and cancellation. The HTML file is never opened.
+- **Oversize reason:** `the PDF is 50,000,005 bytes (50.0 MB), over Telegram's 50 MB
+  upload limit; not sent` (bytes shown because 50,000,001 bytes rounds to "50.0 MB").
+  The PDF is written before the gate, so it is kept; `attempts=0`.
+- **Reasons:** every reason passes through `_failed`: whitespace collapsed to one line,
+  `redact()`, trailing periods stripped. An unexpected exception with an empty message is
+  reported as the class name only (no dangling `: `).
+- **Unexpected exceptions** from `client_factory`, `__aenter__`/`__aexit__` or
+  `send_document` are caught as `Exception` (BaseException such as cancellation
+  propagates). The traceback is logged at DEBUG as
+  `redact("".join(traceback.format_exception(exc)))`, never with `exc_info=`.
+- **Redaction limit (recorded):** `telegram` registers the token's full value and secret
+  half on the first `_post`. If a custom `client_factory` raises before any request, a
+  bare `<digits>:<secret>` (without the `bot` prefix) in its message is not redacted in
+  a fresh process; `bot<id>:<secret>` URLs always are (regex). `delivery` cannot register
+  the token itself without a second `.reveal()` site (TD-9 AST rule). The real
+  `TelegramClient` never puts the token in an exception, so this only affects test seams.
+- **Retry WARNINGs** stay on `newsletter_digest.telegram` (T051); `delivery` logs none, so
+  there are no duplicates.
+- **Page count in the INFO line** is the number of `/Type /Page` object dictionaries in
+  the bytes (regex, no PDF parsing). It matched pypdf's page count on the ranked (4),
+  unranked (2) and empty (1) fixtures. When it finds none (e.g. a test builder's fake
+  bytes) the line says `unknown pages`. KB is `ceil(len / 1024)`.
+- **Missing Telegram settings** (`telegram_bot_token` or `telegram_chat_id` None) raise
+  `ValueError` before anything is built: a programming error (delivery only runs with the
+  flag on); the CLI's safety net maps it to exit 3. Also needed for type narrowing.
+- **Caption:** fixed words, `meta.window` and counts only; `1 article` / `N articles`;
+  `must-read` is invariant (`1 must-read`, `2 must-read`); sliced to
+  `MAX_CAPTION_CHARS` as a guard (the real captions are under 80 characters).
+- Verified offline with a scratch script (sockets patched to raise, `_default_transport`
+  patched to raise, MockTransport client through `client_factory`): success, 401, 500
+  x3, network error x3, build failure with and without an earlier PDF, write failure
+  (PDF path is a directory), oversize, and an exploding factory; HTML unchanged, no
+  `.part` left, token absent from all DEBUG logs. Real tests are T059.
