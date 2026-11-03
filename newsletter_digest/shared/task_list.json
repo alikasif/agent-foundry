@@ -1122,5 +1122,449 @@
       "Existing test files and the bb16231 goldens are unmodified; no secrets, .env or out/ committed",
       "implementation-notes has a T047 section with command results and the manual end-to-end command for the user"
     ]
+  },
+  {
+    "id": "T048",
+    "title": "Scaffold: uv add fpdf2/pypdf, bundled DejaVu fonts + licence, module stubs",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). FIRST task of the Telegram amendment. (1) Pre-check: `uv run pytest tests/test_flag_off_identity.py -q` passes and `git -C /home/kasif/projects/agent-foundry diff --quiet 5b9f838 -- newsletter_digest/src newsletter_digest/tests` succeeds; if not, stop and report. (2) `uv add \"fpdf2>=2.8.9,<2.9\"` and `uv add --dev \"pypdf>=6.21,<7\"` (never pip, never @latest); then `uv lock --check` and `uv run python -c 'import fpdf, pypdf; print(fpdf.FPDF_VERSION, pypdf.__version__)'`. Expect only fpdf2, pillow, fonttools, defusedxml and pypdf to be added (verified_facts); report anything else. (3) Fonts (TD-4): download https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip into a NEW empty scratch directory (prefix T048_), verify the zip sha256 is 7576310b219e04159d35ff61dd4a4ec4cdba4f35c00e002a136f00e96a908b0a BEFORE extracting, extract with `python3 -I -m zipfile -e` (no code from the archive is run), verify ttf/DejaVuSans.ttf (757,076 bytes, sha256 7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954) and ttf/DejaVuSans-Bold.ttf (705,684 bytes, sha256 e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724), then copy them unmodified with the release's LICENSE (verbatim) to src/newsletter_digest/fonts/. Any mismatch: stop and report; use no other source. No __init__.py in fonts/ (package data like templates/). (4) Stubs: src/newsletter_digest/pdf.py, telegram.py, delivery.py containing only a module docstring stating the role and allowed project imports (TD-2: pdf -> models, render; telegram -> config; delivery -> pdf, telegram, models, config). (5) Registration edit, the only test change in this task: add `\"delivery\": 1`, `\"pdf\": 4` and `\"telegram\": 6` to TIER_RANKS in tests/test_architecture.py (three added lines; otherwise find_unranked_modules fails on the stubs). (6) Wheel check (learnings T006): `uv build --wheel -o <scratch>/T048_wheel` and list it with `python3 -I -m zipfile -l`: it must contain newsletter_digest/fonts/DejaVuSans.ttf, DejaVuSans-Bold.ttf and LICENSE; if not, fix the hatch config minimally and record it. (7) In shared/implementation-notes.md insert, directly before '## Task notes', '## Library verification (Telegram delivery, 2026-11-02)' with the same columns as the earlier tables and rows V21..V30 exactly as shared/plan.md TP-7 (Result 'TODO'); fill V21 and V22 yourself. Add a '## T048 \u2014 Scaffold (Telegram delivery)' section under Task notes. (8) `uv run pytest -q` passes with 0 failures. (9) Local commit only: `chore(newsletter_digest): telegram delivery scaffold, fpdf2 and fonts`, staging only these files; never push. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-2, TD-3, TD-4, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). ",
+    "assigned_to": "project_structure",
+    "status": "pending",
+    "blocked_by": [],
+    "output_files": [
+      "newsletter_digest/pyproject.toml",
+      "newsletter_digest/uv.lock",
+      "newsletter_digest/src/newsletter_digest/fonts/DejaVuSans.ttf",
+      "newsletter_digest/src/newsletter_digest/fonts/DejaVuSans-Bold.ttf",
+      "newsletter_digest/src/newsletter_digest/fonts/LICENSE",
+      "newsletter_digest/src/newsletter_digest/pdf.py",
+      "newsletter_digest/src/newsletter_digest/telegram.py",
+      "newsletter_digest/src/newsletter_digest/delivery.py",
+      "newsletter_digest/tests/test_architecture.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "pyproject.toml has fpdf2>=2.8.9,<2.9 (runtime) and pypdf>=6.21,<7 (dev group); uv.lock pins fpdf2 2.8.x; `uv lock --check` passes; no pip used",
+      "Both TTFs match the verified size and sha256; fonts/LICENSE is the release LICENSE verbatim; the built wheel contains all three files",
+      "pdf.py, telegram.py and delivery.py are docstring-only stubs that import cleanly",
+      "tests/test_architecture.py differs from 5b9f838 only by the three TIER_RANKS lines",
+      "implementation-notes has the V21..V30 table with V21 and V22 filled",
+      "`uv run pytest -q` passes with 0 failures, test_flag_off_identity.py green"
+    ]
+  },
+  {
+    "id": "T049",
+    "title": "Architecture guard rules first: TD-2 negative import rules and self-tests",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Extend tests/test_architecture.py with the TD-2 NEGATIVE rules, written so they pass both on the T048 stubs and on the final code (positive detectors come later in T063). Keep every existing checker and test; only the edits listed here. (1) DELIVERY_MODULES = (\"delivery\", \"pdf\", \"telegram\"); add them to NEW_MODULES (so find_gmail_parameters covers them) and to LANGCHAIN_FREE. (2) FORBIDDEN_PROJECT_IMPORTS: each delivery module bans GMAIL_SIDE | {fetch, enrich, netguard, extract, llm, prompts}. (3) New ONLY_PROJECT_IMPORTS {telegram: {config}, pdf: {models, render}, delivery: {pdf, telegram, models, config}} plus checker find_only_project_import_violations (the package root import for __version__ is not allowed for these unless TD says so). (4) New ALLOWED_IMPORTERS {delivery: {cli}, pdf: {delivery}, telegram: {delivery}} plus checker find_importer_violations. (5) New find_fpdf_violations: only pdf imports fpdf (any form, eager or nested); pdf never references write_html, HTMLMixin, image, embed_file, file_attachment_annotation, set_text_shaping or alias_nb_pages (attribute or name, docstrings and comments skipped, learnings T042); every `markdown=` keyword is a literal False. (6) find_http_client_violations: httpx.AsyncClient allowed in {fetch, telegram}; both need a literal trust_env=False and telegram also a literal follow_redirects=False; httpx.AsyncHTTPTransport( in telegram only inside the function _default_transport; no `verify=` keyword in telegram. Relax the existing assertion `[name for name, _ in async_client_sites(package)] == [\"fetch\"]` to `\"fetch\" in sites and set(sites) <= {\"fetch\", \"telegram\"}` (T063 tightens it). (7) New find_eager_delivery_imports: in cli every import of newsletter_digest.delivery/pdf/telegram or fpdf is inside a function body, never at module level; no module except pdf imports fpdf. (8) New find_secret_reveal_violations (TD-9): `.reveal()` calls appear only in telegram. (9) Each new or changed rule gets VIOLATION_CASES and allowed-source self-tests (synthetic sources via make_modules), including a nested cli import that is allowed and a module-level one that is reported, AsyncClient in telegram without follow_redirects=False, markdown=True, and .reveal() in delivery. Add the new checkers to REAL_TREE_CHECKERS. Note in your notes section every hunk you changed in this existing file (TP-6 item 2). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-2, TD-9, TD-12, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T049 \u2014 Architecture guard rules first: TD-2 negative import rules and self-tests' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T048"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_architecture.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "All TD-2 negative rules (forbidden, only-allowed imports, allowed importers, fpdf, http client, eager delivery import, reveal) are asserted from the AST over the real tree",
+      "Each new rule has at least one violating and one allowed synthetic self-test",
+      "Existing checkers and tests unchanged apart from the relaxed async_client_sites assertion and the listed constant additions",
+      "`uv run pytest tests/test_architecture.py -q` and the full suite pass on the stub tree; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T050",
+    "title": "config.py: SecretToken, Telegram settings, fail-fast validation, safe_summary hiding",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Implement TD-9 (SecretToken) and TD-10 in src/newsletter_digest/config.py; config stays pure stdlib. Add SecretToken (__slots__ = (\"_value\",), reveal(), __repr__/__str__/__format__ return \"***\", __reduce__ raises TypeError), TELEGRAM_ENV_VARS, TELEGRAM_SUMMARY_FIELDS, _BOT_TOKEN_RE and _CHAT_ID_RE (fullmatch), and three Settings fields appended after the existing ones: telegram: bool = False, telegram_bot_token: SecretToken | None = field(default=None, repr=False), telegram_chat_id: str | None = None. Settings.build gains keyword-only `telegram: bool = False, telegram_env: Mapping[str, str | None] | None = None`; every existing call stays valid. Flag off: telegram_env is ignored entirely (not validated, fields None). Flag on, after all existing checks: strip both values; one ConfigError naming every missing/blank variable with the TD-10 wording (singular when one is missing) and 'See README > Telegram delivery > Telegram setup.'; malformed token -> the TD-10 token message, malformed chat ID -> the TD-10 chat-ID message; neither ever echoes the value. safe_summary() always hides telegram_bot_token and telegram_chat_id and hides telegram while False, so the flag-off key set still equals tests/fixtures/flag_off_safe_summary_keys.json. Do not touch .env.example (T064 owns it) and do not call reveal() here (AST rule from T049). Run tests/test_config.py, tests/test_config_fetch.py and tests/test_flag_off_identity.py after the change. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-9, TD-10, TD-12, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T050 \u2014 config.py: SecretToken, Telegram settings, fail-fast validation, safe_summary hiding' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": [
+      "T048"
+    ],
+    "output_files": [
+      "newsletter_digest/src/newsletter_digest/config.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "SecretToken never shows its value via repr/str/format/f-string and refuses pickling; repr(Settings) contains no token",
+      "Settings.build with telegram=False ignores telegram_env completely (a malformed TELEGRAM_BOT_TOKEN does not raise)",
+      "With telegram=True each missing/blank combination, a malformed token and a malformed or non-positive chat ID raise ConfigError naming the variable and the README section without echoing the value",
+      "safe_summary() flag-off keys equal the golden; flag-on shows telegram: True only",
+      "Existing config tests and the identity test pass unchanged; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T051",
+    "title": "telegram.py: Bot API sendDocument client with retries, deadlines and redaction",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Implement src/newsletter_digest/telegram.py per TD-7, TD-8 and TD-9 (imports only newsletter_digest.config for SecretToken; httpx, anyio, stdlib). Constants exactly as TD-8/TP-5. TelegramClient is an async context manager: __aenter__ calls install_log_redaction(), registers the token for redact() and builds ONE httpx.AsyncClient(transport=transport or _default_transport(), timeout=HTTP_TIMEOUT, trust_env=False, follow_redirects=False, headers={\"User-Agent\": USER_AGENT}) with no verify= argument; __aexit__ always awaits aclose(). _default_transport() returns httpx.AsyncHTTPTransport(retries=0) and is the only real-transport factory. send_document POSTs to f\"{TELEGRAM_API_BASE}/bot{token.reveal()}/sendDocument\" built inside one private method (the only reveal() in the package; never stored on self, logged or put in an exception) with data={chat_id, caption} and files={\"document\": (filename, content, \"application/pdf\")}; no parse_mode, no caption_entities; caption re-truncated to MAX_CAPTION_CHARS. Classify every response per the TD-8 table (HTTP status first; JSON error_code only for 200 with ok false; retry_after accepted only as int 0..3600), retry only the 'yes' rows, at most max_attempts, backoff BACKOFF_S or retry_after (<= RETRY_AFTER_CAP_S, larger fails at once), anyio.fail_after(attempt_deadline) per attempt, total anyio.move_on_after(total_deadline) and stop early when the next delay exceeds the remaining budget (DEADLINE kind carries the last error). All sleeping through the injected sleep. Exception discipline: inside `except httpx.HTTPError` record only type(exc).__name__ and redact(str(exc)); raise TelegramError AFTER leaving the except block so __cause__ and __context__ are None; never call raise_for_status. Descriptions: redact(), control characters stripped, truncated to 200 chars. redact(): regex bot\\d+:[A-Za-z0-9_-]+ -> bot*** plus every registered token's full value and secret half -> ***. install_log_redaction() is idempotent and attaches one _RedactingFilter to each of the six REDACTED_LOGGERS (record.msg = redact(record.getMessage()); record.args = None); logger levels unchanged. Owns V27 and V28 (probe with MockTransport and a scratch script; no real request to api.telegram.org). Smoke-check with a scratch MockTransport script using the fixture token 123456789:TESTtoken_secret-AAAAAAAAAAAAAAAAAAAAAAAAAA (T056 writes the real tests). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-7, TD-8, TD-9, TD-13, TD-16, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T051 \u2014 telegram.py: Bot API sendDocument client with retries, deadlines and redaction' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": [
+      "T048",
+      "T049",
+      "T050"
+    ],
+    "output_files": [
+      "newsletter_digest/src/newsletter_digest/telegram.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Fixed https://api.telegram.org base with no override parameter; AsyncClient built once with trust_env=False and follow_redirects=False; only _default_transport builds a real transport",
+      "Every TD-8 table row maps to the specified kind, retry decision and user text; at most 3 attempts; retry_after honoured up to 30 s; 120 s total budget",
+      "No httpx exception escapes or is chained; raise_for_status never used; the token is revealed in exactly one place",
+      "redact() and the six logger filters remove the token and its secret half from httpx/httpcore records; filter install is idempotent",
+      "The client is always closed; T049 architecture rules and the full suite pass; V27 and V28 filled; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T052",
+    "title": "pdf.py: plain-text PDF builder over ReadingList (fpdf2, DejaVu, safe links)",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Implement src/newsletter_digest/pdf.py per TD-4, TD-5 and TD-6 (imports newsletter_digest.models and render.safe_url only; fpdf at module level; stdlib). pdf_text(value) applies the four TD-4 steps (NFC; Cc/Zl/Zp to space, collapse, strip; drop Cf and variation selectors; each maximal run of code points missing from BOTH bundled fonts -> one U+FFFD), coverage = regular.cmap & bold.cmap computed once and cached (fontTools getBestCmap fallback per TD-16 only if the attribute moved; record it). layout_reading_list(rl) -> list[Block] is pure (no fpdf) and follows the TD-6 content order exactly: header lines, Must read (only when ranked and non-empty), by_topic() groups titled '<Topic> (<count>)', per item: title (link = safe_url(item.url)), fetched summary + key points else item.summary when non-empty, meta line (sources ', ' joined, date, 'mentioned in N' only when N > 1, priority with '-' as space), fetch note using FETCH_NOTE_VERBS (skipped for DUPLICATE), 'Why: <reason>'; empty-state messages; final 'Generated YYYY-MM-DD HH:MM.' line. Mirror the HTML template wording (read templates/reading_list.html.j2 and render.py; do not edit them). Never include fetched.full_text, mark-read keys, TOC links or images. draw_pdf(blocks, *, title, created_at) -> bytes: FPDF(unit='mm', format=(100, 178)), set str_alias_nb_pages = None right after construction, margins 6/8 mm, auto page break 8 mm, add_font for the two bundled TTFs from Path(__file__).with_name('fonts'), TD-6 typography and colours, title orphan control with will_page_break, start_section per section, footer page number only, set_display_mode(zoom='fullwidth', layout='continuous'), set_title/set_lang('en')/set_creation_date(created_at), no author/subject/keywords from content; every multi_cell/cell call passes explicit markdown=False and link only from a safe_url result; never write_html, image, embed_file, file_attachment_annotation, set_text_shaping or alias_nb_pages. build_pdf(rl) = draw_pdf(layout_reading_list(rl), title=f'Newsletter reading list {end_date}', created_at=meta.generated_at). Owns V23-V26 (probe with pypdf in a scratch script: annotations, {nb} literal, determinism, missing-glyph log silence on hostile text, 100 items under 5 s). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-3, TD-4, TD-5, TD-6, TD-16, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T052 \u2014 pdf.py: plain-text PDF builder over ReadingList (fpdf2, DejaVu, safe links)' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": [
+      "T048"
+    ],
+    "output_files": [
+      "newsletter_digest/src/newsletter_digest/pdf.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "layout_reading_list output follows the TD-6 order and fields and never contains full_text; wording mirrors the template",
+      "All text passes through pdf_text; uncovered runs become U+FFFD; no exception on emoji, CJK, RTL, Devanagari, NUL or bidi overrides",
+      "Link annotations are created only for safe_url(...) http(s) results; {nb} stays literal; markdown=False everywhere; no banned fpdf API used",
+      "Two builds with the same input are byte-identical; 100 items build in under 5 s; no network access during build",
+      "pdf imports only models and render from the package; T049 rules and full suite pass; V23-V26 filled; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T053",
+    "title": "delivery.py: build, atomic write, size gate, caption and send orchestration",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Implement src/newsletter_digest/delivery.py per TD-1 steps 5-8, TD-6 (file rules), TD-9 (own logging) and TD-11 (caption, DeliveryOutcome); imports pdf, telegram, models, config only. DeliveryOutcome(pdf_path: Path | None, delivered: bool, reason: str | None, attempts: int), frozen dataclass; reason is redacted with no trailing period. pdf_path_for(html_path) = html_path.with_suffix('.pdf'). build_caption(rl): ranked 'Newsletter digest: last <window> - <n> article(s), <m> must-read', unranked '... - <n> article(s), unranked', empty '... - no articles found'; correct singular/plural; only meta.window and counts, never titles or model/email text; <= MAX_CAPTION_CHARS. async deliver_reading_list(reading_list, html_path, settings, *, client_factory=TelegramClient, builder=build_pdf): (1) build bytes with builder (run in a worker thread via anyio.to_thread.run_sync is allowed; record the choice); any Exception -> outcome with reason 'could not build the PDF (<ExcClass>)', pdf_path None unless a previous same-day PDF exists (do not report a stale file as new; record the rule). (2) Atomic write to '<name>.pdf.part' then os.replace; the .part file is removed on any failure; the HTML is never touched. (3) If len(pdf) > MAX_UPLOAD_BYTES: no upload, reason states the size and the 50 MB limit. (4) async with client_factory(settings.telegram_bot_token) as client: send_document(settings.telegram_chat_id, pdf_path.name, pdf, caption). TelegramError -> outcome with str(err) and err.attempts; any other Exception -> redact(f'{type(exc).__name__}: {exc}'), DEBUG traceback only as redact(''.join(traceback.format_exception(exc))), never exc_info=. Logging on newsletter_digest.delivery per TD-9: INFO 'PDF written: <path> (<KB> KB, <pages> pages)' (page count without parsing the PDF is acceptable as unknown; record) and 'Sending the PDF to Telegram', WARNING per failed attempt is emitted by the client or here (decide, no duplicates), chat ID only at DEBUG, never the token or URL. A delivery failure must never raise out of deliver_reading_list for expected cases. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-1, TD-6, TD-9, TD-11, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T053 \u2014 delivery.py: build, atomic write, size gate, caption and send orchestration' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": [
+      "T050",
+      "T051",
+      "T052"
+    ],
+    "output_files": [
+      "newsletter_digest/src/newsletter_digest/delivery.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "PDF written atomically next to the HTML as <base>.pdf, overwriting a same-day file; no .part left after success or failure; HTML untouched",
+      "Oversize PDFs are saved but not uploaded and produce a size reason",
+      "Caption matches the three TD-11 variants and contains only fixed words, the window label and digits",
+      "Every failure (build, write, oversize, TelegramError, unexpected Exception) returns a DeliveryOutcome with a redacted one-line reason; no token or URL logged",
+      "client_factory and builder seams work with a MockTransport client; T049 rules and full suite pass; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T054",
+    "title": "cli.py wiring: --telegram flag, fail-fast env read, lazy delivery import, exit code 3",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Wire delivery into src/newsletter_digest/cli.py per TD-11 and TD-12. Add `--telegram` (is_flag=True, NO envvar) with the TD-11 help text including the privacy sentence; add the parameter to digest(); the digest docstring names TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID; the module docstring lists exit codes 0/1/2/3. Pass `telegram=telegram, telegram_env={n: os.environ.get(n) for n in TELEGRAM_ENV_VARS} if telegram else None` to Settings.build (env never read with the flag off). Keep the existing order and add, after `--open`: `if settings.telegram: _deliver_to_telegram(reading_list, path, settings)`. _deliver_to_telegram: inside try, the ONLY nested import `from newsletter_digest.delivery import deliver_reading_list` (plus a nested import of telegram.redact where needed), then anyio.run(partial(deliver_reading_list, reading_list, html_path, settings)); `except Exception` (including ImportError) builds a failed outcome with redact(f'{type(exc).__name__}: {exc}') (if redact itself cannot be imported, use only the exception class name). If outcome.pdf_path is set and exists, click.echo(str(pdf_path)) (stdout line 2). Success: stderr 'Sent <pdf name> to Telegram.' and exit 0. Failure: stderr 'Telegram delivery failed (<reason>). Saved: <html path>[, <pdf path>]. See README > Telegram delivery.' printed with markup=False, highlight=False, then click.get_current_context().exit(3); no traceback. Do not import delivery, pdf, telegram or fpdf at module level (T049 rule). Do not edit tests/test_cli.py (T060 adds --telegram to ALL_OPTIONS; the existing help test only checks listed options). Owns V29 (subprocess `python -c 'import newsletter_digest.cli, sys; print(\"fpdf\" in sys.modules, \"PIL\" in sys.modules)'`) and V30. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-1, TD-11, TD-12, TD-14, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T054 \u2014 cli.py wiring: --telegram flag, fail-fast env read, lazy delivery import, exit code 3' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_coder",
+    "status": "pending",
+    "blocked_by": [
+      "T050",
+      "T053"
+    ],
+    "output_files": [
+      "newsletter_digest/src/newsletter_digest/cli.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "--telegram exists with no envvar and the privacy help text; flag-off runs read no TELEGRAM_* variable and import no delivery module or fpdf",
+      "Missing/invalid Telegram variables with the flag exit 2 before run_digest",
+      "Flag on: HTML written and reported as today, then PDF path on stdout line 2; success exits 0 with the 'Sent' line; any delivery failure exits 3 with the one-line D-T3 message and no traceback; run failure still exits 1 with nothing sent",
+      "`import newsletter_digest.cli` loads neither fpdf nor PIL (V29); V30 filled",
+      "Existing CLI tests, identity tests and T049 rules pass; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T055",
+    "title": "Tests for Telegram settings: SecretToken, fail-fast validation, safe_summary",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Write tests/test_config_telegram.py (new file) for T050 (TD-10, TD-13 list). Cover: every missing/blank combination of TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID with telegram=True (message names exactly the missing variable(s), singular/plural, and 'Telegram delivery' and 'Telegram setup'); whitespace-only values; malformed tokens (no colon, short secret, '/', '?', '#', '..', spaces, unicode) and chat IDs (0, negative, '-100...' group IDs, non-digits, leading zero) rejected without the value appearing in the message; valid values stripped; flag off ignores a malformed env entirely; precedence (existing API-key error still first); SecretToken repr/str/format/f-string/'%s' all '***', pickling raises, reveal() returns the value; repr(settings) and str(settings) without the fixture token 123456789:TESTtoken_secret-AAAAAAAAAAAAAAAAAAAAAAAAAA or its secret half; safe_summary hiding (flag-off keys equal the golden, flag-on shows telegram True and never token/chat ID). Mutation-check at least two properties in a scratch script (learnings T015). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-9, TD-10, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T055 \u2014 Tests for Telegram settings: SecretToken, fail-fast validation, safe_summary' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T050"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_config_telegram.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Each FR-039 combination and each malformed-value class is covered with message assertions and no value echo",
+      "SecretToken and Settings repr/str never contain the token; pickling refused",
+      "safe_summary hiding asserted for flag off and on",
+      "`uv run pytest tests/test_config_telegram.py -q` and the full suite pass; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T056",
+    "title": "Offline Telegram client tests (MockTransport) and suite-wide real-transport guard",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Write tests/test_telegram.py (new) and add ONE autouse fixture to tests/conftest.py (additive; existing anyio_backend fixture unchanged) that monkeypatches newsletter_digest.telegram._default_transport to raise AssertionError('real Telegram transport constructed in tests'); conftest must not import pdf or fpdf. tests/test_telegram.py has an autouse socket guard (socket.socket.connect, socket.create_connection, socket.getaddrinfo raise) and uses only httpx.MockTransport with async handlers via the transport= seam and a recording fake sleep. Cover every TD-8 table row (200 ok, 3xx not followed, 400 chat, 400 other, 401, 403, 404, 413, 429 with retry_after <= 30 / > 30 / missing / invalid types and out-of-range values, 5xx, other 4xx, 200 ok:false, non-JSON 2xx, httpx.ConnectError/ReadTimeout/WriteTimeout/RemoteProtocolError, per-attempt timeout, total deadline with a slow handler and tiny budget); the retry cap and recorded delays (2, 4, retry_after); stop when the delay exceeds the remaining budget; the request shape (POST, https, host api.telegram.org, path /bot<token>/sendDocument, multipart chat_id/caption/document, filename, application/pdf, NO parse_mode field, User-Agent, caption truncated to 1024); aclose on success and error; and client-level redaction: with the fixture token 123456789:TESTtoken_secret-AAAAAAAAAAAAAAAAAAAAAAAAAA, caplog at DEBUG on root, httpx and every httpcore.* logger, assert the token and its secret half appear in no record, no str/repr/formatted traceback of TelegramError, and that __cause__ and __context__ are None; redact() unit cases; install_log_redaction idempotent (one filter per logger after repeated calls); the conftest guard itself (calling _default_transport raises). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-7, TD-8, TD-9, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T056 \u2014 Offline Telegram client tests (MockTransport) and suite-wide real-transport guard' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T051"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_telegram.py",
+      "newsletter_digest/tests/conftest.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Every TD-8 row, the retry cap, retry_after handling and both deadlines are tested offline in zero real sleep time",
+      "Request shape asserted including the absence of parse_mode and the fixed host",
+      "Token appears in no log record or exception text; exceptions are not chained",
+      "conftest autouse guard makes any real transport construction fail suite-wide",
+      "No test opens a socket; the full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T057",
+    "title": "PDF builder tests: structure, Unicode, hostile input, annotations, determinism",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Write tests/test_pdf.py (new) for T052 per the TD-13 list, with an autouse socket guard (also proves FR-045 'no network'). Use tests/flag_off_fixture.py builders and new fixtures built inside the test file (do not edit the fixture module). Block-level tests on layout_reading_list: Must read first then by_topic order, unranked, both empty states, fetch-on items (summary + key points, fetch notes with the right verb, DUPLICATE silent), every FR-041 field, the badge only when N > 1, no full_text anywhere. PDF-level tests with pypdf: hostile fixtures (<script>, javascript:/data:/vbscript: URLs, **x**, __u__, <b>, {nb}, unbalanced parentheses, endstream/%%EOF, NUL, bidi overrides) produce a valid PDF with literal text and no non-http(s) annotation; emoji, ZWJ family, flag, CJK, Arabic, Hebrew, Devanagari, Cyrillic and 600-character unbroken titles/URLs build without error; every /Annots entry is /S /URI with an http(s) URI and the count is at least the number of linkable items; pdf_text unit cases (U+FFFD runs, Cf removal, whitespace); determinism (two builds byte-identical); no record on logger 'fpdf' about missing glyphs for the hostile fixture; test_font_coverage_sanity (U+0416 covered, U+4E2D not); font sha256 pins for both TTFs and fonts/LICENSE present; 100 items build in under 5 s; page size 100 x 178 mm. Compare extracted text after whitespace normalisation (RTL comes out visually reversed, TD-3). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-3, TD-4, TD-5, TD-6, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T057 \u2014 PDF builder tests: structure, Unicode, hostile input, annotations, determinism' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T052"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_pdf.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Structure, field and exclusion tests pass on Block lists and extracted text",
+      "Hostile and Unicode fixtures give valid PDFs, literal text, only http(s) /URI annotations, no missing-glyph log",
+      "Determinism, font sha256 pins, coverage sanity and the 5 s performance bound are asserted",
+      "Runs with sockets blocked; full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T058",
+    "title": "HTML/PDF parity test over the same ReadingList",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Write tests/test_render_pdf_parity.py (new) per TD-5: render the ranked, unranked and empty fixtures from tests/flag_off_fixture.py plus one fetch-on fixture (built in the test) both ways; parse the HTML with lxml (already a dependency) and extract the PDF text with pypdf; assert the same section order and item titles per section, the same summaries or key points, sources, dates, 'mentioned in N' badges, priority reasons and fetch notes, and that no 'Read here' label or full_text string occurs in the PDF. Normalise whitespace and line wrapping before comparing; match Unicode-degraded text through pdf.pdf_text on the HTML side. Autouse socket guard. Do not edit render.py or the template. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-5, TD-6, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T058 \u2014 HTML/PDF parity test over the same ReadingList' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T052"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_render_pdf_parity.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Section order, titles and per-item fields match between HTML and PDF for all four fixtures",
+      "No Read-here text or full_text in the PDF",
+      "Full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T059",
+    "title": "Delivery orchestration tests: naming, atomic write, size gate, caption, outcomes",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Write tests/test_delivery.py (new) for T053 per TD-13, with an autouse socket guard and clients built by a client_factory wired to httpx.MockTransport and a fake sleep. Cover: pdf_path_for naming beside the HTML; same-day overwrite; atomic write (no .part left after success, build failure, write failure via a read-only dir or patched os.replace); HTML bytes unchanged in every path; oversize (builder returns b'%PDF' + 50_000_001 zero bytes) saved but never sent (handler asserts not called) with the size reason; builder raising -> failed outcome; caption variants (ranked, unranked, empty, singular/plural) matched against a fixed regex of digits and fixed words and <= 1024 chars, with hostile titles in the list never appearing in the caption; outcome mapping for success, 401, 429 exhausted, network error and an unexpected exception from the client; the filename sent equals pdf_path.name; the token fixture never appears in outcome.reason or caplog. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-6, TD-11, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T059 \u2014 Delivery orchestration tests: naming, atomic write, size gate, caption, outcomes' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T053"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_delivery.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Naming, overwrite and atomic-write rules asserted, HTML never altered",
+      "Oversize and build-failure paths never upload and return the right reasons",
+      "Caption is counts-only for every variant",
+      "Outcome mapping covers success and every failure class; full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T060",
+    "title": "CLI tests for --telegram: exit codes 0/1/2/3, output lines, ordering",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Write tests/test_cli_telegram.py (new) and append \"--telegram\" to ALL_OPTIONS in tests/test_cli.py (the only edit to that file). Patch run_digest with the deterministic fixture and inject the transport by monkeypatching newsletter_digest.delivery.deliver_reading_list with functools.partial(original, client_factory=<factory returning TelegramClient(token, transport=httpx.MockTransport(handler), sleep=<recording fake>)>) (the lazy `from ... import` in cli reads the patched attribute; defaults are bound at def time, so patching TelegramClient alone would not work); never a real transport. Cover: exit 2 for each missing/blank/malformed TELEGRAM_* combination with run_digest asserted not called and the message naming the variable and README section; exit 0 with exactly two stdout lines (HTML path, PDF path) and the 'Sent <name> to Telegram.' stderr line, one sendDocument call to api.telegram.org; exit 3 with the D-T3 line naming both paths for 401, network error, and oversize (PDF path present) and for a PDF build failure (HTML path only); exit 3 when importing delivery fails (simulate ImportError via sys.modules patching) with no traceback; exit 1 when the run fails and delivery not called; --open is invoked before delivery (call-order recorder); --help shows --telegram with no env var and the privacy text; the TELEGRAM_* env is not read with the flag off (patched os.environ access or invalid values). Collapse whitespace before substring checks (Rich wraps at 80 columns, learnings T016). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-11, TD-12, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T060 \u2014 CLI tests for --telegram: exit codes 0/1/2/3, output lines, ordering' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T054"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_cli_telegram.py",
+      "newsletter_digest/tests/test_cli.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Exit 0/1/2/3 behaviour asserted for every TD-11 case with stdout/stderr content",
+      "Ordering: HTML written and --open before delivery; nothing sent on run failure",
+      "tests/test_cli.py differs from 5b9f838 only by the added ALL_OPTIONS entry",
+      "Full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T061",
+    "title": "End-to-end token-redaction tests across logs, output and exceptions",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Write tests/test_telegram_redaction.py (new) implementing the TD-9 test matrix end to end through the CLI with the fixture token 123456789:TESTtoken_secret-AAAAAAAAAAAAAAAAAAAAAAAAAA in TELEGRAM_BOT_TOKEN (monkeypatched env, never .env) and a MockTransport-backed client injected as in T060 (patched deliver_reading_list partial): success, 401, 404, timeout, network error (ConnectError whose request.url holds the token), 429 exhausted, 5xx exhausted, 3xx redirect, a Telegram description that echoes the token, and an unexpected exception raised inside delivery whose message contains the token. For each: run with --log-level DEBUG, capture caplog at DEBUG on the root, newsletter_digest, httpx and every httpcore.* logger (records emitted through the real httpx logger path, i.e. the MockTransport still triggers httpx's INFO 'HTTP Request' log), CliRunner stdout and stderr, the HTML and PDF bytes written (PDF text via pypdf), and the str/repr/formatted traceback of any exception; assert neither the token nor its secret half appears anywhere after removing all whitespace (Rich folds long tokens). Also assert the filters are attached to all six loggers and that a user-added handler on 'httpx' at INFO sees the redacted URL ('bot***'). Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-9, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T061 \u2014 End-to-end token-redaction tests across logs, output and exceptions' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T054"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_telegram_redaction.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Token and secret half absent from all logs, stdout, stderr, files and exception text on every listed path",
+      "httpx's own INFO URL record is shown redacted, proving the logger filter path",
+      "Full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T062",
+    "title": "Flag-off identity: subprocess no-fpdf-import test and in-process flag-off checks",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Add new test functions to tests/test_flag_off_identity.py (additive only; existing tests and the goldens unchanged) per TD-12: (1) a subprocess test running `sys.executable` on a script file written to tmp_path (not `-c`, learnings T016; drop COV_*/COVERAGE_* env, run from tmp_path cwd so no .env is found) that patches run_digest with the deterministic fixture, invokes the CLI through CliRunner without --telegram, and asserts exit 0, exactly one stdout line, and that fpdf, PIL, newsletter_digest.delivery, newsletter_digest.pdf and newsletter_digest.telegram are absent from sys.modules; (2) in-process: deliver_reading_list and telegram._default_transport monkeypatched to raise, CLI without --telegram exits 0 and neither was called, and no *.pdf exists in the output dir; (3) TELEGRAM_BOT_TOKEN='not a token' and TELEGRAM_CHAT_ID='x' in the env still exit 0 flag-off; (4) the written HTML equals the ranked golden bytes and safe_summary() keys equal the golden with the TELEGRAM_* env set. Note: conftest imports telegram in-process, which is why (1) is a subprocess. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-12, TD-13, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T062 \u2014 Flag-off identity: subprocess no-fpdf-import test and in-process flag-off checks' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T054"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_flag_off_identity.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Subprocess test proves no fpdf/PIL/delivery/pdf/telegram import with the flag off",
+      "Flag-off CLI never calls delivery or builds a transport, writes no PDF and ignores malformed TELEGRAM_* env",
+      "Goldens and existing identity tests unchanged; git diff of the file shows only added lines",
+      "Full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T063",
+    "title": "Import-boundary tests: positive detectors for delivery modules and mutation proof",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Complete the TD-2 architecture tests in tests/test_architecture.py now that the code exists (builds on T049; additive except tightening T049's relaxed assertion): expected edges gain cli->delivery, delivery->{pdf, telegram, models, config}, pdf->{render, models}, telegram->config; `sorted(name for name, _ in async_client_sites(package)) == [\"fetch\", \"telegram\"]`; pdf imports fpdf; cli contains exactly one nested import of newsletter_digest.delivery inside _deliver_to_telegram; telegram defines _default_transport and it is the only AsyncHTTPTransport( site; .reveal() is called exactly once in telegram. Then prove each TD-2 rule (T049 and these) can fail on the REAL tree with scratch mutants of copies (learnings T042: override SOURCE_DIR from a scratch -p plugin): module-level delivery import in cli, delivery imported from tools, pdf importing telegram, telegram importing models, fpdf imported in delivery, markdown=True in pdf, write_html in pdf, AsyncClient in telegram without follow_redirects=False, reveal() in delivery. Record the mutation results in notes. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-2, TD-9, TD-12, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). Rules: existing test files are edited only in the hunks TP-6 item 2 allows; the flag_off_* goldens are never touched; tests/test_flag_off_identity.py and the full suite must stay green; type hints, docstrings on public APIs, 88 columns, `uv run ruff format <own files>`, `uv run ruff check .`, `uv run pyrefly check` clean. Append a '## T063 \u2014 Import-boundary tests: positive detectors for delivery modules and mutation proof' section to shared/implementation-notes.md (re-read first, own section and owned V-rows only) with decisions not covered by the spec, deviations and tradeoffs. Stage only your own files and commit in one command (conventional commit, scope newsletter_digest); check `git show --stat HEAD`; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T049",
+      "T050",
+      "T051",
+      "T052",
+      "T053",
+      "T054"
+    ],
+    "output_files": [
+      "newsletter_digest/tests/test_architecture.py",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Positive detectors see every new edge, the lazy cli import and both AsyncClient sites",
+      "Every TD-2 rule is shown to fail under a scratch mutation of the real tree (recorded in notes)",
+      "Full suite passes; ruff and pyrefly clean"
+    ]
+  },
+  {
+    "id": "T064",
+    "title": "README Telegram delivery and setup section; .env.example placeholders",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Document FR-052 from the TD-16 'README inputs' and the shipped code (check each claim against source and `uv run newsletter-digest --help`, learnings T018). README.md: add '## Telegram delivery' with a '### Telegram setup' subsection (exact heading text; the CLI messages point to both): @BotFather /newbot, name, username ending in 'bot', token secrecy and /token rotation; TELEGRAM_BOT_TOKEN in .env; open t.me/<bot> and press Start; chat-ID discovery with the TD-16 `uv run python -c` one-liner reading the token from .env (primary) and the `read -rs` + curl alternative with the warning not to paste the URL or output into shared logs, the empty-result hints (send /start again, 24 h, webhook); TELEGRAM_CHAT_ID (own positive chat ID only; groups/channels unsupported); running with --telegram; what is sent (PDF beside the HTML, counts-only caption examples); PDF limits (no CJK/Devanagari glyphs -> replacement marks, Arabic unjoined, no colour emoji); privacy note (titles, summaries, links and newsletter names go to Telegram; bot chats are not end-to-end encrypted); troubleshooting for 401/404, 400 chat not found, 403, 429, oversize and a possible duplicate message after a timeout. Update the existing CLI options table, environment variables table and '### Exit codes' (add 3) and the Privacy section. .env.example: append a commented block with one-line comments, `# TELEGRAM_BOT_TOKEN=` and `# TELEGRAM_CHAT_ID=` (no values; copying the file changes nothing); existing lines unchanged (tests/test_config.py and tests/test_config_fetch.py read it). Never read or copy .env. Run the full suite. Append a '## T064 \u2014 README Telegram delivery' section to shared/implementation-notes.md. Local commit only; never push. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-7, TD-10, TD-11, TD-14, TD-16, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). ",
+    "assigned_to": "documentation",
+    "status": "pending",
+    "blocked_by": [
+      "T054"
+    ],
+    "output_files": [
+      "newsletter_digest/README.md",
+      "newsletter_digest/.env.example",
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "README has '## Telegram delivery' and '### Telegram setup' covering every FR-052 item, with the safe chat-ID method first and the log warning",
+      "CLI options, env vars, exit codes (0/1/2/3) and privacy sections updated and consistent with --help and the code",
+      ".env.example gains only commented TELEGRAM_* placeholders; existing lines byte-identical",
+      "`uv run pytest -q` passes"
+    ]
+  },
+  {
+    "id": "T065",
+    "title": "Backend + security review: secrets and network (config, telegram, delivery, cli), PDF output safety",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Review src/newsletter_digest/config.py (SecretToken, Telegram validation), telegram.py, delivery.py, the cli.py delivery path and pdf.py, plus tests/test_telegram.py, tests/test_telegram_redaction.py, tests/test_pdf.py and tests/conftest.py, against shared/designs.md TD-7..TD-11, TD-13 and TD-14 and shared/plan.md TP-5. PRIMARY checklist (secrets and network): token revealed in exactly one place and never stored, logged, echoed in ConfigError, caption, HTML/PDF or outcome reasons; redact() regex and registered-token replacement (full value and secret half); filters on all six httpx/httpcore loggers, behaviour under user logging config; no exception chaining (__cause__/__context__), no raise_for_status, no exc_info= on delivery paths, DEBUG tracebacks redacted; token/chat-ID format validation prevents URL path injection; fixed https://api.telegram.org host, no base-URL override, follow_redirects=False, trust_env=False, TLS verification untouched, AsyncHTTPTransport(retries=0) only in _default_transport; timeouts, per-attempt and total deadlines, retry classification, retry_after parsing/capping, worst-case duration; duplicate-send risk; resource cleanup (aclose on every path, .part removal); multipart shape and no parse_mode; the conftest real-transport guard and socket guards actually block network. SECONDARY checklist (PDF output safety): plain-text only (markdown=False everywhere, no write_html/image/embed), {nb} alias disabled, pdf_text strips bidi overrides and controls, links only via safe_url, no remote resources, metadata not from content. Mutation-probe at least two guards with scratch scripts (e.g. drop a logger filter, chain an exception). Write shared/reviews/T065_review.md (verdict, severity-tagged findings with file:line). Blocking findings: set the owning task (T050/T051/T052/T053/T054) to review_feedback with concrete fix instructions; otherwise approve. Do not modify source code. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-7, TD-8, TD-9, TD-10, TD-11, TD-13, TD-14, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). ",
+    "assigned_to": "backend_reviewer",
+    "status": "pending",
+    "blocked_by": [
+      "T050",
+      "T051",
+      "T052",
+      "T053",
+      "T054",
+      "T056",
+      "T057",
+      "T061"
+    ],
+    "output_files": [
+      "newsletter_digest/shared/reviews/T065_review.md"
+    ],
+    "acceptance_criteria": [
+      "shared/reviews/T065_review.md exists with a verdict and severity-tagged findings",
+      "Each FR-047/FR-049/FR-050 and network NFR item is explicitly assessed with evidence; PDF output-safety items assessed",
+      "Blocking issues routed to the owning task as review_feedback; no source files modified by the reviewer"
+    ]
+  },
+  {
+    "id": "T066",
+    "title": "Architecture review of the Telegram PDF delivery amendment",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). Review the amendment as a whole against shared/designs.md TD-2, TD-5, TD-11, TD-12, TD-14..TD-16 and shared/plan.md TP-1..TP-6: layer order and the new tiers (delivery 1, pdf 4, telegram 6), only-allowed imports and importers, cli-level delivery after the HTML write, the single sanctioned lazy import and zero flag-off cost (subprocess test), flag-off byte identity (goldens untouched, render/template/models unchanged), separation of PDF layout from the HTML template and the parity test as drift control, injectable seams (transport, sleep, deadlines, client_factory, builder), exit-code policy consistency across cli, README and docstrings, dependency footprint (fpdf2 pin, pypdf dev-only, fonts and licence in the wheel), the LGPL and font-licence notes, and whether the enumerated edits to existing test files stayed within TP-6 item 2 (`git diff 5b9f838 -- newsletter_digest/tests/`). Write shared/reviews/T066_arch_review.md (verdict, findings with severity). Blocking findings: set the owning task to review_feedback; otherwise approve. Do not modify source code. Contract: shared/designs.md 'Telegram PDF delivery (2026-11-02)' TD-2, TD-5, TD-11, TD-12, TD-14, TD-15, TD-16, shared/verified_facts.md 'Telegram PDF delivery (2026-11-02)' and shared/plan.md 'Telegram PDF delivery (2026-11-02)' TP-5 (binding signatures) and TP-8 (process rules). ",
+    "assigned_to": "architecture_reviewer",
+    "status": "pending",
+    "blocked_by": [
+      "T050",
+      "T051",
+      "T052",
+      "T053",
+      "T054",
+      "T062",
+      "T063"
+    ],
+    "output_files": [
+      "newsletter_digest/shared/reviews/T066_arch_review.md"
+    ],
+    "acceptance_criteria": [
+      "shared/reviews/T066_arch_review.md exists with a verdict and findings",
+      "Layering, lazy import, flag-off identity, seams and dependency footprint explicitly assessed",
+      "Blocking issues routed as review_feedback; no source files modified"
+    ]
+  },
+  {
+    "id": "T067",
+    "title": "Final verification gate (Telegram delivery): pytest, ruff, pyrefly, CLI smoke, identity, manual e2e steps",
+    "description": "Project dir: /home/kasif/projects/agent-foundry/newsletter_digest (run every command from it; uv only, never pip; never read or touch .env or out/). After every T048-T066 task (including review_feedback fixes) is done, run: `uv sync`; `uv lock --check`; `uv run pytest -q` (0 failures, integration deselected); `uv run pytest tests/test_flag_off_identity.py tests/test_architecture.py tests/test_telegram.py tests/test_telegram_redaction.py tests/test_pdf.py -q` (report separately); `uv run ruff format --check src tests` (not '.', learnings T024); `uv run ruff check .`; `uv run pyrefly check`; `uv run newsletter-digest --help` (lists --telegram with no env var and the privacy text); from an empty cwd via `uv run --project /home/kasif/projects/agent-foundry/newsletter_digest newsletter-digest ...` (learnings T022): with OPENROUTER_API_KEY=dummy, --model x/y and --telegram but no TELEGRAM_* vars -> exit 2 naming both variables and the README section, and no npx/Gmail started; a malformed TELEGRAM_BOT_TOKEN -> exit 2 without echoing it; `/usr/bin/env -u` for unsetting (learnings T009 fix). Run `python -c 'import newsletter_digest.cli, sys; assert \"fpdf\" not in sys.modules'` via uv. `uv build --wheel` into the scratchpad contains fonts/*.ttf and fonts/LICENSE. Check that `git -C /home/kasif/projects/agent-foundry diff 5b9f838 -- newsletter_digest/tests/` modifies only tests/test_architecture.py, tests/test_cli.py (ALL_OPTIONS line), tests/conftest.py (one fixture) and tests/test_flag_off_identity.py (added tests), all other changes being added files; flag_off_* goldens unchanged since T023; models.py, render.py and the template unchanged since 5b9f838; fpdf2 locked at 2.8.x and pypdf only in the dev group; `git status` shows no .env, out/ or credentials staged; grep the repo diff for token-shaped strings other than the test fixture. Do NOT run the manual end-to-end (acceptance 24, needs a real bot); list for the user: create the bot and set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID per README > Telegram delivery > Telegram setup, then `uv run newsletter-digest --window 1w --max-emails 5 --telegram`, expect exit 0, the PDF path on stdout line 2, a phone-readable PDF with working links and the counts-only caption; also confirm the real token passes the format check (TD-16 re-verify) without logging it. Fix trivial test/format issues yourself; route source defects to the owning coder task as review_feedback with the failing output. Append '## T067 \u2014 final verification (Telegram delivery)' to shared/implementation-notes.md with each command's result. Local commit only if files changed; never push.",
+    "assigned_to": "python_test",
+    "status": "pending",
+    "blocked_by": [
+      "T055",
+      "T056",
+      "T057",
+      "T058",
+      "T059",
+      "T060",
+      "T061",
+      "T062",
+      "T063",
+      "T064",
+      "T065",
+      "T066"
+    ],
+    "output_files": [
+      "newsletter_digest/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "`uv run pytest` passes offline with 0 failures, including identity, architecture, telegram, redaction and PDF tests",
+      "`uv run ruff format --check src tests`, `uv run ruff check .` and `uv run pyrefly check` are clean (any suppression justified in notes)",
+      "CLI help shows --telegram; missing or malformed Telegram variables exit 2 before any Gmail work; cli import loads no fpdf; wheel contains the fonts and licence",
+      "Existing test changes limited to the TP-6 item 2 hunks; goldens, models, render and template unmodified; no secrets, .env or out/ committed",
+      "implementation-notes has a T067 section with results and the manual end-to-end steps for the user"
+    ]
   }
 ]

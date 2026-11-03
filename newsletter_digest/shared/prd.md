@@ -244,3 +244,27 @@ Open architecture decisions (article fetching, added 2026-11-01 by design; see `
 - Summary output format: tolerant JSON parse of plain model output (recommended) vs `with_structured_output`/`response_format`. Revisit if `SUMMARY_FAILED` is frequent on the free reader model.
 - Design additions beyond FR-035, to confirm at plan approval: `NEWSLETTER_FETCH_LLM_INTERVAL` (3.1 s pacing between call starts for `:free` models, under OpenRouter's 20 RPM free limit), a run-level 429 breaker, and `Accept-Encoding: identity` with a bounded gzip/deflate decoder.
 - Risk: OpenRouter free tier allows 50 requests/day for accounts with under 10 credits purchased, which the agent run alone may exhaust. The README must say so.
+
+Open architecture decisions (Telegram PDF delivery, added 2026-11-02 by design; see `shared/designs.md` "Telegram PDF delivery (2026-11-02)", TD-15 and TD-16). Q-T4 to Q-T6 are resolved there:
+- Q-T4 is resolved:
+  - library: fpdf2 `>=2.8.9,<2.9` (LGPL-3.0-only, locked 2.8.9);
+  - font: bundled DejaVu Sans 2.37 Regular and Bold (Bitstream Vera licence permits bundling, notice shipped). Unsupported characters become U+FFFD;
+  - builder: a separate PDF builder over `ReadingList`, with an HTML/PDF parity test.
+- Q-T5 is resolved (Bot API 10.3):
+  - `sendDocument` up to 50 MB;
+  - caption 0-1024 characters;
+  - `parse_mode` is `MarkdownV2`, `HTML` or `Markdown` (not sent);
+  - `ResponseParameters.retry_after` is an integer number of seconds;
+  - chat ID comes from `getUpdates` `message.chat.id` after pressing Start.
+- Q-T6 is resolved: `<out>/reading-list-<end_date>.pdf` beside the HTML, written atomically and overwritten the same day. Large lists are sent as is (no splitting). An oversize PDF is skipped with exit 3.
+- Open, none blocking:
+  - (a) optional user-supplied fallback font for CJK/Indic (recommended: not in v1);
+  - (b) LGPL fpdf2 vs BSD reportlab (recommended: fpdf2; the swap is isolated);
+  - (c) retry after a read timeout may duplicate the message (recommended: accept and document).
+- Design additions to confirm at plan approval:
+  - the PDF path is printed as a second stdout line with `--telegram`;
+  - the unranked caption variant `..., unranked`;
+  - the chat ID must be a positive integer (own chat only), and the token format is validated without echoing it;
+  - no base-URL seam (`httpx.MockTransport` only);
+  - one sanctioned lazy import of `delivery` in `cli`;
+  - dev dependency `pypdf>=6.21,<7` for PDF tests.

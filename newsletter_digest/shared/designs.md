@@ -1337,3 +1337,889 @@ and other download helpers are never referenced, and the layer-order import test
 | OpenRouter `xingchen-agi/xing4.0-29b-a4b:free` | - | - | - | context 262,144; free; supports `response_format`, `structured_outputs`, `reasoning`; free tier 20 RPM, 50/day (<10 credits) or 1000/day |
 
 DESIGN_COMPLETE
+
+
+---
+
+# Telegram PDF delivery (2026-11-02)
+
+Amendment design for PRD FR-037 to FR-052, the "Telegram delivery" NFRs, approved decisions
+D-T1 to D-T3 (Q-T1 to Q-T3), and design questions Q-T4 to Q-T6. Everything above this line
+is approved and unchanged.
+
+How the facts were checked (2026-11-02):
+- PyPI JSON API for package metadata.
+- Throwaway `uv run --no-project --with ...` environments (Python 3.12 and 3.13) with
+  sockets disabled, to probe fpdf2, pypdf, httpx and httpcore behaviour.
+- A dry `uv add` in a scratch copy of `pyproject.toml` and `uv.lock`. Nothing was installed
+  into the project and nothing was installed with pip.
+- The official Telegram pages `core.telegram.org/bots/api`, `/bots/faq`, `/bots/features`
+  and `telegram.org/faq`.
+
+The sources are listed in `shared/verified_facts.md` under "Telegram PDF delivery
+(2026-11-02)". Items marked **[re-verify]** must be re-checked against what `uv add` pins and
+recorded in `shared/implementation-notes.md` (FR-022).
+
+## TD-1 Flow Design
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant CLI as cli.digest
+    participant CFG as Settings.build
+    participant RUN as run_digest (unchanged)
+    participant R as render.write_reading_list (unchanged)
+    participant D as delivery.deliver_reading_list
+    participant P as pdf.build_pdf
+    participant T as telegram.TelegramClient
+    U->>CLI: newsletter-digest --window 1w --telegram
+    CLI->>CFG: telegram=True, telegram_env={TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID}
+    CFG-->>CLI: ConfigError -> exit 2 (before any Gmail/LLM work)
+    CLI->>RUN: anyio.run(run_digest, settings)
+    RUN-->>CLI: ReadingList (exception -> exit 1, nothing sent)
+    CLI->>R: write HTML (unchanged bytes)
+    CLI->>CLI: _report, echo HTML path, --open
+    CLI->>D: lazy import + anyio.run(deliver_reading_list, ...)
+    D->>P: build_pdf(reading_list) -> bytes (pure, no network)
+    D->>D: atomic write <out>/reading-list-<end_date>.pdf
+    D->>D: size <= 50 MB? caption from counts only
+    D->>T: send_document(chat_id, filename, bytes, caption)
+    T->>T: <=3 attempts, timeouts, 429 retry_after, 120 s deadline
+    T-->>D: SendResult | TelegramError (redacted)
+    D-->>CLI: DeliveryOutcome
+    CLI-->>U: stdout: PDF path; stderr: "Sent ..." -> exit 0, or one-line failure -> exit 3
+```
+
+Steps with the flag on:
+1. **Config (fail fast, FR-039).** `cli` reads `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+   from `os.environ` only when `--telegram` is set. `Settings.build` validates them. A
+   missing, blank or malformed value raises `ConfigError`, which becomes a
+   `click.UsageError` and exit 2. This happens before `run_digest`, so no npx, Gmail or LLM
+   work starts.
+2. **Digest.** `run_digest` and `write_reading_list` are unchanged. If the run raises, the
+   CLI exits 1 as today and nothing is built or sent (FR-040). The zero-email empty state
+   still writes an HTML file (D7), so it is delivered with the empty-state caption.
+3. **Report.** `_report`, then the HTML path on stdout, then `--open` as today. The browser
+   opens before the delivery, which can take up to 120 s.
+4. **Deliver.** `_deliver_to_telegram` does the only nested import in `cli`
+   (`from newsletter_digest.delivery import deliver_reading_list`; see TD-12), then runs
+   `anyio.run(partial(deliver_reading_list, reading_list, html_path, settings))`.
+5. **PDF.** `delivery` builds the PDF bytes from the same in-memory `ReadingList` the HTML
+   was rendered from, then writes them atomically next to the HTML (`.pdf.part`, then
+   `os.replace`). A build or write failure is a delivery failure: the HTML stays, and there
+   is no PDF or only the previous same-day one (exit 3).
+6. **Size gate (FR-048).** If `len(pdf) > 50_000_000`, the upload is skipped: the PDF is
+   saved, the message says it is too large, and the exit code is 3.
+7. **Send.** `TelegramClient.send_document` sends a multipart `sendDocument` with
+   `chat_id`, the `document` file part (the PDF's own file name, `application/pdf`) and a
+   plain-text `caption` with no `parse_mode` (TD-8).
+8. **Outcome.** On success, the PDF path goes to stdout (line 2) and
+   `Sent reading-list-<date>.pdf to Telegram.` goes to stderr, with exit 0. On failure, the
+   PDF path still goes to stdout if the file was written, then a one-line D-T3 message goes
+   to stderr, with exit 3 and no traceback.
+
+With the flag off the run is exactly today's: steps 1 and 4 to 8 do not happen, and no
+delivery module or PDF library is imported (TD-12).
+
+## TD-2 Components, modules and layer order
+
+New modules (under `src/newsletter_digest/`):
+
+| Module | Responsibility | Project imports | External |
+|---|---|---|---|
+| `pdf.py` | Pure PDF builder: `pdf_text` (sanitiser), `layout_reading_list(rl) -> list[Block]`, `draw_pdf(blocks, *, title, created_at) -> bytes`, `build_pdf(rl) -> bytes`, the page/font constants and `FETCH_NOTE_VERBS` | `models`, `render` (`safe_url` only) | `fpdf` (fpdf2), stdlib |
+| `telegram.py` | Bot API client: `TelegramClient` (async CM owning one `httpx.AsyncClient`), `send_document`, response classification, retry loop, `TelegramError`/`TelegramErrorKind`, `SendResult`, `redact`, `install_log_redaction`, `_default_transport()` | `config` (`SecretToken` only) | `httpx`, `anyio`, stdlib |
+| `delivery.py` | Orchestration: `deliver_reading_list(...) -> DeliveryOutcome`, `pdf_path_for(html_path)`, `build_caption(rl)`, atomic write, size gate | `pdf`, `telegram`, `models`, `config` | `anyio`, stdlib |
+| `fonts/` (package data) | `DejaVuSans.ttf`, `DejaVuSans-Bold.ttf`, `LICENSE` (DejaVu licence, verbatim) | - | - |
+
+Changed modules:
+- `config.py`: `SecretToken`, the `TELEGRAM_ENV_VARS` and `TELEGRAM_SUMMARY_FIELDS`
+  constants, three `Settings` fields, `Settings.build(..., telegram=False,
+  telegram_env=None)` and `safe_summary` hiding (TD-10). It stays pure stdlib.
+- `cli.py`: the `--telegram` flag, the conditional env read, the `_deliver_to_telegram`
+  helper and exit code 3 (TD-11). The module docstring gains the exit-code line.
+- `models.py`, `render.py`, `templates/`, `agent.py`, `store.py`, `tools.py`, `gmail_mcp.py`
+  and the fetching modules are **unchanged**.
+
+**Layer order (amended).** Every edge points down. There are no lateral imports and no
+cycles:
+
+```
+cli > {agent, delivery} > enrich > {tools, prompts, llm} > {gmail_mcp, pdf}
+    > {store, render, fetch} > {extract, netguard, telegram} > {models, config, links}
+```
+
+- The PRD order `cli > agent > {tools, prompts, llm} > gmail_mcp > {store, render} >
+  {models, config}` and the AF-2 order are preserved as sub-orders. The new modules only
+  join existing tiers as peers.
+- `delivery` is a peer of `agent` (tier 1). It is called only by `cli`, after the HTML is
+  written ("delivery is cli-level").
+- `pdf` sits at tier 4 because it imports `render.safe_url`, so there is one http(s) scheme
+  rule for HTML and PDF. `render` stays as it is (it imports only `models`, jinja2 and the
+  stdlib).
+- `telegram` sits at tier 6 and imports only `config`.
+- Gmail and fetch isolation: none of the three imports `agent`, `gmail_mcp`, `tools`,
+  `store`, `fetch`, `enrich`, `netguard`, `extract`, `llm` or `prompts`. They receive no
+  `gmail` object or MCP tools.
+
+```mermaid
+flowchart TD
+    cli --> agent
+    cli -. lazy import, flag on only .-> delivery
+    delivery --> pdf & telegram & models & config
+    pdf --> render & models
+    pdf --> FPDF[[fpdf2 + bundled DejaVu fonts]]
+    render --> models
+    telegram --> config
+    telegram --> HTTPX[[httpx.AsyncClient trust_env=False, follow_redirects=False]] --> TG[(https://api.telegram.org only)]
+```
+
+**Import-boundary tests (`tests/test_architecture.py`), extended.** The existing checkers
+stay. The new rules are listed below, and each gets a synthetic-source self-test proving it
+can fail, as for the AF rules:
+
+| Rule | Change |
+|---|---|
+| `TIER_RANKS` | add `"delivery": 1`, `"pdf": 4`, `"telegram": 6` |
+| `DELIVERY_MODULES = ("delivery", "pdf", "telegram")` | added to `NEW_MODULES` (no `gmail*` parameters) and to `LANGCHAIN_FREE` |
+| `FORBIDDEN_PROJECT_IMPORTS` | each delivery module bans `GMAIL_SIDE \| {"fetch", "enrich", "netguard", "extract", "llm", "prompts"}` (PRD: no agent, gmail, fetch or tools) |
+| new `ONLY_PROJECT_IMPORTS` | `telegram -> {"config"}`, `pdf -> {"models", "render"}`, `delivery -> {"pdf", "telegram", "models", "config"}` |
+| new `ALLOWED_IMPORTERS` | `delivery` may be imported only by `cli`; `pdf` and `telegram` only by `delivery` (tier ranks alone would let `tools` import `pdf`) |
+| new `find_fpdf_violations` | only `pdf` imports `fpdf`; `pdf` never references `write_html`, `HTMLMixin`, `image`, `embed_file`, `file_attachment_annotation`, `set_text_shaping` or `alias_nb_pages`; every `markdown=` keyword is a literal `False` |
+| `find_http_client_violations` | `httpx.AsyncClient` allowed in `{"fetch", "telegram"}`. Both still need a literal `trust_env=False`, and in `telegram` also a literal `follow_redirects=False`. `httpx.AsyncHTTPTransport(` in `telegram` only inside `_default_transport` |
+| new `find_eager_delivery_imports` | in `cli`, every import of `newsletter_digest.delivery`/`pdf`/`telegram` or `fpdf` must be inside a function body, never at module level (TD-12). No other module imports `fpdf` lazily or eagerly except `pdf` |
+| `test_detector_sees_the_known_project_edges` | expected edges gain `cli->delivery`, `delivery->{pdf, telegram, models, config}`, `pdf->{render, models}`, `telegram->config` |
+
+## TD-3 PDF library choice (Q-T4, FR-046)
+
+Candidates checked on PyPI on 2026-11-02:
+
+| Library | Latest (released) | Licence | Wheel | Runtime deps | Verdict |
+|---|---|---|---|---|---|
+| **fpdf2** | 2.9.0 (2026-10-29); **2.8.9 (2026-09-29)** | LGPL-3.0-only | `py3-none-any` | 2.8.9: Pillow, fontTools, defusedxml (2.9.0 drops defusedxml) | **Chosen** |
+| reportlab | 5.1.0 (2026-10-22) | BSD | `py3-none-any` | pillow, charset-normalizer | Viable runner-up |
+| xhtml2pdf | 0.2.28 (2026-10-25) | Apache-2.0 | `py3-none-any` | reportlab, html5lib, svglib, pypdf, arabic-reshaper, Pillow | Rejected: heavy, HTML/CSS interpretation is the wrong safety surface |
+| WeasyPrint | 70.0 (2026-09-08) | BSD | `py3-none-any` | cffi + Pango/HarfBuzz **system libraries** | Excluded by FR-046 (needs system packages) |
+| borb | 3.0.9 (2026-08-03) | AGPL-3.0-or-later | `py3-none-any` | - | Rejected: AGPL |
+| PyMuPDF | 2.0 (2026-10-19) | AGPL-3.0 / commercial | binary only | numpy, onnxruntime, networkx, ... | Rejected: AGPL, binary, huge |
+
+Why fpdf2 over reportlab:
+- **Plain text by default.** `multi_cell(..., markdown=False)` draws the string as given.
+  reportlab's wrapping primitive (`Paragraph`) parses an XML mini-markup (`<b>`,
+  `<a href>`, `<font>`), so every untrusted string must be XML-escaped, and one missed
+  escape is an injection (FR-045). Its plain `drawString` does not wrap.
+- **Wrapping, verified.** `multi_cell` breaks at words and falls back to character breaks
+  for a word longer than the line. A 600-character unbroken string became 17 lines, at most
+  85.0 mm wide on an 88.0 mm text width. A 900-character URL-like string wrapped without
+  error.
+- **Links, verified.** The `link=` argument on `multi_cell` writes one `/S /URI` link
+  annotation per wrapped line, so a two-line title is clickable on both lines. URIs are
+  PDF-string-escaped (`x(1)` is written as `x\(1\)`).
+- **Unicode, verified.** TTF fonts go through `add_font`, with automatic subsetting. Missing
+  glyphs do not raise: fpdf2 logs `Font ... is missing the following glyphs` and draws
+  nothing for them, so we pre-sanitise (TD-4).
+- **Bidi, probed.** RTL runs are reordered visually by fpdf2's pure-Python bidi without
+  harfbuzz: the extracted Hebrew and Arabic text came out reversed, which is the visual
+  order. Arabic letters stay unjoined, because joining needs shaping (uharfbuzz).
+- **No network, verified.** The probe ran with `socket.connect`, `create_connection` and
+  `getaddrinfo` patched to raise, and nothing failed.
+- **Deterministic, verified.** With `set_creation_date(fixed)`, two builds are
+  byte-identical, and the `/ID` is derived from the content.
+- **Fast enough, verified.** 100 items with long summaries took 0.44 s (81 pages, 124 KB),
+  well under the 5 s NFR.
+
+Licence note: LGPL-3.0 allows using an unmodified library as a normal dependency in this
+non-distributed personal tool. If the project is ever distributed, depending on (not
+vendoring) fpdf2 keeps it replaceable, which meets the LGPL. reportlab (BSD) is the
+fallback if the user objects to the LGPL. The PDF layer is isolated behind
+`draw_pdf(blocks)`, so a swap touches one function.
+
+**Pin.** Run `uv add "fpdf2>=2.8.9,<2.9"`. The dry `uv add` in a scratch copy resolved:
+
+| Package | Version |
+|---|---|
+| `fpdf2` | 2.8.9 |
+| `pillow` | 13.0.0 (MIT-CMU) |
+| `fonttools` | 4.68.0 (MIT) |
+| `defusedxml` | 0.7.1 (PSF) |
+
+Pillow is a self-contained manylinux wheel: no apt packages, and it is verified on CPython
+3.13.5 / WSL2. fpdf2 itself is pure Python. Pillow is not imported by any of our code, but
+`import fpdf` imports it (0.6-0.8 s import time, which is why TD-12 uses a lazy import).
+
+2.9.0 is deliberately not pinned:
+- It was 4 days old on 2026-11-02.
+- It adds a `UnicodeFontManager` that suggests system fonts on encoding errors.
+- Its changes do not affect the API used here. 2.8.9 and 2.9.0 gave identical probe results.
+
+Moving to `<2.10` later is a one-line change after re-running the TD-13 tests.
+
+Dev-only: run `uv add --dev "pypdf>=6.21,<7"` (resolved 6.21.4, BSD-3-Clause) so tests can
+extract PDF text and annotations. The content streams are compressed and glyph-ID encoded,
+so a raw byte grep cannot see the text.
+
+## TD-4 Unicode and emoji font strategy (FR-044)
+
+**Bundled font: DejaVu Sans 2.37**, Regular and Bold.
+- Source: `https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip`
+  (zip sha256 `7576310b219e04159d35ff61dd4a4ec4cdba4f35c00e002a136f00e96a908b0a`).
+- Files and sha256:
+  - `DejaVuSans.ttf`: 757,076 bytes, `7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954`.
+  - `DejaVuSans-Bold.ttf`: 705,684 bytes, `e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724`.
+- They are copied unmodified to `src/newsletter_digest/fonts/` with the release's
+  `LICENSE`. A unit test pins both sha256 values (supply chain). The hatch wheel includes
+  them like `templates/`.
+- **Licence (verified, release `LICENSE`):** "Bitstream Vera Fonts Copyright" permission
+  "to reproduce and distribute the Font Software ... and/or sell copies ... as part of a
+  larger software package". The conditions:
+  - the copyright and permission notice must be included (hence `fonts/LICENSE`);
+  - modified fonts must be renamed;
+  - the font may not be sold by itself.
+
+  DejaVu's changes are public domain, and the Arev glyphs carry the same terms.
+  Bundling is permitted.
+- Why not Noto: one DejaVu file covers Latin, Greek, Cyrillic, Hebrew, Arabic and many
+  symbols. Noto needs one family per script, and Noto CJK is about 16 MB per weight
+  (OTF/CFF).
+
+**Coverage (measured from the cmap of the bundled files):**
+
+| Script or block | Covered | Result |
+|---|---|---|
+| Cyrillic | 256/256 | full |
+| Hebrew | 54/112 (all letters) | full; bidi-reordered |
+| Arabic | 165/256, plus 141/144 Presentation Forms-B | letters shown unjoined; bidi order correct |
+| Emoticons 1F600-1F64F | 64/80 | monochrome |
+| Misc Symbols and Pictographs | 12/768 | mostly replaced |
+| CJK and Devanagari | 0 | replaced |
+
+U+FFFD, U+2022, U+00B7, U+2014, U+2026 and U+2019 are all present.
+
+**Sanitiser `pdf_text(value: str) -> str`.** Every string passes through it before it
+reaches fpdf2:
+1. Apply `unicodedata.normalize("NFC", ...)`.
+2. Turn every Cc, Zl and Zp character (including `\n`, `\t` and NUL) into a space. Collapse
+   runs of whitespace and strip.
+3. Drop format characters (category Cf, such as ZWJ, ZWNJ, bidi overrides and isolates,
+   BOM and soft hyphen) and variation selectors (U+FE00-FE0F, U+E0100-E01EF). This stops
+   visual spoofing through bidi overrides, and the joiners would render as nothing anyway.
+4. Replace each maximal run of code points missing from **both** bundled fonts with one
+   U+FFFD (a visible replacement glyph). Coverage is
+   `frozenset(regular.cmap) & frozenset(bold.cmap)`, taken from fpdf2's loaded `TTFFont.cmap`
+   dicts (5,918 entries in Regular, probed). It is computed once per build and cached
+   module-wide. The test `test_font_coverage_sanity` asserts that U+0416 is covered and
+   U+4E2D is not, so an fpdf2 attribute change fails loudly **[re-verify]**.
+   - Lone surrogates are never in the cmap, so they become U+FFFD too.
+
+**Graceful degradation (FR-044):**
+- A CJK or Devanagari title becomes `�` runs.
+- An emoji ZWJ family becomes its covered components, with the others as `�`.
+- Flags, which are regional-indicator pairs, become `�`.
+- Arabic is readable but unjoined.
+
+The title link stays clickable whatever its text, and nothing raises. fpdf2's
+missing-glyph warning never fires; a test asserts that on the hostile fixture.
+
+**Not done (recorded):**
+- No text shaping (`set_text_shaping` needs uharfbuzz, a compiled second dependency).
+- No colour emoji.
+- No system-font lookup, which would be non-deterministic and differ across machines.
+- A user-supplied fallback font is an open decision (TD-16).
+
+## TD-5 Decision: separate PDF builder from the `ReadingList` model (not the HTML template)
+
+- **Option A, reuse the Jinja2 HTML template.** It would go through fpdf2 `write_html`,
+  xhtml2pdf or WeasyPrint. Content stays in sync for free, but:
+  - The PDF is coupled to HTML/CSS features the converters only partly support (no CSS
+    classes in `write_html`; WeasyPrint is excluded).
+  - It needs a "Read here" and script-stripped variant of the template, which edits the
+    golden-protected template or adds a second one.
+  - It puts an HTML parser on untrusted text in the PDF path, against FR-045's plain-text
+    rule.
+- **Option B (chosen), a separate builder** that reads the same view model the HTML
+  renderer reads. It uses `ReadingList.must_read()`, `ReadingList.by_topic()`,
+  `ReadingItem` fields and `DigestMeta`: the exact calls `render_html` makes. It costs about
+  250 lines and a small risk of wording drift, but it isolates the PDF layout and keeps the
+  output-safety surface to "plain strings through `pdf_text`, links through `safe_url`".
+  The HTML and the template stay byte-identical.
+- **Drift control (FR-046).** There is no second data path, because both outputs read
+  `ReadingList`. The PDF's fetch-note wording mirrors the template's inline mapping through
+  `pdf.FETCH_NOTE_VERBS = {"SUMMARY_FAILED": "summarise", "RATE_LIMITED": "summarise"}`
+  (default "fetch"). A **parity test** renders one fixture both ways, parses the HTML with
+  lxml (already a dependency), extracts the PDF text with pypdf, and asserts:
+  - the same section order and item titles per section;
+  - the same summaries or key points, sources, dates, badges, reasons and fetch notes;
+  - no `Read here` or full-text strings in the PDF.
+
+## TD-6 PDF layout, safety and file rules
+
+**Page (phone-readable, FR-044).**
+- Custom page of **100 x 178 mm**, portrait (about 9:16), with margins of 6 mm left and
+  right and 8 mm top and bottom, giving an 88 mm text width (about 40-45 characters per
+  line at 11 pt).
+- Phone viewers fit the page to width. On a screen about 65 mm wide, 11 pt renders at about
+  7 pt physical (about 2.5 mm), which is close to native phone body text. An A4 page would
+  shrink 11 pt to under 4 pt.
+- Single column, no tables, left-aligned. Justified text with long tokens looks broken.
+- `set_display_mode(zoom="fullwidth", layout="continuous")`.
+- Auto page break with an 8 mm bottom margin. Before each item, if
+  `will_page_break(title_height + one body line)` is true, a new page starts, so a title is
+  never orphaned.
+
+**Typography.** Line heights are about 1.35 x the font size:
+
+| Element | Size and style | Line height |
+|---|---|---|
+| Document title | 16 pt bold | - |
+| Section headings | 14 pt bold | - |
+| Item title | 12 pt bold; blue `#1a56c4` and underlined when it is a link, near-black `#1a1a1a` when not | 5.8 mm |
+| Summary, key points | 11 pt; key points prefixed `• ` and indented 3 mm | 5.2 mm |
+| Meta line | 9.5 pt, `#555555` | - |
+| `Why:` line | 10.5 pt, `#333333` | - |
+
+There is no italic font (none is bundled). Items are separated by 3 mm and a 0.2 mm
+`#dddddd` rule. Each section gets a PDF outline (bookmark) entry via `start_section`. These
+are outline items, not link annotations. Verified with 2.8.9 and pypdf: a section plus a
+linked title produced exactly one `/Link` annotation (`/S /URI`) and one outline entry. The
+same probe confirmed that `will_page_break` and the `BU` (bold-underline) style work with
+the TTF. There are no page-number aliases (see the `{nb}` rule below), and the
+footer shows `n` only.
+
+**Content (FR-041, FR-042).** The order is the HTML's:
+1. **Header:**
+   - `Newsletter reading list`;
+   - `Window <window> (<days> days): <start> – <end>`;
+   - `Emails: <found> found, <processed> processed, <failed> failed · Articles: <n> · Must read: <m>`
+     (the must-read count is required by FR-041; it is omitted when unranked);
+   - when `reading_list.fetch` is set, the template's article-pages line and skip note;
+   - when unranked, the template's unranked note;
+   - when emails failed, the template's failed-emails note.
+2. **Must read** (only when `ranked` and non-empty), then each `by_topic()` group, titled
+   `<Topic> (<count>)`.
+3. **Each item:**
+   - title (linked when `safe_url(item.url)` is not None);
+   - if `item.fetched`: `fetched.summary` plus the key-point bullets; else `item.summary`
+     if non-empty (the Q3 rule, as the template applies it);
+   - meta line `sources joined ", " · date · mentioned in N (only N > 1) · priority with
+     "-" as a space`;
+   - fetch note `Couldn't <verb> the article: <failure.value>` (skipped for `DUPLICATE`);
+   - `Why: <reason>`.
+4. **Empty state:** the two template messages, using `meta.query` and `meta.emails_found`.
+5. **Last line:** `Generated <generated_at as YYYY-MM-DD HH:MM>.`
+
+Excluded: `fetched.full_text` ("Read here"), the mark-read control and its key, the table of
+contents links, and any image, font or file other than the two bundled TTFs.
+
+**Safety (FR-045):**
+- **Plain text only.** Every string goes through `pdf_text`, then
+  `multi_cell(..., markdown=False)` or `cell(..., markdown=False)` with explicit keywords.
+  `write_html`, markdown and images are never used (TD-2 AST rule).
+- **No page-count alias.** fpdf2's default page-count alias `{nb}` **substitutes inside
+  ordinary text**: the probe turned `"Title {nb}"` into `"Title 1"`. The builder sets
+  `pdf.str_alias_nb_pages = None` right after construction **[re-verify attribute in the
+  pinned version]**. A hostile fixture containing `{nb}` asserts the literal text survives.
+- **Links:** `link=safe_url(item.url)` only. fpdf2 itself accepts `javascript:alert(1)` as a
+  URI action (probed), so the filter is ours. Non-http(s) titles are drawn as plain text
+  with no link. No other link annotation is created.
+- **Metadata:** `set_title("Newsletter reading list <end_date>")`, `set_lang("en")`,
+  `set_creation_date(meta.generated_at)`. No author, subject or keywords come from content.
+- **No network:** only the bundled fonts are read, from `Path(__file__).with_name("fonts")`.
+
+**File naming and location (Q-T6, FR-043).**
+- `pdf_path_for(html_path) = html_path.with_suffix(".pdf")`, which gives
+  `<out>/reading-list-<meta.end_date>.pdf` beside the HTML from `write_reading_list`.
+- A same-day re-run overwrites it, as the HTML does. The write is atomic
+  (`<name>.pdf.part` plus `os.replace`), so a crash never leaves a truncated PDF; the
+  `.part` file is removed on failure.
+- The multipart file name sent to Telegram is `pdf_path.name`.
+
+**Very large lists (Q-T6): send as is, no splitting.** The upper bound is `--max-emails`
+<= 200. Model caps keep each item under about 3 KB of text (title 300, summary 300, reason
+200, fetched summary 1200, 5 x 240 key points), and the subset fonts add about 30-60 KB. A
+very large list of 2,000 items is a few MB and roughly 10 s to build, far below the 50 MB
+limit. Splitting would add a multi-message protocol for a case that cannot realistically
+occur. If the limit is ever exceeded, delivery is skipped with the size in the message (exit
+3, PDF kept). No size reduction is attempted (FR-048 proposal adopted).
+
+## TD-7 Telegram Bot API facts used (Q-T5, FR-047)
+
+Verified against `core.telegram.org/bots/api` (Bot API **10.3**, 2026-08-24) on 2026-11-02.
+Quotes and sources are in `verified_facts.md`.
+
+| Fact | Value | Used for |
+|---|---|---|
+| Endpoint | `https://api.telegram.org/bot<token>/METHOD_NAME`, HTTPS only, GET or POST | fixed base, POST |
+| Upload | `multipart/form-data` for uploading files | `files={"document": ...}` |
+| `sendDocument` size | "files of any type of up to 50 MB in size" (also "50 MB for other files" via multipart) | `MAX_UPLOAD_BYTES = 50_000_000` (decimal MB, the conservative reading) |
+| Caption | "0-1024 characters after entities parsing" | `MAX_CAPTION_CHARS = 1024`; our captions are under 80 |
+| `parse_mode` | `MarkdownV2`, `HTML`, `Markdown` (legacy) | **not sent**: the caption is plain text |
+| Response | JSON with `ok`; on error `description`, `error_code` ("subject to change"), optional `parameters` | classification prefers the HTTP status and reads `error_code` only as a fallback |
+| `ResponseParameters` | `migrate_to_chat_id` (Integer), `retry_after` (Integer, "seconds left to wait before the request can be repeated", flood control) | 429 handling |
+| Rate limits (Bot FAQ) | "In a single chat, avoid sending more than one message per second ... eventually you'll begin receiving 429 errors" | one message per run; 429 handled |
+| `getUpdates` | returns an Array of `Update`; "will not work if an outgoing webhook is set up"; updates kept no longer than 24 hours | README chat-ID steps |
+| Token | from @BotFather `/newbot` (name plus a username ending in `bot`); `/token` generates a new one if compromised | README |
+
+Not stated in the docs, so classification relies only on the codes: the exact description
+strings for 400/403. From experience they are `Bad Request: chat not found` and
+`Forbidden: bot can't initiate conversation with a user` / `bot was blocked by the user`.
+The README says "press Start in your bot chat first" as setup advice, not as a doc quote.
+
+## TD-8 Telegram client (`telegram.py`)
+
+```python
+TELEGRAM_API_BASE = "https://api.telegram.org"   # fixed in code; no env, CLI or kwarg override
+MAX_UPLOAD_BYTES = 50_000_000
+MAX_CAPTION_CHARS = 1024
+MAX_ATTEMPTS = 3
+BACKOFF_S = (2.0, 4.0)            # before attempts 2 and 3
+RETRY_AFTER_CAP_S = 30.0          # a larger retry_after fails at once (RATE_LIMITED)
+ATTEMPT_DEADLINE_S = 45.0         # anyio.fail_after per attempt
+TOTAL_DEADLINE_S = 120.0          # anyio.move_on_after around the whole send
+HTTP_TIMEOUT = httpx.Timeout(connect=10.0, write=30.0, read=30.0, pool=5.0)
+USER_AGENT = "newsletter-digest/0.1 (telegram-delivery)"
+
+class TelegramErrorKind(StrEnum):
+    BAD_TOKEN, BAD_CHAT, FORBIDDEN, BAD_REQUEST, TOO_LARGE, RATE_LIMITED,
+    SERVER_ERROR, NETWORK, TIMEOUT, REDIRECT, BAD_RESPONSE, DEADLINE
+
+class TelegramError(Exception):          # str() is the redacted one-line reason
+    kind: TelegramErrorKind; status: int | None; attempts: int
+
+@dataclass(frozen=True)
+class SendResult: message_id: int | None; attempts: int
+
+class TelegramClient:
+    def __init__(self, token: SecretToken, *,
+                 transport: httpx.AsyncBaseTransport | None = None,   # test seam
+                 sleep: Callable[[float], Awaitable[None]] = anyio.sleep,  # test seam
+                 max_attempts: int = MAX_ATTEMPTS,
+                 total_deadline: float = TOTAL_DEADLINE_S,
+                 attempt_deadline: float = ATTEMPT_DEADLINE_S) -> None
+    async def __aenter__(self) -> Self     # install_log_redaction(); build the AsyncClient
+    async def __aexit__(...) -> None       # aclose() always
+    async def send_document(self, chat_id: str, filename: str, content: bytes,
+                            caption: str) -> SendResult      # raises TelegramError
+
+def _default_transport() -> httpx.AsyncBaseTransport:   # the ONLY real transport factory
+    return httpx.AsyncHTTPTransport(retries=0)
+```
+
+- **httpx usage.** One `httpx.AsyncClient(transport=transport or _default_transport(),
+  timeout=HTTP_TIMEOUT, trust_env=False, follow_redirects=False, headers={"User-Agent":
+  USER_AGENT})` per run, closed in `__aexit__`.
+  - `trust_env=False`: no env proxies or `.netrc`, consistent with the fetch rule and the
+    AST checker.
+  - Certificate verification stays on (httpx default; no `verify=` argument anywhere).
+  - There is no base-URL seam at all: tests use `httpx.MockTransport`, which still sees
+    the real `api.telegram.org` URL, and tests assert the host and path shape. This is
+    stricter than the PRD's "base URL only as a test seam".
+- **Request.** `POST {TELEGRAM_API_BASE}/bot{token.reveal()}/sendDocument`.
+  - Fields: `data={"chat_id": chat_id, "caption": caption}` and
+    `files={"document": (filename, content, "application/pdf")}`.
+  - No `parse_mode`, no `caption_entities`, no thumbnail. The URL string is built inside
+    one private method and never stored on `self`, logged or put in an exception.
+- **Caption.** `delivery.build_caption` produces the text (TD-11). `send_document`
+  re-truncates to 1024 as a guard.
+- **Response classification** (HTTP status first, then the JSON `error_code` when the
+  status is 200 but `ok` is false):
+
+| Condition | Kind | Retry? | User text (D-T3 style) |
+|---|---|---|---|
+| 200 and `ok: true` | success (`result.message_id`) | - | - |
+| 3xx | REDIRECT | no (not followed) | `unexpected redirect from Telegram (HTTP 30x)` |
+| 400 (`description` mentions "chat") | BAD_CHAT | no | `HTTP 400: chat not found - check TELEGRAM_CHAT_ID and press Start in your bot chat` |
+| 400 (other) | BAD_REQUEST | no | `HTTP 400: <description>` |
+| 401 | BAD_TOKEN | no | `HTTP 401: invalid bot token - check TELEGRAM_BOT_TOKEN` |
+| 403 | FORBIDDEN | no | `HTTP 403: the bot may not message this chat - press Start in your bot chat (or unblock the bot)` |
+| 404 | BAD_TOKEN | no | `HTTP 404: bot token not recognised - check TELEGRAM_BOT_TOKEN` |
+| 413 | TOO_LARGE | no | `HTTP 413: file too large for Telegram` |
+| 429 with `retry_after` <= 30 | RATE_LIMITED | yes, after `retry_after` s | `HTTP 429: rate limited` |
+| 429 with `retry_after` > 30 | RATE_LIMITED | no | `HTTP 429: rate limited, retry after N s` |
+| 429 without `retry_after` | RATE_LIMITED | yes, backoff | as above |
+| 5xx | SERVER_ERROR | yes, backoff | `HTTP 5xx from Telegram` |
+| other 4xx, 200 with `ok: false`, non-JSON 2xx | BAD_RESPONSE | no | `HTTP <code>: <description or "unexpected response">` |
+| `httpx.TimeoutException`, per-attempt `TimeoutError` | TIMEOUT | yes, backoff | `timed out` |
+| other `httpx.TransportError` (connect, read, protocol) | NETWORK | yes, backoff | `network error (<ExcClass>)` |
+| total deadline hit | DEADLINE | - | `gave up after 120 s` (with the last error) |
+
+- `<description>` is Telegram's text after `redact()`, control characters stripped, and
+  truncated to 200 characters. `retry_after` is accepted only as an `int` with
+  0 <= v <= 3600; anything else is treated as missing.
+- **Retry policy (FR-049).**
+  - At most 3 attempts in total. Backoff is 2 s, then 4 s; on 429 the delay is
+    `retry_after` instead. Retries happen only on the rows marked "yes".
+  - Before each sleep, if `delay` exceeds the time left in the 120 s budget, the client
+    stops and raises the last error.
+  - Worst case: 120 s (NFR target about 2 minutes).
+  - All sleeping goes through the injected `sleep`, so tests run in zero real time.
+- **Duplicate risk (accepted).** A read timeout after Telegram accepted the upload can
+  cause a second identical message on retry. This is preferred over silent non-delivery.
+  Connect errors and pool timeouts are always safe to retry.
+- **Exception discipline.** No httpx exception escapes, and none is chained.
+  - Inside `except httpx.HTTPError as exc` the client records only `type(exc).__name__`
+    and `redact(str(exc))`.
+  - It raises `TelegramError` **after** leaving the `except` block, so `__cause__` and
+    `__context__` are both `None`. The probe showed `exc.request.url` holds the full token
+    URL even though `str(exc)` does not.
+  - `response.raise_for_status()` is never called: its message embeds the URL (probed).
+
+## TD-9 Secret hygiene and redaction (FR-050)
+
+- **Token type.** `config.SecretToken` (stdlib) has `__slots__ = ("_value",)` and
+  `reveal() -> str`. `__repr__`, `__str__` and `__format__` return `"***"`, and
+  `__reduce__` raises `TypeError` (no pickling). The `Settings` field also has
+  `repr=False`.
+- **The token is revealed in exactly one place**: `TelegramClient`'s URL builder. An AST
+  test asserts that `.reveal()` is called only in `telegram.py`.
+- **`redact(text: str) -> str`** in `telegram.py` replaces:
+  - `re.compile(r"bot\d+:[A-Za-z0-9_-]+")` with `bot***`;
+  - every registered token's full value **and** its secret half (after `:`) with `***`.
+    The client registers its token in a module-level set on `__aenter__`.
+
+  It is applied to every message `telegram` and `delivery` produce, and to Telegram's
+  `description`.
+- **httpx and httpcore loggers.** httpx 0.28.1 logs
+  `HTTP Request: POST https://api.telegram.org/bot<token>/sendDocument "HTTP/1.1 200 OK"`
+  at **INFO** on logger `httpx` (probed). httpcore uses `httpcore.connection`, `.http11`,
+  `.http2`, `.proxy` and `.socks`; its trace messages show the host but not the path.
+  - `install_log_redaction()` (idempotent) attaches one `_RedactingFilter` to each of
+    those six loggers. It rewrites `record.msg = redact(record.getMessage())` and
+    `record.args = None`. Logger filters run only for records created on that exact logger,
+    hence each name is listed.
+  - The CLI still configures only the `newsletter_digest` logger, so these records are not
+    shown by default. The filter is defence in depth for `caplog`, user `logging` config,
+    and future verbose modes.
+  - Logger levels are not changed (no global side effect).
+- **Our own logging.** `newsletter_digest.delivery` logs at INFO
+  `PDF written: <path> (<KB> KB, <pages> pages)` and `Sending the PDF to Telegram`, and at
+  WARNING `Telegram attempt k/3 failed (<kind>); retrying in N s`. The chat ID is logged
+  only at DEBUG. Neither the token nor the URL is ever logged.
+- **Tracebacks.** A truly unexpected exception in delivery is reported as a one-line
+  message, with exit 3. With `--log-level DEBUG`, the traceback is logged as
+  `redact("".join(traceback.format_exception(exc)))`, never through `exc_info=`.
+- **Outputs.** The token never appears in the HTML, PDF or caption: the PDF builder never
+  receives `Settings`.
+- **Tests (acceptance 21).** A token-shaped fixture (`"123456789:TESTtoken_secret-AAAAAAAAAAAAAAAAAAAAAAAAAA"`)
+  is used on the success, 401, timeout, network-error, 429-exhausted and unexpected-exception
+  paths. Each test:
+  - captures `caplog` at DEBUG for the root, `httpx` and `httpcore.*` loggers;
+  - captures CliRunner stdout and stderr;
+  - collects `str()`, `repr()` and the formatted traceback of every raised error;
+  - asserts that neither the token nor its secret half appears anywhere.
+
+## TD-10 Settings additions (`config.py`, FR-038, FR-039)
+
+```python
+TELEGRAM_ENV_VARS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+TELEGRAM_SUMMARY_FIELDS = frozenset({"telegram", "telegram_bot_token", "telegram_chat_id"})
+_BOT_TOKEN_RE = re.compile(r"[0-9]{1,20}:[A-Za-z0-9_-]{20,128}")   # fullmatch
+_CHAT_ID_RE = re.compile(r"[1-9][0-9]{0,19}")                       # fullmatch, own chat only
+
+class SecretToken: ...   # TD-9
+
+@dataclass(frozen=True)
+class Settings:
+    ...existing fields unchanged...
+    telegram: bool = False
+    telegram_bot_token: SecretToken | None = field(default=None, repr=False)
+    telegram_chat_id: str | None = None
+```
+
+- `Settings.build(..., telegram: bool = False, telegram_env: Mapping[str, str | None] |
+  None = None)`. The new kwargs are keyword-only with defaults, so every existing call is
+  untouched.
+- **Flag off:** `telegram_env` is ignored entirely, and the fields stay `None`. A malformed
+  `TELEGRAM_*` in `.env` cannot affect a flag-off run.
+- **Flag on:**
+  - Strip both values. Collect the missing or blank ones and raise one `ConfigError`:
+    `TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not set (needed by --telegram); add them to .env. See README > Telegram delivery > Telegram setup.`
+    (singular wording when only one is missing).
+  - A token not matching `_BOT_TOKEN_RE` gives
+    `TELEGRAM_BOT_TOKEN does not look like a bot token from @BotFather (<digits>:<letters, digits, _ or ->). See README > ...`.
+    The value is **never echoed**. The strict character set also stops path injection
+    (`/`, `?`, `#`, `..`) into the request URL.
+  - A chat ID not matching `_CHAT_ID_RE` gives
+    `TELEGRAM_CHAT_ID must be your own numeric chat ID (message.chat.id from getUpdates); group and channel IDs are not supported. See README > ...`.
+    The value is not echoed. This enforces the PRD non-goal of single own-chat delivery
+    (private chat IDs are positive user IDs).
+- **`safe_summary()`** always hides `telegram_bot_token` and `telegram_chat_id`. It also
+  hides `telegram` while that is False, so the flag-off key set equals
+  `tests/fixtures/flag_off_safe_summary_keys.json` (FR-037). With the flag on it shows
+  `telegram: True` only.
+- The README section heading is `## Telegram delivery`, with a `### Telegram setup`
+  subsection. FR-039 says "Telegram setup" and FR-052 and D-T3 say "Telegram delivery", so
+  the config message names both and the delivery message names the section.
+
+## TD-11 CLI wiring and exit codes (FR-037, FR-040, FR-051, D-T1 to D-T3)
+
+- **Flag.** `--telegram` (`is_flag=True`, **no `envvar`**, so it is not env-enabled). Help
+  text:
+
+  > Also send a PDF copy of the reading list to your own Telegram chat
+  > (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from .env). Privacy: titles, summaries, links
+  > and newsletter names are sent to Telegram's servers; bot chats are not end-to-end
+  > encrypted.
+
+  The `digest` docstring names the two env vars. `ALL_OPTIONS` in `test_cli.py` gains
+  `--telegram`.
+- **Env read.** `telegram_env = {n: os.environ.get(n) for n in TELEGRAM_ENV_VARS} if
+  telegram else None`, passed to `Settings.build`.
+- **Order.** `write_reading_list`, `_report`, `click.echo(html_path)`, `--open`, then
+  `if settings.telegram: _deliver_to_telegram(reading_list, html_path, settings)`.
+- **`_deliver_to_telegram`:**
+  1. Inside `try`: the lazy import, then `anyio.run(partial(deliver_reading_list, ...))`.
+     `deliver_reading_list` already turns every expected failure into a `DeliveryOutcome`.
+     The CLI's `except Exception` is the safety net for bugs and for an `ImportError` of
+     fpdf2 (for example a broken environment). It builds an outcome with
+     `redact(f"{type(exc).__name__}: {exc}")`.
+  2. If `outcome.pdf_path` is set (the file exists), `click.echo(str(pdf_path))`. stdout
+     then holds two lines with the flag on and still exactly one with it off.
+  3. On success, stderr gets `Sent <pdf name> to Telegram.` and the exit code is 0.
+  4. On failure, stderr gets
+     `Telegram delivery failed (<reason>). Saved: <html path>[, <pdf path>]. See README > Telegram delivery.`
+     (`markup=False`, `highlight=False`), then `click.get_current_context().exit(3)`. There
+     is no traceback.
+- **Exit codes** (the module docstring is updated):
+
+| Code | Meaning |
+|---|---|
+| 0 | success: the digest is saved and, with `--telegram`, delivered |
+| 1 | runtime failure; no digest saved, nothing sent |
+| 2 | usage or config error, including missing or invalid Telegram variables with `--telegram`, before any work |
+| 3 | the digest (HTML, and the PDF when it was built) is saved, but Telegram delivery failed or was skipped (PDF build or write failure, oversize, any `TelegramError`) |
+
+- **Caption (D-T2, Q-T2), from counts only.** `meta.window` is already normalised by
+  `window_to_days` (`1w`, `2w`, `1m` or `<N>d`):
+  - ranked: `Newsletter digest: last <window> - <n> article(s), <m> must-read`;
+  - unranked: `Newsletter digest: last <window> - <n> article(s), unranked` (design choice:
+    "0 must-read" would mislead);
+  - empty (`n == 0`): `Newsletter digest: last <window> - no articles found`.
+
+  There are no titles and no model or email text, and nothing extra is added when fetching
+  is on. Tests assert the caption against a fixed regex of digits and fixed words.
+- **`DeliveryOutcome`** (in `delivery.py`): `pdf_path: Path | None`, `delivered: bool`,
+  `reason: str | None` (redacted, no trailing period), `attempts: int`.
+
+## TD-12 Flag-off byte identity (FR-037, acceptance 16)
+
+1. **Lazy import, the one sanctioned nested import.** AF-11 kept trafilatura and lxml as
+   eager imports. Here the lazy import is required, because `import fpdf` pulls in PIL and
+   fontTools in 0.6-0.8 s (probed), and the NFR asks for zero flag-off import cost.
+   - The import lives in `cli._deliver_to_telegram`. `delivery` imports `pdf` and
+     `telegram` at module level; `pdf` imports `fpdf` at module level.
+   - Today, `import newsletter_digest.cli` loads neither `fpdf` nor `PIL` (probed: 1.81 s,
+     both absent).
+   - The AST rule in TD-2 keeps the import nested. It is a plain `from ... import`
+     statement, so the import-graph checker still sees the edge, and it is not a dynamic
+     import.
+2. **Subprocess test.** `tests/test_flag_off_identity.py` gains a test that runs
+   `sys.executable -c` with a script. The script:
+   - patches `run_digest` with the deterministic fixture;
+   - invokes the CLI through CliRunner without `--telegram`;
+   - asserts that `fpdf`, `PIL`, `newsletter_digest.delivery`, `newsletter_digest.pdf` and
+   `newsletter_digest.telegram` are absent from `sys.modules`;
+   - asserts exit 0 and a single stdout line.
+
+   It needs a subprocess because other tests import `pdf` in the same process.
+3. **In-process flag-off tests:**
+   - `delivery.deliver_reading_list` and `telegram._default_transport` are monkeypatched
+     to raise, the CLI runs without `--telegram`, and the test asserts exit 0 and that
+     neither was called;
+   - with `TELEGRAM_BOT_TOKEN="not a token"` in the env, flag-off still exits 0 (proves
+     nothing is read);
+   - `safe_summary()` keys equal the golden.
+4. **Unchanged files.** `render.py`, the template and `models.py` are untouched, so
+   `flag_off_*_golden.html` stay byte-identical. The existing 2622 tests pass unchanged,
+   except `ALL_OPTIONS` gaining `--telegram`, which is additive.
+
+## TD-13 Test seams and offline guards
+
+| Seam | Where | Used for |
+|---|---|---|
+| `transport: httpx.AsyncBaseTransport` | `TelegramClient` | `httpx.MockTransport` (async handler) for every TD-8 row; asserts method, host `api.telegram.org`, path `/bot<token>/sendDocument`, multipart fields, filename, content type, **no `parse_mode` field** |
+| `sleep` | `TelegramClient` | records the delays (2, 4, `retry_after`, cap); zero real waiting |
+| `max_attempts`, `total_deadline`, `attempt_deadline` | `TelegramClient` | retry cap, and the deadline with a slow async handler (`await anyio.sleep(1)` with a 0.05 s budget) |
+| `client_factory` | `deliver_reading_list(..., client_factory=TelegramClient)` | the CLI and delivery tests inject a client wired to a MockTransport |
+| `builder: Callable[[ReadingList], bytes] = build_pdf` | `deliver_reading_list` | PDF-failure path (raises), oversize path (returns `b"%PDF" + 50_000_001` zero bytes, never sent) |
+| `layout_reading_list` / `draw_pdf` split | `pdf` | content and order tests on `Block` lists without parsing PDFs; fpdf2 tests on small block lists |
+
+**Guards against real network:**
+- `tests/conftest.py` gets an **autouse** fixture that monkeypatches
+  `newsletter_digest.telegram._default_transport` to raise
+  `AssertionError("real Telegram transport constructed in tests")`. It is suite-wide, cheap,
+  and does not import `pdf` or `fpdf`.
+- The AST rule makes `_default_transport` the only place a real transport can be built.
+- The new delivery, telegram and pdf test modules also have an autouse socket guard
+  (`socket.socket.connect`, `socket.create_connection` and `socket.getaddrinfo` raise).
+  It also proves FR-045's "PDF build with network blocked".
+- Existing fetch tests are not affected, because they build their scripted transports
+  directly.
+
+**Test list (minimum):**
+- `test_pdf.py`:
+  - structure order (Must read first, then `by_topic`), unranked, empty states, fetch-on
+    items, every FR-041 field, the badge only when N > 1, no `full_text`;
+  - hostile fixtures: `<script>`, `javascript:`/`data:`/`vbscript:` URLs, markdown-like
+    `**x**`, `{nb}`, unbalanced parentheses, `endstream`/`%%EOF`, NUL and bidi overrides;
+  - emoji, ZWJ, flag, CJK, Arabic, Hebrew, Devanagari, Cyrillic, and 600-character
+    unbroken titles and URLs;
+  - annotations: pypdf reads every `/Annots` entry; all are `/S /URI` with http(s), and
+    their count is at least the number of linkable items;
+  - determinism (two builds are byte-identical);
+  - no fpdf2 missing-glyph log record;
+  - `test_font_coverage_sanity`, the font sha256 pins, and 100 items built in under 5 s.
+- `test_render_pdf_parity.py`: the TD-5 parity test.
+- `test_telegram.py`: every TD-8 row, the retry cap, `retry_after` capping and parsing, the
+  deadline, no redirect following, `aclose` on success and error, and the TD-9 redaction
+  matrix.
+- `test_delivery.py`: naming rule, overwrite, atomic write (no `.part` left), oversize
+  skip, build failure, caption variants and length, outcome mapping.
+- `test_config_telegram.py`: missing and blank combinations (the message names the
+  variables and the README section), malformed token or chat ID (value not echoed),
+  flag-off ignores the env, `repr(settings)` and `str(SecretToken)` contain no token,
+  `safe_summary` hiding.
+- `test_cli.py` additions:
+  - exit 2 for each missing combination, with `run_digest` asserted not called;
+  - exit 0 with two stdout lines on success;
+  - exit 3 with the D-T3 line and both paths on 401, network error and oversize;
+  - exit 1 when the run fails (delivery not called);
+  - `--open` before delivery.
+- `test_architecture.py`: the TD-2 rules and their self-tests.
+- `test_flag_off_identity.py`: TD-12.
+
+## TD-14 Non-Functional Considerations (delivery)
+
+- **Performance:**
+  - The PDF builds in about 0.4 s for 100 items (probed), and font loading plus subsetting
+    is included.
+  - Delivery adds one upload (typically 50-500 KB) and at most 120 s in the worst case.
+  - Flag-off cost is zero: no import, no env read, no file.
+- **Security:**
+  - Plain-text PDF and http(s)-only links via `safe_url`.
+  - No HTML, markdown or image paths in fpdf2 (AST-enforced).
+  - The `{nb}` alias is disabled, and the sanitiser drops bidi overrides.
+  - Fixed host, `trust_env=False`, no redirects, TLS verification on.
+  - The token is a `SecretToken`, revealed in one place, and redacted in logs, messages and
+    tracebacks.
+  - The token format is validated (no URL path injection).
+  - The caption is counts only.
+- **Privacy:** with the flag on, titles, summaries, links and newsletter names go to
+  Telegram. They are stored in the Telegram cloud with client-server encryption, not
+  end-to-end (`telegram.org/faq`: "Server-client encryption is used in Cloud Chats ...
+  Secret Chats use an additional layer of client-client encryption"). This goes in the
+  README and the `--help` text.
+- **Reliability:**
+  - Delivery never alters the HTML, and the PDF write is atomic.
+  - Every failure maps to exit 3 with one line and no traceback.
+  - The client is always closed (`async with`).
+  - `anyio.run` is used a second time in the same process, after `run_digest`'s loop has
+    finished, which is supported.
+- **Scaling:** one message per run to one chat, far under the "one message per second per
+  chat" guidance.
+- **Dependencies:** one new runtime dependency (`fpdf2`, which pulls Pillow, fontTools and
+  defusedxml as wheels), and one dev dependency (`pypdf`). No system packages. The two
+  font files add 1.46 MB to the repo and the wheel.
+
+## TD-15 Decisions (delivery)
+
+- **DT1 Modules:** `pdf` (tier 4), `telegram` (tier 6) and `delivery` (tier 1, peer of
+  `agent`), plus the `fonts/` package data. Only `cli` imports `delivery`, only `delivery`
+  imports `pdf` and `telegram`, and nothing else changes.
+- **DT2 Library:** fpdf2 `>=2.8.9,<2.9` (LGPL-3.0-only), locked at 2.8.9. reportlab 5.x
+  (BSD) is the documented fallback. pypdf `>=6.21,<7` is dev-only.
+- **DT3 Font:** DejaVu Sans 2.37 Regular and Bold, bundled with their licence and pinned by
+  sha256. Unsupported code points become U+FFFD runs. There is no shaping, no colour emoji
+  and no system fonts.
+- **DT4 Builder:** a separate builder over `ReadingList` (not the HTML template), with a
+  parity test.
+- **DT5 Layout:** a 100 x 178 mm page, 11 pt body, 12 pt bold linked titles, single
+  column, no URLs printed, a bookmark per section, and no page-count alias.
+- **DT6 Naming (Q-T6):** `html_path.with_suffix(".pdf")`, overwritten the same day, written
+  atomically. Large lists are sent as is, with no splitting and no size reduction; oversize
+  means skip and exit 3.
+- **DT7 Transport:** `sendDocument` multipart to the fixed `https://api.telegram.org`, with
+  no base-URL override at all. Redirects are not followed, `trust_env=False`, and there is
+  no `parse_mode`.
+- **DT8 Timeouts and retries:** connect 10 s, write 30 s, read 30 s and pool 5 s;
+  45 s per attempt and 120 s in total. 3 attempts with 2 s and 4 s backoff. 429 honours
+  `retry_after` up to 30 s, a larger value fails at once, and 5xx, network and timeouts
+  are retried.
+- **DT9 Redaction:** `SecretToken`, `redact()`, filters on the six httpx and httpcore
+  loggers, no exception chaining and no `raise_for_status`.
+- **DT10 Config:** env-only credentials, read only with the flag. The token format is
+  validated; the chat ID must be a positive integer (own chat only). `safe_summary`
+  hides the fields.
+- **DT11 Exit codes:** 0/1/2/3 as in TD-11. The PDF path is printed on stdout line 2 with
+  the flag on.
+- **DT12 Caption:** counts only, with an unranked variant and an empty-state variant.
+- **DT13 Lazy import:** the one sanctioned nested import, in `cli`, enforced by AST and a
+  subprocess test.
+
+## TD-16 Open Architecture Decisions and Risks (delivery)
+
+- **Decision: CJK and Indic coverage.**
+  - Options: (a) U+FFFD degradation only (v1); (b) an optional env var
+    `NEWSLETTER_PDF_FALLBACK_FONT=/path/font.ttf` registered via `set_fallback_fonts`;
+    (c) bundling Noto CJK (about 16 MB per weight).
+  - **Recommended: (a) now, (b) if the user reads CJK newsletters.** The title link still
+    works.
+- **Decision: LGPL fpdf2 vs BSD reportlab.** **Recommended: fpdf2** (plain-text API,
+  verified behaviour). Switch only if the user objects to the LGPL; the swap is isolated to
+  `draw_pdf`.
+- **Decision: retry on read timeout after upload (duplicate risk).** **Recommended: retry**
+  (PRD FR-049). Note it in the README troubleshooting.
+- **Risk: fpdf2 internals used.** `TTFFont.cmap` (coverage) and `str_alias_nb_pages = None`
+  (alias off) are public attributes but not documented API. Mitigation: sanity tests fail
+  loudly on upgrade, and the pin is `<2.9`. Fallback for coverage:
+  `fontTools.ttLib.TTFont(path).getBestCmap()` (fontTools is a hard dependency of fpdf2).
+- **Risk: Arabic is shown unjoined.** Accepted. Shaping would need uharfbuzz, a compiled
+  second dependency.
+- **Risk: the Telegram error descriptions and `error_code` are "subject to change".**
+  Mitigation: classification keys on the HTTP status, and the description is only shown,
+  never parsed for decisions except the "chat" hint on 400.
+- **Risk: the token format changes.** The regex is lenient on length (20-128) and strict on
+  the character set. A rejected valid token shows a clear exit-2 message. **[re-verify]**
+  against the user's real token shape in the manual end-to-end test (acceptance 24) without
+  logging it.
+- **Risk: the 50 MB limit is ambiguous (MB vs MiB).** Mitigation: the decimal 50,000,000
+  limit is conservative, and realistic PDFs are under 5 MB.
+- **Risk: the README `getUpdates` example puts the token on a command line.**
+  - Mitigation: the README's primary method reads the token from `.env` inside a
+    `uv run python -c` one-liner, so it does not enter shell history or `ps` output.
+  - The `curl` alternative uses `read -rs TELEGRAM_BOT_TOKEN` and comes with a warning not
+    to paste its output or URL into shared logs (the output contains the chat ID, not the
+    token).
+  - `getUpdates` returns nothing if a webhook is set or more than 24 h passed since
+    `/start`. In that case, send `/start` again.
+
+### README inputs (FR-052, confirmed steps)
+
+1. In Telegram, open **@BotFather** and send `/newbot`. Give a display name, then a
+   username ending in `bot` (5-32 characters: Latin letters, digits, underscores).
+   BotFather replies with the token. Keep it secret. If it leaks, `/token` in BotFather
+   generates a new one.
+2. Put `TELEGRAM_BOT_TOKEN=<token>` in `.env`. `.env.example` gains **commented**
+   placeholders, so copying it changes nothing:
+   `# TELEGRAM_BOT_TOKEN=` and `# TELEGRAM_CHAT_ID=`, with one-line comments.
+3. Open `https://t.me/<bot_username>` and press **Start** (this sends `/start`). A bot
+   cannot message you until you do.
+4. Find your chat ID without typing the token:
+   `uv run python -c "import os, httpx, dotenv; dotenv.load_dotenv(); t = os.environ['TELEGRAM_BOT_TOKEN']; print({u['message']['chat']['id'] for u in httpx.get(f'https://api.telegram.org/bot{t}/getUpdates').json()['result'] if 'message' in u})"`.
+   The number printed is `message.chat.id`, a positive integer for a private chat.
+   - Alternative: `read -rs TELEGRAM_BOT_TOKEN; curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getUpdates"`
+     and read `result[].message.chat.id`.
+   - Warning: never paste the URL or command line into shared logs.
+   - If the result is empty, send `/start` again; updates are kept for at most 24 h, and
+     none are returned while a webhook is set.
+5. Put `TELEGRAM_CHAT_ID=<number>` in `.env` and run
+   `uv run newsletter-digest --window 1w --telegram`.
+6. Document the message contents (PDF plus a counts-only caption), the privacy note
+   (TD-14), exit codes 0/1/2/3, and troubleshooting:
+   - 401/404: the token;
+   - 400 "chat not found": the chat ID, or Start not pressed;
+   - 403: Start not pressed, or the bot is blocked;
+   - 429: wait;
+   - oversize;
+   - a possible duplicate message after a timeout.
+
+DESIGN_COMPLETE

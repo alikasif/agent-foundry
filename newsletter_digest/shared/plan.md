@@ -669,3 +669,278 @@ T024 adds a `## Library verification (article fetching, 2026-11-01)` table to
   `git show --stat HEAD` after committing. `shared/task_list.json` keeps the
   `json.dumps(indent=2, ensure_ascii=True)`, no-trailing-newline format.
 - Local commits only; never push.
+
+# Telegram PDF delivery (2026-11-02)
+
+Amendment plan for PRD FR-037..FR-052, the "Telegram delivery" NFRs, acceptance 16-24 and
+the approved decisions D-T1..D-T3 (Q-T1..Q-T3), designed in `shared/designs.md` "Telegram
+PDF delivery (2026-11-02)" (TD-1..TD-16), with probed facts in `shared/verified_facts.md`
+"Telegram PDF delivery (2026-11-02)". Everything above this line (T001-T047, all done) still
+applies, including section 8 and AF-P8. **TD-1..TD-16 are the binding contract**; this
+section adds task decomposition, ordering, **[plan addition]** clarifications and the new
+verification rows. Starting point: commit `5b9f838` (src/ and tests/ last changed in
+`e13a1b2`), about 2622 tests. Status naming: new tasks are `pending` (== not started for
+ralph).
+
+## TP-1 Implementation approach
+
+Opt-in, CLI-level delivery after the HTML is written. With `--telegram` off, nothing new is
+read, imported, built or sent: `cli` never imports `delivery` (the one sanctioned nested
+import, TD-12), `Settings.build` ignores `telegram_env`, `safe_summary()` hides the new
+fields, and `render.py`, the template and `models.py` are untouched, so the T023 goldens
+stay byte-identical without regeneration. With the flag on:
+`Settings.build` validates `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` (exit 2 before any
+Gmail/LLM work) -> `run_digest` and `write_reading_list` unchanged -> `_report`, HTML path,
+`--open` -> `_deliver_to_telegram` lazily imports `delivery.deliver_reading_list` and runs
+it in a second `anyio.run`: `pdf.build_pdf(reading_list)` (fpdf2, bundled DejaVu, plain
+text only, links through `render.safe_url`), atomic write of `<html>.with_suffix(".pdf")`,
+50 MB gate, counts-only caption, `telegram.TelegramClient.send_document` (fixed
+`https://api.telegram.org`, multipart, no `parse_mode`, 3 attempts, 120 s budget, redacted
+errors) -> `DeliveryOutcome` -> stdout line 2 = PDF path, exit 0, or one D-T3 line on
+stderr and exit 3.
+
+Three safety nets come before or alongside the code:
+1. **Flag-off identity is already guarded.** The T023 goldens and
+   `tests/test_flag_off_identity.py` exist and protect render/template/models; no new
+   golden is needed because those files do not change. T048 re-runs the identity test
+   before `uv add` touches the environment. T062 adds the subprocess "no fpdf/PIL/delivery
+   module imported" test and the in-process flag-off tests (TD-12).
+2. **Architecture guard rules first (T049).** The negative TD-2 rules (forbidden and
+   only-allowed imports, allowed importers, fpdf rules, http-client rules, lazy-import rule,
+   `.reveal()` only in telegram) are written right after the scaffold, against the stub
+   modules, so every coder task gets immediate feedback. Positive "the detector sees the
+   new edges" checks and the mutation proof come after the code (T063).
+3. **No real network in tests.** T056 adds the suite-wide autouse fixture that makes
+   `telegram._default_transport` raise, and every new telegram/delivery/pdf test module has
+   an autouse socket guard (TD-13).
+
+## TP-2 Module breakdown
+
+| File | Change | Task |
+|---|---|---|
+| `pyproject.toml`, `uv.lock` | `uv add "fpdf2>=2.8.9,<2.9"`; `uv add --dev "pypdf>=6.21,<7"` | T048 |
+| `src/newsletter_digest/fonts/DejaVuSans.ttf`, `DejaVuSans-Bold.ttf`, `LICENSE` | Bundled DejaVu 2.37, sha256-verified, licence verbatim (TD-4) | T048 |
+| `src/newsletter_digest/pdf.py`, `telegram.py`, `delivery.py` | Docstring-only stubs (role + allowed imports) | T048 |
+| `tests/test_architecture.py` | T048: add the three `TIER_RANKS` entries only (stubs would otherwise fail `find_unranked_modules`). T049: TD-2 negative rules + self-tests. T063: positive detectors + mutation proof | T048, T049, T063 |
+| `src/newsletter_digest/config.py` | `SecretToken`, `TELEGRAM_ENV_VARS`, `TELEGRAM_SUMMARY_FIELDS`, regexes, 3 `Settings` fields, `build(..., telegram, telegram_env)`, `safe_summary` hiding (TD-9, TD-10) | T050 |
+| `src/newsletter_digest/telegram.py` | `TelegramClient`, classification, retry loop, `TelegramError(Kind)`, `SendResult`, `redact`, `install_log_redaction`, `_default_transport` (TD-8, TD-9) | T051 |
+| `src/newsletter_digest/pdf.py` | `pdf_text`, `Block`, `layout_reading_list`, `draw_pdf`, `build_pdf`, constants, `FETCH_NOTE_VERBS` (TD-4..TD-6) | T052 |
+| `src/newsletter_digest/delivery.py` | `deliver_reading_list`, `DeliveryOutcome`, `pdf_path_for`, `build_caption`, atomic write, size gate (TD-6, TD-11) | T053 |
+| `src/newsletter_digest/cli.py` | `--telegram`, conditional env read, `_deliver_to_telegram`, exit 3, docstrings (TD-11, TD-12) | T054 |
+| `tests/test_config_telegram.py` | new | T055 |
+| `tests/test_telegram.py`, `tests/conftest.py` (additive autouse guard) | new / additive | T056 |
+| `tests/test_pdf.py` | new | T057 |
+| `tests/test_render_pdf_parity.py` | new | T058 |
+| `tests/test_delivery.py` | new | T059 |
+| `tests/test_cli_telegram.py`, `tests/test_cli.py` (`ALL_OPTIONS` += `"--telegram"` only) | new / additive | T060 |
+| `tests/test_telegram_redaction.py` | new: end-to-end token-redaction matrix (TD-9 tests) | T061 |
+| `tests/test_flag_off_identity.py` | additive tests only (TD-12); goldens untouched | T062 |
+| `README.md`, `.env.example` | `## Telegram delivery` + `### Telegram setup`, CLI/env/exit-code tables, privacy, troubleshooting; commented placeholders | T064 |
+| `shared/reviews/T065_review.md`, `T066_arch_review.md` | reviews | T065, T066 |
+
+`models.py`, `render.py`, `templates/`, `agent.py`, `store.py`, `tools.py`, `gmail_mcp.py`,
+`enrich.py`, `fetch.py`, `netguard.py`, `extract.py`, `links.py`, `llm.py`, `prompts.py`
+and the `flag_off_*` goldens are **not modified** by any task.
+
+## TP-3 Agent responsibilities
+
+| `assigned_to` | Tasks |
+|---|---|
+| `project_structure` | T048 (deps, fonts, stubs, verification table) |
+| `python_test` | T049 (guard rules first), T055-T063 (tests), T067 (final gate) |
+| `python_coder` | T050 config, T051 telegram, T052 pdf, T053 delivery, T054 cli |
+| `documentation` | T064 |
+| `backend_reviewer` | T065 (secrets and network; PDF output safety as a secondary section) |
+| `architecture_reviewer` | T066 |
+
+## TP-4 Dependency graph
+
+```
+T048 scaffold: identity pre-check, uv add fpdf2/pypdf, fonts+LICENSE, stubs, TIER_RANKS
+ ├─► T049 arch guard rules (negative, stub-safe) ──┐
+ ├─► T050 config (SecretToken, Settings) ──────────┼─► T051 telegram ──┐
+ └─► T052 pdf ─────────────────────────────────────┴──────────────────┴─► T053 delivery ─► T054 cli
+Tests:  T055◄T050  T056◄T051  T057◄T052  T058◄T052  T059◄T053
+        T060◄T054  T061◄T054  T062◄T054  T063◄T049,T050,T051,T052,T053,T054
+Docs:   T064◄T054
+Review: T065◄T050,T051,T052,T053,T054,T056,T057,T061
+Arch:   T066◄T050,T051,T052,T053,T054,T062,T063
+Final:  T067◄T055..T066
+```
+
+T051 waits for T049 because it introduces the second `httpx.AsyncClient` site: the
+pre-amendment rule allows it only in `fetch.py`, and T049 relaxes that rule to
+`{fetch, telegram}` with the stricter telegram literals. All other coder tasks only need
+T048. T053 imports the real `pdf`/`telegram` names, and T054 imports
+`delivery.deliver_reading_list`, so they are sequential.
+
+Parallel waves:
+1. T048
+2. T049, T050, T052
+3. T051, T055, T057, T058
+4. T053, T056
+5. T054, T059
+6. T060, T061, T062, T063, T064
+7. T065, T066
+8. T067
+
+## TP-5 API contracts (binding; details in TD-8..TD-11)
+
+### config.py (stays pure stdlib)
+```python
+TELEGRAM_ENV_VARS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+TELEGRAM_SUMMARY_FIELDS = frozenset({"telegram", "telegram_bot_token", "telegram_chat_id"})
+_BOT_TOKEN_RE = re.compile(r"[0-9]{1,20}:[A-Za-z0-9_-]{20,128}")   # fullmatch
+_CHAT_ID_RE = re.compile(r"[1-9][0-9]{0,19}")                       # fullmatch
+class SecretToken:            # __slots__ = ("_value",)
+    def __init__(self, value: str) -> None
+    def reveal(self) -> str   # called ONLY in telegram.py (AST rule)
+    # __repr__/__str__/__format__ -> "***"; __reduce__ raises TypeError
+@dataclass(frozen=True) class Settings:   # appended after existing fields
+    telegram: bool = False
+    telegram_bot_token: SecretToken | None = field(default=None, repr=False)
+    telegram_chat_id: str | None = None
+@classmethod
+def build(cls, *, <existing kwargs unchanged>, telegram: bool = False,
+          telegram_env: Mapping[str, str | None] | None = None) -> Settings
+    # flag off: telegram_env ignored entirely (not even validated)
+    # flag on: strip; one ConfigError naming every missing/blank var (singular/plural) and
+    # "README > Telegram delivery > Telegram setup"; malformed token / chat ID -> ConfigError
+    # that never echoes the value
+def safe_summary(self) -> dict[str, object]
+    # always hides telegram_bot_token, telegram_chat_id; hides telegram while False
+```
+**[plan addition]** Telegram validation runs after the existing checks (API key, model,
+window, fetch env), so existing error precedence and tests are unchanged.
+
+### telegram.py (imports only `config`; httpx, anyio, stdlib)
+```python
+TELEGRAM_API_BASE = "https://api.telegram.org"; MAX_UPLOAD_BYTES = 50_000_000
+MAX_CAPTION_CHARS = 1024; MAX_ATTEMPTS = 3; BACKOFF_S = (2.0, 4.0)
+RETRY_AFTER_CAP_S = 30.0; ATTEMPT_DEADLINE_S = 45.0; TOTAL_DEADLINE_S = 120.0
+HTTP_TIMEOUT = httpx.Timeout(connect=10.0, write=30.0, read=30.0, pool=5.0)
+USER_AGENT = "newsletter-digest/0.1 (telegram-delivery)"
+REDACTED_LOGGERS = ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+                    "httpcore.proxy", "httpcore.socks")          # [plan addition] name
+class TelegramErrorKind(StrEnum): BAD_TOKEN, BAD_CHAT, FORBIDDEN, BAD_REQUEST, TOO_LARGE,
+    RATE_LIMITED, SERVER_ERROR, NETWORK, TIMEOUT, REDIRECT, BAD_RESPONSE, DEADLINE
+class TelegramError(Exception):   # str() = redacted one-line reason; never chained
+    kind: TelegramErrorKind; status: int | None; attempts: int
+@dataclass(frozen=True) class SendResult: message_id: int | None; attempts: int
+class TelegramClient:             # async context manager, one httpx.AsyncClient
+    def __init__(self, token: SecretToken, *, transport: httpx.AsyncBaseTransport | None = None,
+                 sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+                 max_attempts: int = MAX_ATTEMPTS, total_deadline: float = TOTAL_DEADLINE_S,
+                 attempt_deadline: float = ATTEMPT_DEADLINE_S) -> None
+    async def send_document(self, chat_id: str, filename: str, content: bytes,
+                            caption: str) -> SendResult        # raises TelegramError only
+def redact(text: str) -> str
+def install_log_redaction() -> None                            # idempotent
+def _default_transport() -> httpx.AsyncBaseTransport          # the ONLY real transport
+```
+There is no base-URL parameter at all (TD-8 is stricter than the PRD seam).
+
+### pdf.py (imports `models`, `render.safe_url`; fpdf at module level)
+```python
+PAGE_SIZE_MM = (100, 178); FONT_DIR = Path(__file__).with_name("fonts")
+FETCH_NOTE_VERBS: Mapping[str, str] = {"SUMMARY_FAILED": "summarise", "RATE_LIMITED": "summarise"}
+def pdf_text(value: str) -> str                    # TD-4 steps 1-4
+@dataclass(frozen=True) class Block: kind: BlockKind; text: str; link: str | None = None
+    # [plan addition] BlockKind (StrEnum): TITLE, HEADER_LINE, NOTE, SECTION, ITEM_TITLE,
+    # SUMMARY, KEY_POINT, META, FETCH_NOTE, REASON, EMPTY, FOOTER
+def layout_reading_list(reading_list: ReadingList) -> list[Block]   # pure, no fpdf
+def draw_pdf(blocks: Sequence[Block], *, title: str, created_at: datetime) -> bytes
+def build_pdf(reading_list: ReadingList) -> bytes  # layout + draw
+```
+**[plan addition]** `pdf_text` coverage needs the loaded fonts; to keep `pdf_text` callable
+without a build, it may load coverage lazily (cached) from fpdf2's `TTFFont.cmap`, with the
+fontTools `getBestCmap()` fallback from TD-16 recorded in notes if the attribute moved.
+
+### delivery.py (imports `pdf`, `telegram`, `models`, `config`)
+```python
+@dataclass(frozen=True) class DeliveryOutcome:
+    pdf_path: Path | None; delivered: bool; reason: str | None; attempts: int
+def pdf_path_for(html_path: Path) -> Path          # html_path.with_suffix(".pdf")
+def build_caption(reading_list: ReadingList) -> str  # TD-11 three variants, counts only
+async def deliver_reading_list(reading_list: ReadingList, html_path: Path, settings: Settings,
+        *, client_factory: Callable[[SecretToken], TelegramClient] = TelegramClient,
+        builder: Callable[[ReadingList], bytes] = build_pdf) -> DeliveryOutcome
+    # never raises Exception for expected failures; every reason passes through redact()
+```
+
+### cli.py
+`--telegram` (`is_flag=True`, no `envvar`), `telegram_env` read only when set, order
+`write_reading_list` -> `_report` -> echo HTML path -> `--open` -> `_deliver_to_telegram`.
+`_deliver_to_telegram(reading_list, html_path, settings) -> None` holds the only nested
+import (`from newsletter_digest.delivery import deliver_reading_list`) inside `try`, maps any
+`Exception` (including `ImportError`) to a failed outcome with
+`redact(f"{type(exc).__name__}: {exc}")` (`redact` imported lazily too), echoes the PDF path
+when the file exists, prints `Sent <name> to Telegram.` or the D-T3 line
+(`markup=False`, `highlight=False`) and calls `click.get_current_context().exit(3)` on
+failure. Exit codes 0/1/2/3 per TD-11; module docstring updated.
+
+## TP-6 Key decisions (planning level)
+
+1. **No new goldens.** render/template/models are not touched, so the T023 goldens remain
+   the flag-off oracle; regenerating them would weaken the guarantee.
+2. **Existing test files: enumerated additive edits only** (TD-12 allows `ALL_OPTIONS`;
+   TD-2 and TD-13 require the architecture and conftest changes). Allowed hunks:
+   `tests/test_architecture.py` (T048 three `TIER_RANKS` lines; T049/T063 TD-2 rules,
+   including relaxing the single `async_client_sites(...) == ["fetch"]` assertion),
+   `tests/test_cli.py` (`"--telegram"` appended to `ALL_OPTIONS`), `tests/conftest.py`
+   (one autouse fixture), `tests/test_flag_off_identity.py` (new test functions only). No
+   other existing test file or golden changes; T067 checks this with
+   `git diff 5b9f838 -- newsletter_digest/tests/`.
+3. **Guard rules before code** (T049), split from the positive detectors (T063), so the
+   suite stays green after every task and coders get immediate architecture feedback.
+4. **Redaction tested twice**: at client level in T056 (every TD-8 row with the token
+   fixture, logger filters on all six loggers, `__cause__`/`__context__` None) and end to
+   end through the CLI in T061 (CliRunner stdout/stderr, caplog at DEBUG on root/httpx/
+   httpcore.*, `str`/`repr`/formatted traceback of every error, whitespace-stripped
+   comparison because Rich folds long tokens, learnings T016).
+5. **One backend review** focused on secrets and network (as requested), with PDF output
+   safety as a secondary checklist so `pdf.py` is not left unreviewed; the architecture
+   review covers layering, lazy import and flag-off identity.
+6. **Manual end-to-end (acceptance 24)** needs a real bot; T067 runs every offline gate and
+   lists the manual steps for the user, it does not block on them.
+7. **Font download** happens once in T048 from the pinned DejaVu release URL, verified by
+   the zip and per-file sha256 from `verified_facts.md`; a mismatch stops the task (no
+   other source is acceptable).
+
+## TP-7 Library verification rows (owned by tasks)
+
+T048 adds `## Library verification (Telegram delivery, 2026-11-02)` to
+`shared/implementation-notes.md`, directly before `## Task notes`, with these rows
+(Result cells `TODO`), same columns as the earlier tables:
+
+| ID | Item | Owner |
+|---|---|---|
+| V21 | Versions pinned by `uv add` (fpdf2, pillow, fonttools, defusedxml; dev pypdf) and `uv lock --check` | T048 |
+| V22 | DejaVu 2.37 zip sha256 and per-file sha256 match `verified_facts.md`; `LICENSE` copied verbatim; `uv build --wheel` contains `newsletter_digest/fonts/*` | T048 |
+| V23 | fpdf2 signatures on the pinned version: `FPDF(...)`, `multi_cell`, `cell`, `add_font`, `set_display_mode`, `start_section`, `will_page_break`, `set_creation_date`, `set_lang`; `markdown` default False | T052 |
+| V24 | `str_alias_nb_pages = None` keeps `{nb}` literal | T052 |
+| V25 | `pdf.fonts[<family>].cmap` exists; U+0416 covered, U+4E2D not; missing-glyph log goes to logger `fpdf` | T052 |
+| V26 | `link=` on `multi_cell` writes `/S /URI` annotations per wrapped line; `start_section` adds no annotation; builds are byte-identical with a fixed creation date | T052 |
+| V27 | httpx 0.28.1 logs the full URL at INFO on `httpx`; httpcore logger names; `exc.request.url` holds the token while `str(exc)` does not | T051 |
+| V28 | `follow_redirects=False` returns a 3xx response unchanged; `AsyncHTTPTransport(retries=0)` signature; `MockTransport` sees multipart `chat_id`, `caption`, `document` parts | T051 |
+| V29 | `import newsletter_digest.cli` loads neither `fpdf` nor `PIL`; `anyio.run` can run a second time after `run_digest` | T054 |
+| V30 | click 8.5: `is_flag` without `envvar` ignores env; `ctx.exit(3)` gives exit code 3 under `CliRunner` and the console script | T054 |
+
+## TP-8 Process rules (additions to section 8 and AF-P8)
+
+- Every task reads `shared/designs.md` TD-1..TD-16, `shared/verified_facts.md` "Telegram PDF
+  delivery (2026-11-02)" and this section first. Record every deviation from TD-* in
+  `shared/implementation-notes.md` (FR-022), in the task's own `## T0xx — <title>` section
+  and owned V-rows (re-read before editing; targeted edits only).
+- `tests/test_flag_off_identity.py` and the full suite must pass at the end of every task.
+- Never read, print, copy or touch `.env` or `out/`. Tests use the fixture token
+  `123456789:TESTtoken_secret-AAAAAAAAAAAAAAAAAAAAAAAAAA` and fixture chat ID only; no real
+  token is ever needed except in the user's manual end-to-end run.
+- No test opens a socket or builds a real transport: use `httpx.MockTransport` through the
+  `transport=` / `client_factory=` seams; never call `_default_transport()` in tests.
+- Never call `response.raise_for_status()`, never pass `exc_info=` for delivery errors,
+  never chain an httpx exception, never log or store the request URL.
+- Prefix scratch files with the task id (learnings T027). Stage only your own files and
+  commit in one command; check `git show --stat HEAD`. `shared/task_list.json` keeps the
+  `json.dumps(indent=2, ensure_ascii=True)`, no-trailing-newline format.
+- Local commits only; never push.
