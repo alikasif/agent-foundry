@@ -2831,3 +2831,46 @@ calls them today; later code must not `asdict` a flag-on `Settings`.
 coverage from this file alone (`uv run --with coverage`; misses are pre-existing
 window/fetch/query lines only); full suite 2897 passed, 2 deselected; `ruff format`,
 `ruff check .` and `pyrefly check` clean.
+
+## T058 — HTML/PDF parity test over the same ReadingList
+
+`tests/test_render_pdf_parity.py` (new): 4 fixtures (ranked, unranked, empty from
+`tests/flag_off_fixture.py`, plus `build_fetch_on_reading_list` built in the test) x 9
+parametrised tests, plus 4 fetch-on and 1 guard test (40 tests, ~1 s).
+
+Decisions not covered by the spec:
+- **Comparison model.** The HTML is parsed with `lxml.html` into a `DocView` (header lines,
+  sections with `<Topic> (<count>)` headings, items as title + body lines, empty state,
+  `Generated` line), every string run through `pdf.pdf_text`. The PDF side is pypdf
+  `extract_text` per page with the last line (the page number, asserted equal to the page
+  index) dropped, joined and whitespace-collapsed. Tests: section order (PDF outline vs
+  HTML `<h2>`), titles per section, each item's text between its title and the next title
+  equals the HTML item exactly, header and notes, empty state, `Generated` prefix, whole
+  text equality, no `Read here`/full text.
+- **Unknown item elements fail.** The item mapper walks the `.body` children in HTML order
+  and raises on any element it does not map (`details.read-here` is the one explicit skip),
+  so a new template field forces a parity decision.
+- **Intended differences encoded on the HTML side** (from the T052 notes): the counts line
+  gets `· Must read: <n>` appended when `reading_list.ranked` (taken from the model, the
+  HTML has no ranked marker; n = the HTML Must read section's item count, 0 if absent); only
+  the `YYYY-MM-DD HH:MM` prefix of the footer timestamp is compared; the footer's second
+  sentence, the TOC and the mark-read control are ignored. The separator is joined before
+  `pdf_text` (which strips a leading space).
+- **Fetch-on fixture** (ranked fixture + `model_copy`): fetched items with and without key
+  points, SUMMARY_FAILED/RATE_LIMITED ("summarise"), PAYWALLED/TIMED_OUT ("fetch"), a
+  silent DUPLICATE, `excluded=2` and a `skipped_reason` (set together with fetched items for
+  coverage of the note line, not a realistic run). Titles, summaries and key points carry
+  CJK, emoji, a ZWJ family, ZWJ/ZWSP and bidi override characters, so the U+FFFD and
+  Cf-drop paths are compared through `pdf_text`. No RTL text: pypdf extracts it visually
+  reversed (TD-3), left to `tests/test_pdf.py`.
+- **Socket guard is module-scoped** (`pytest.MonkeyPatch.context()`), because the renders
+  are module-scoped fixtures built once per fixture; `rendered` depends on it explicitly.
+- **Mutation check** (scratch `-p` plugin patching `newsletter_digest.pdf`, not committed):
+  9 of 9 mutants killed (fetch-note verb map, badge dropped, full text added, key points
+  dropped, item order reversed, DUPLICATE note shown, reason dropped, must-read count off by
+  one, `Generated` line dropped).
+
+Tradeoffs:
+- Titles are located by substring search in order; fixture titles are distinctive, and the
+  whole-text equality test backs it up.
+- No coverage number: pytest-cov is not a project dependency (not added mid-batch).

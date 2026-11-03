@@ -338,3 +338,7 @@
 - (T055) A `SecretToken` whose `__reduce__` raises also blocks `copy.deepcopy` and
   `dataclasses.asdict` of any dataclass holding it (`copy.copy` and `replace` still
   work). Do not `asdict`/deepcopy a flag-on `Settings`.
+- (T058) pypdf `extract_text` on the fpdf2 reading-list PDF puts the footer page number as
+  the last line of each page; drop it before joining pages or it lands mid-sentence when
+  an item spans a page break. The outline (`reader.outline`) gives the section headings
+  directly. `pdf_text` strips leading spaces, so join separators before calling it.
