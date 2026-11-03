@@ -342,3 +342,11 @@
   the last line of each page; drop it before joining pages or it lands mid-sentence when
   an item spans a page break. The outline (`reader.outline`) gives the section headings
   directly. `pdf_text` strips leading spaces, so join separators before calling it.
+- (T051) httpx 0.28 does not percent-encode `:` in the path, so the `httpx` INFO line holds
+  the raw `bot<id>:<secret>`; a `bot\d+:[A-Za-z0-9_-]+` regex matches it. To keep one
+  `.reveal()` site and still register the token for redaction, register it in the same
+  frame that builds the URL.
+- (T051) Budget checks under a fake `sleep`: `scope.deadline - anyio.current_time()` of a
+  `move_on_after` scope still measures real loop time, so "delay exceeds the remaining
+  budget" is testable with a small `total_deadline` (e.g. 3 s with 2 s/4 s backoff stops
+  after the 2 s wait) and zero real waiting.

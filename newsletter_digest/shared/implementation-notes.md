@@ -41,8 +41,8 @@
 | V24 | `str_alias_nb_pages = None` keeps `{nb}` literal | T052 |  |  | TODO |
 | V25 | `pdf.fonts[<family>].cmap` exists; U+0416 covered, U+4E2D not; missing-glyph log goes to logger `fpdf` | T052 |  |  | TODO |
 | V26 | `link=` on `multi_cell` writes `/S /URI` annotations per wrapped line; `start_section` adds no annotation; builds are byte-identical with a fixed creation date | T052 |  |  | TODO |
-| V27 | httpx 0.28.1 logs the full URL at INFO on `httpx`; httpcore logger names; `exc.request.url` holds the token while `str(exc)` does not | T051 |  |  | TODO |
-| V28 | `follow_redirects=False` returns a 3xx response unchanged; `AsyncHTTPTransport(retries=0)` signature; `MockTransport` sees multipart `chat_id`, `caption`, `document` parts | T051 |  |  | TODO |
+| V27 | httpx 0.28.1 logs the full URL at INFO on `httpx`; httpcore logger names; `exc.request.url` holds the token while `str(exc)` does not | T051 | httpx 0.28.1, httpcore 1.0.9 (uv.lock) | Offline scratch probe (`uv run python -I`, sockets patched to raise, `MockTransport`, fixture token); grep of `getLogger` in the installed packages | Confirmed: `httpx` INFO `HTTP Request: POST https://api.telegram.org/bot<token>/sendDocument "HTTP/1.1 200 OK"` with the raw token (`:` not percent-encoded); httpcore loggers are exactly `httpcore.connection/.http11/.http2/.proxy/.socks`, httpx only `httpx`; for a `ConnectError` `str(exc)` lacks the token, `str(exc.request.url)` has it; `raise_for_status()` message has it. `REDACTED_LOGGERS` filters remove it (smoke: 70 records, 0 leaks) |
+| V28 | `follow_redirects=False` returns a 3xx response unchanged; `AsyncHTTPTransport(retries=0)` signature; `MockTransport` sees multipart `chat_id`, `caption`, `document` parts | T051 | httpx 0.28.1 | Same offline probe; `inspect.signature(httpx.AsyncHTTPTransport.__init__)`; warnings as errors | Confirmed: a 302 comes back as the response (Location kept, `next_request` set, not sent); signature has `retries: int = 0` (also `verify=True`, `trust_env=True`, which we leave default); `data=` dict plus `files=` gives `multipart/form-data` with parts `chat_id`, `caption`, `document; filename=...` and `Content-Type: application/pdf`, no deprecation warning |
 | V29 | `import newsletter_digest.cli` loads neither `fpdf` nor `PIL`; `anyio.run` can run a second time after `run_digest` | T054 |  |  | TODO |
 | V30 | click 8.5: `is_flag` without `envvar` ignores env; `ctx.exit(3)` gives exit code 3 under `CliRunner` and the console script | T054 |  |  | TODO |
 
@@ -2874,3 +2874,50 @@ Tradeoffs:
 - Titles are located by substring search in order; fixture titles are distinctive, and the
   whole-text equality test backs it up.
 - No coverage number: pytest-cov is not a project dependency (not added mid-batch).
+
+## T051 — telegram.py: Bot API sendDocument client with retries, deadlines and redaction
+
+- **One `reveal()` call, token registered on first send, not on `__aenter__`.** TD-8/TD-9
+  say the client registers its token for `redact()` on `__aenter__`, but registering needs
+  the value, and the task requires the URL builder to be the package's only `reveal()`.
+  `_post` reveals once, adds the full token and its secret half to the module set, then
+  builds the URL. Nothing can contain the token before the first request, so redaction
+  coverage is the same. Registered secrets stay in the set after `__aexit__` (later
+  messages from `delivery` are still redacted). Empty parts are never registered (an
+  empty string would make `str.replace` insert `***` everywhere).
+- **Budget stop raises the last error, not DEADLINE.** TD-8: "if `delay` exceeds the time
+  left in the 120 s budget, the client stops and raises the last error". So that case keeps
+  the last failure's kind/status (e.g. `SERVER_ERROR`, `HTTP 500 from Telegram`).
+  `DEADLINE` is raised only when `move_on_after(total_deadline)` actually fires; its text
+  is `gave up after <total_deadline:g> s, last error: <reason>` (the last-error part only
+  when an attempt had finished). Remaining time is `scope.deadline - anyio.current_time()`.
+- **2xx with `ok` not true:** if the JSON `error_code` is an int in 400..599 it is
+  classified as that status (so `TelegramError.status` is the `error_code`, and e.g. 401
+  gives `BAD_TOKEN`); otherwise `BAD_RESPONSE` `HTTP 200: <description or "unexpected
+  response">`. Any 2xx with `ok: true` is success; `message_id` is `None` unless
+  `result.message_id` is an int (bool excluded).
+- **`retry_after`** accepted only when `type(v) is int` (so `True` is rejected) and
+  0..3600; otherwise treated as missing (backoff retry). 0..30 waits `retry_after`;
+  31..3600 fails at once with `HTTP 429: rate limited, retry after N s`.
+- **400 without a description** reads `HTTP 400: bad request` (TD-8 gives no fallback for
+  that row). The "chat" check is case-insensitive on the cleaned description.
+- **Description cleaning order:** every C* and Z* code point becomes a space, whitespace
+  is collapsed, then `redact()`, then truncation to 200. Redacting before truncating means a
+  cut can never leave a partial token.
+- **httpx errors that are not `TransportError`** (e.g. `DecodingError`) map to
+  `BAD_RESPONSE` `unexpected response (<ExcClass>)`, not retried. `TimeoutException` and
+  anyio's per-attempt `TimeoutError` map to `TIMEOUT`. `redact(str(exc))` is logged only at
+  DEBUG on `newsletter_digest.telegram`; the user text has only the class name.
+- **Retry WARNING lives in telegram, not delivery.** TD-9 lists `Telegram attempt k/3
+  failed (<kind>); retrying in N s` under `newsletter_digest.delivery`, but `delivery` only
+  sees the final outcome of `send_document`. It is logged on `newsletter_digest.telegram`
+  (a child of the CLI-configured logger, so it shows the same way).
+- **Backoff beyond 3 attempts** (test seam `max_attempts > 3`) reuses the last
+  `BACKOFF_S` value (4 s).
+- Extra module constants: `MAX_DESCRIPTION_CHARS = 200`, `MAX_RETRY_AFTER_S = 3600`, and a
+  private `_FIXED_ERRORS` table for the 401/403/404/413 rows. `TelegramError(kind, reason,
+  *, status=None, attempts=0)` passes `reason` through `redact()` itself.
+- `send_document` outside `async with` raises `RuntimeError` (programmer error, not a
+  `TelegramError`).
+- Verified offline only (scratch smoke script over every TD-8 row, both deadlines, the
+  budget stop, request shape, redaction and filter idempotence); real tests are T056.
