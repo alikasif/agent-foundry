@@ -3115,3 +3115,12 @@ No issues found in pdf.py.
   regex, filter no-op/args kept, idempotence, httpcore names, install on enter,
   TelegramError self-redaction, chaining, class-name-only reasons, unredacted DEBUG,
   DEADLINE last error, default transport, WARNING level, base URL).
+
+## T064 — README Telegram delivery
+
+- Added `## Telegram delivery` (with `### Telegram setup`, What is sent, PDF limits, Licences, Troubleshooting Telegram, Trying it end to end) before "Safety model". Claims checked against cli.py, config.py, delivery.py, telegram.py and `--help`.
+- Updated the env var table, CLI options table, exit codes (2 extended, 3 added), stdout description, Privacy section, module table and intro.
+- Not in the spec, decided here: troubleshooting table lists the actual short messages from the code; retry facts (3 attempts, 120 s, 429 waits up to 30 s) come from telegram.py constants. The 50 MB limit is documented as the decimal 50,000,000 bytes the code checks.
+- The claim "Telegram can read bot chats" is phrased from the CLI help text ("not end-to-end encrypted"). The duplicate-after-timeout note says the tool cannot tell whether the first attempt arrived.
+- .env.example: only appended a commented block (two placeholders, no values); existing lines untouched.
+- Wheel contains the DejaVu licence per T049/T067 plan; README states it but I did not build a wheel here.

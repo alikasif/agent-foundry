@@ -10,7 +10,9 @@ Papers, Industry/Funding, Tools & Libraries, Other).
 
 Optionally (`--fetch-articles`, off by default) it also fetches the linked pages of your
 top items and summarises them; see
-[Fetching article pages](#fetching-article-pages---fetch-articles).
+[Fetching article pages](#fetching-article-pages---fetch-articles). Optionally
+(`--telegram`) it also sends a PDF copy to your own Telegram chat; see
+[Telegram delivery](#telegram-delivery).
 
 Under the hood a LangChain deep agent searches Gmail through a Gmail MCP server
 (read-only tools only), reads each email with a reader subagent, and ranks the
@@ -173,8 +175,12 @@ is already set in your shell wins over the same variable in `.env`.
 | `NEWSLETTER_FETCH_CONCURRENCY` | `4` | Concurrent page fetches, 1 to 16. Environment only. |
 | `NEWSLETTER_FETCH_LLM_CONCURRENCY` | `2` | Concurrent summary calls, 1 to 8. Environment only. |
 | `NEWSLETTER_FETCH_LLM_INTERVAL` | `3.1` if the reader model name ends in `:free`, otherwise `0` | Minimum seconds between the starts of summary calls, 0 to 60. An explicit value, including `0`, wins. Environment only. |
+| `TELEGRAM_BOT_TOKEN` | none (required with `--telegram`) | Bot token from @BotFather. Read only when `--telegram` is given; never printed or logged. Environment only. See [Telegram setup](#telegram-setup). |
+| `TELEGRAM_CHAT_ID` | none (required with `--telegram`) | Your own numeric chat ID (a positive integer). Read only when `--telegram` is given. Environment only. |
 
-Blank values count as unset. The fetch variables are validated on every run, even with
+Blank values count as unset. The two `TELEGRAM_*` variables are ignored unless
+`--telegram` is given; with it, a missing, blank or malformed value exits with code 2
+before any Gmail or model work. The fetch variables are validated on every run, even with
 fetching off; an invalid value exits with code 2. `GMAIL_OAUTH_PATH`, `GMAIL_CREDENTIALS_PATH`, proxy
 variables and `NODE_EXTRA_CA_CERTS` are forwarded to the MCP server if set (see
 [Gmail MCP setup](#gmail-mcp-setup)).
@@ -197,6 +203,7 @@ uv run newsletter-digest [OPTIONS]
 | `--open` | none | off | Open the reading list in the default browser. On WSL it opens in the Windows default browser (see below). |
 | `--fetch-articles` | `NEWSLETTER_FETCH_ARTICLES` | off | Also fetch the linked pages of must-read and worth-reading items and summarise them. See [Privacy](#privacy). |
 | `--max-fetch INTEGER` | `NEWSLETTER_MAX_FETCH` | `15` | Maximum number of article pages to fetch, 1 to 50. Only used with `--fetch-articles`. |
+| `--telegram` | none (flag only) | off | Also save a PDF copy next to the HTML and send it to your own Telegram chat. Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. See [Telegram delivery](#telegram-delivery) and [Privacy](#privacy). |
 | `--log-level [debug\|info\|warning\|error]` | none | `INFO` | Logging verbosity. `DEBUG` also prints tracebacks on failure. |
 | `-h`, `--help` | none | none | Show help and exit. |
 
@@ -221,10 +228,12 @@ one-line hint with the file path is printed to stderr; the exit code is unchange
 | --- | --- |
 | `0` | Success, including an empty result and an unranked fallback list. |
 | `1` | Runtime failure: Gmail MCP launch, auth or search error, or an agent failure. Re-run with `--log-level DEBUG` for the traceback. |
-| `2` | Usage or configuration error: missing `OPENROUTER_API_KEY` or model, invalid window, `--max-emails` out of range, unparsable `GMAIL_MCP_ARGS`. |
+| `2` | Usage or configuration error: missing `OPENROUTER_API_KEY` or model, invalid window, `--max-emails` out of range, unparsable `GMAIL_MCP_ARGS`. With `--telegram`: `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` missing, blank or malformed (checked before any work starts). |
+| `3` | Only with `--telegram`: the digest was written (HTML, and the PDF when it was built) but the PDF was not delivered to Telegram. A one-line reason on stderr says why; see [Troubleshooting Telegram](#troubleshooting-telegram). |
 
 Logs, the summary line (`<n> articles from <processed> of <found> emails`) and warnings go
-to stderr. stdout carries only the path of the written file.
+to stderr. stdout carries only the paths of the written files: the HTML path, and with
+`--telegram` the PDF path on a second line whenever the PDF file exists.
 
 ## Usage
 
@@ -381,6 +390,143 @@ reads `Couldn't summarise the article: <reason>`.
 - The extraction library (trafilatura) is imported when the tool starts, which adds a
   little start-up time even with the flag off.
 
+## Telegram delivery
+
+With `--telegram`, the tool also builds a PDF copy of the same reading list and sends it
+to your own Telegram chat through a bot you create. The HTML file is written first and is
+never changed by this step. Without the flag nothing Telegram-related is loaded, read or
+sent, and the HTML output is unchanged.
+
+```bash
+uv run newsletter-digest --window 1w --telegram
+```
+
+### Telegram setup
+
+You need a Telegram account, a bot you own and your chat ID. About five minutes, once.
+
+1. **Create the bot.** In Telegram, open **@BotFather** and send `/newbot`. Give a display
+   name, then a username that ends in `bot` (5 to 32 characters: Latin letters, digits and
+   underscores). BotFather replies with the bot token, which looks like
+   `<digits>:<letters, digits, _ or ->`.
+   - **Keep the token secret.** Anyone with it can act as your bot. If it leaks, send
+     `/token` to BotFather to generate a new one, then update `.env`.
+2. **Save the token.** Add it to `.env` in the directory you run the tool from (see
+   `.env.example`, where the Telegram lines are commented out):
+
+   ```text
+   TELEGRAM_BOT_TOKEN=<token from BotFather>
+   ```
+
+3. **Press Start.** Open `https://t.me/<your_bot_username>` and press **Start** (this
+   sends `/start`). A bot cannot message you until you do.
+4. **Find your chat ID.** The one-liner below reads the token from `.env`, so it does not
+   end up in your shell history or in `ps` output. It prints the `message.chat.id` values
+   seen in the bot's recent messages:
+
+   ```bash
+   uv run python -c "import os, httpx, dotenv; dotenv.load_dotenv(); t = os.environ['TELEGRAM_BOT_TOKEN']; print({u['message']['chat']['id'] for u in httpx.get(f'https://api.telegram.org/bot{t}/getUpdates').json()['result'] if 'message' in u})"
+   ```
+
+   The number is a positive integer for a private chat.
+   - **Alternative with curl.** `read -rs` keeps the token off the command line and out of
+     history. Read `result[].message.chat.id` in the output:
+
+     ```bash
+     read -rs TELEGRAM_BOT_TOKEN; curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getUpdates"
+     ```
+
+   - **Do not paste the URL, the command output or your terminal log into shared places.**
+     The URL contains your token, and the output contains your chat ID.
+   - **Empty result (`set()` or `"result": []`)?** Send `/start` (or any message) to the
+     bot again and re-run. Telegram keeps updates for at most 24 hours, and returns none
+     while a webhook is set for the bot.
+5. **Save the chat ID.** Add it to `.env`:
+
+   ```text
+   TELEGRAM_CHAT_ID=<the number>
+   ```
+
+   Only your own private chat ID (a positive number) is accepted. Group and channel IDs
+   (negative numbers) are not supported.
+6. **Run it.** `uv run newsletter-digest --window 1w --max-emails 5 --telegram`
+
+### What is sent
+
+- **The PDF** is saved as `<out>/reading-list-YYYY-MM-DD.pdf`, beside the HTML (a PDF
+  from an earlier run on the same date is replaced), and sent to your chat as a document.
+  It is laid out for a phone screen (100 x 178 mm pages) with the same sections as the
+  HTML: header counts, must read, then topic groups, each item with a linked title,
+  summary, newsletter names, date and priority. Fetched article text ("Read here") is not
+  included.
+- **The caption** is plain text built from the window and counts only, never titles or
+  email text:
+  - `Newsletter digest: last 1w - 12 articles, 3 must-read`
+  - `Newsletter digest: last 1w - 12 articles, unranked` (the ranking fell back)
+  - `Newsletter digest: last 1w - no articles found`
+- **Console output.** stdout gets the HTML path, then the PDF path. stderr gets
+  `Sent reading-list-YYYY-MM-DD.pdf to Telegram.` on success. On failure it gets one line,
+  `Telegram delivery failed (<reason>). Saved: <files>. See README > Telegram delivery.`,
+  and the exit code is 3. The digest files are kept either way.
+- **Retries.** Timeouts, network errors, server errors (5xx) and short rate limits (429
+  with a wait of up to 30 seconds) are retried, at most 3 attempts within 120 seconds.
+
+### PDF limits
+
+- **Size:** Telegram bots can upload files up to 50 MB. The tool checks 50,000,000 bytes
+  and does not upload a larger PDF (exit 3, the PDF stays on disk). Typical PDFs are far
+  smaller.
+- **Fonts:** the PDF uses the bundled DejaVu Sans (regular and bold). Characters it lacks,
+  for example CJK (Chinese, Japanese, Korean) and Devanagari, are shown as replacement
+  marks. There is no fallback font in this version. The title link still works.
+- **Arabic** is shown with unjoined letters (no shaping), and **colour emoji** are not
+  drawn.
+
+### Licences
+
+The PDF is built with [fpdf2](https://github.com/py-pdf/fpdf2), which is licensed under
+the LGPL-3.0 and is used as an unmodified library dependency. The bundled DejaVu Sans fonts
+are under the Bitstream Vera / DejaVu licence; the licence text ships with the fonts
+(`src/newsletter_digest/fonts/LICENSE`, also included in the built wheel).
+
+### Troubleshooting Telegram
+
+Configuration errors exit with code 2 and name the variable; they end with
+`See README > Telegram delivery > Telegram setup.` Delivery problems exit with code 3.
+
+| Message (shortened) | Cause and fix |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN ... not set` / `does not look like a bot token` | Add or fix the token in `.env` (exit 2). The format is `<digits>:<letters, digits, _ or ->`. |
+| `TELEGRAM_CHAT_ID must be your own numeric chat ID` | Use the positive number from step 4, not a group or channel ID (exit 2). |
+| `invalid bot token` (HTTP 401) or `bot token not recognised` (HTTP 404) | The token is wrong, revoked or was regenerated. Copy it again from BotFather (`/token`). |
+| `HTTP 400: chat not found ...` | `TELEGRAM_CHAT_ID` is wrong, or you never pressed **Start** in the bot chat. |
+| `the bot may not message this chat` (HTTP 403) | Press **Start** in your bot chat, or unblock the bot. |
+| `HTTP 429: rate limited` | Telegram asked to slow down. Short waits are retried automatically; if it still fails, wait and re-run. |
+| `the PDF is ... bytes ..., over Telegram's 50 MB upload limit; not sent` | Use a shorter `--window` or a lower `--max-emails`. The PDF stays in the output directory. |
+| `gave up after 120 s` / `timed out` / `network error` | Check your connection and re-run. |
+| `could not build the PDF` / `could not write the PDF` | The HTML is still written. Re-run with `--log-level DEBUG`; check that the output directory is writable. A PDF from an earlier run the same day may still be there, and the message says so. |
+
+**Possible duplicate message.** If the upload times out after Telegram already received
+the file, the tool retries and you may get the same PDF twice. The tool cannot tell
+whether the first attempt arrived, so it accepts a possible duplicate rather than risk
+sending nothing.
+
+Re-running the command with `--telegram` also sends the digest again.
+
+### Trying it end to end
+
+With a real bot and your chat ID in `.env`:
+
+1. Run `uv run newsletter-digest --window 1w --max-emails 5 --telegram`.
+2. Check stdout: two lines, the `.html` path and the `.pdf` path. Check that stderr ends
+   with `Sent reading-list-<date>.pdf to Telegram.` and that the exit code is 0
+   (`echo $?`).
+3. In Telegram, open the bot chat: a PDF document with a counts-only caption should be
+   there. Open it on your phone and check the layout and the links.
+4. Failure check: set a wrong `TELEGRAM_CHAT_ID` in `.env`, re-run, and confirm the
+   exit code is 3 and that stderr names the cause. Restore the correct value afterwards.
+   Never paste the token into the terminal, an issue or a log.
+
 ## Safety model
 
 The tool is designed so that a run can read your newsletters and nothing else.
@@ -460,8 +606,15 @@ The tool is designed so that a run can read your newsletters and nothing else.
     original newsletter link. The extracted page text is written into the HTML ("Read
     here"), so treat the file accordingly.
   - Leave the flag off to avoid all of this.
-- The tool keeps no database or history. The only persisted state is the HTML file and
-  the mark-read flags in your browser.
+- **With `--telegram`, the reading list leaves your machine for Telegram.** The PDF
+  contains article titles, summaries, links, newsletter names and dates (the same derived
+  data as the HTML, without the fetched page text), and it is uploaded to Telegram's
+  servers and stored in your bot chat. The caption has counts only. Bot chats are not
+  end-to-end encrypted, so Telegram can read them. The bot token and chat ID are read only
+  with the flag, are not printed, and are scrubbed from log and error output. The PDF is
+  also kept in the output directory. Leave the flag off to send nothing.
+- The tool keeps no database or history. The only persisted state is the HTML file (plus
+  the PDF with `--telegram`) and the mark-read flags in your browser.
 
 ## Development
 
@@ -485,6 +638,8 @@ Source lives in `src/newsletter_digest/`:
 | `agent.py`, `prompts.py`, `llm.py` | Deep agent assembly, prompts, model factory |
 | `models.py`, `store.py` | Pydantic models, in-memory article store and de-duplication |
 | `render.py`, `templates/` | HTML reading list rendering |
+| `pdf.py`, `fonts/` | PDF builder (fpdf2) and the bundled DejaVu fonts |
+| `delivery.py`, `telegram.py` | `--telegram`: PDF write, size check, caption and the Telegram client (loaded only with the flag) |
 | `links.py` | Link classification (article, tracker, unsubscribe, social, ...) |
 | `netguard.py` | URL policy and guarded transport that refuses non-public addresses |
 | `fetch.py` | `PageFetcher`: capped, classified page downloads |
