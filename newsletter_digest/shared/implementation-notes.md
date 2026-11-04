@@ -3530,3 +3530,51 @@ records them as done (for example "V24 DONE").
   table; V32-V38 carry empty Version/How checked cells and `TODO` until their owners fill
   them.
 - No deviations from ED-*/DM-*; no tradeoffs.
+
+## T070 — config.py: EMAIL_TO parsing and validation, Settings email fields, safe_summary hiding, .env.example block
+
+- Implemented ED-5 / ED-13 / EP-5 in `config.py` (still stdlib only: no new import).
+  `parse_email_recipients` plus a private `_email_address_problem(entry) -> str | None`
+  that returns the first reason or None; the final check is `EMAIL_ADDRESS_RE.fullmatch`,
+  so every earlier reason is only reachable for an entry the regex would reject anyway.
+- **Deviation (reason order, ED-5 rule 5).** The list puts "whitespace" before
+  "`<`, `>`, quote, parenthesis" and `;`, but ED-5's own example message
+  (`'Bob <bob@exa...'` -> display names) and ED-17/T076 ("display name
+  'Bob <b@example.com>'", "semicolon separator (with the hint)") need the specific
+  reason for inputs that also contain a space. Implemented order: control character,
+  display-name characters (`<>"'()`), `;`, whitespace, non-ASCII, `@` count, > 254,
+  local part > 64, otherwise "not a valid address". Only entries with both a space and
+  one of those characters are affected; a tab is a control character and wins first.
+- **Echo format.** Implemented literally as `ascii(entry[:32]) + "..."` when cut, so the
+  ellipsis sits outside the quotes (`('aaaa...aaaa'...)`); ED-5's example shows it
+  inside the quotes and cut at 12 characters, which is illustrative only.
+  `ascii(entry[:32])` is a verbatim substring of the message.
+- **Message texts not fixed by ED-5** (all name EMAIL_TO, the 1-based entry number for
+  per-entry errors and end with `See README > Email delivery.`):
+  every per-entry message ends `... (<echo>): <reason>. Use bare addresses separated by
+  commas. See README > Email delivery.` Reasons: "control characters such as CR, LF or
+  NUL are not allowed", "display names and angle brackets are not supported" (ED-5
+  verbatim), "semicolons do not separate addresses (use commas)", "whitespace inside an
+  address is not allowed", "non-ASCII (IDN or Unicode) addresses are not supported", "it
+  must contain exactly one @", "longer than 254 characters", "longer than 64 characters
+  before @" (EP-5 plan addition verbatim), "not a valid address". Raw-length rule 2:
+  "EMAIL_TO is longer than 4096 characters; list at most 10 bare addresses separated by
+  commas. ..." (no echo). Rule 3: "EMAIL_TO has no addresses; add a comma-separated
+  list of addresses to .env, e.g. EMAIL_TO=you@example.com. ...".
+- Control characters are `[\x00-\x1f\x7f-\x9f]` (exactly Unicode category Cc), so C1
+  controls count too. Blank detection for rule 1 uses `str.strip()` (any whitespace),
+  so `"\r\n"` alone is "not set", not a CR error; rule 1 runs before the 4096 cap.
+- Added private `_MAX_EMAIL_LOCAL_CHARS = 64` and `_EMAIL_ECHO_CHARS = 32` (not in
+  EP-5, kept private), `_CONTROL_CHAR_RE` and `_DISPLAY_NAME_CHARS`.
+- `Settings.build`: the Telegram block changed from an early `return` to
+  `if telegram: settings = replace(...)` so the email block can follow it; behaviour is
+  identical. Within the email block `EMAIL_TO` is validated before
+  `EMAIL_SEND_TIMEOUT`. `email_env` is not read at all when `email` is False.
+- `safe_summary` hides `EMAIL_SUMMARY_FIELDS` and re-shows `email` and
+  `email_send_timeout` when `email` is True; flag-off keys equal the golden.
+- `.env.example`: appended the ED-13 block verbatim after the Telegram block, every line
+  commented. **Deviation from FR-068's literal** `EMAIL_TO=you@example.com` line
+  (design-raised item 5): an uncommented placeholder would make `--email` mail
+  `example.com`.
+- No test file edited (T076 owns `tests/test_config_email.py`); verified with a scratch
+  script (`T070_sanity.py`, scratchpad only) and the full suite: 3653 passed, 2 xfailed.

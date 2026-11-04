@@ -82,6 +82,26 @@ _TELEGRAM_SETUP_HINT = "See README > Telegram delivery > Telegram setup."
 _BOT_TOKEN_RE = re.compile(r"[0-9]{1,20}:[A-Za-z0-9_-]{20,128}")
 _CHAT_ID_RE = re.compile(r"[1-9][0-9]{0,19}")
 
+# Email delivery (ED-5, ED-13). Env-only; read by the CLI only when --email is set.
+EMAIL_ENV_VARS = ("EMAIL_TO", "EMAIL_SEND_TIMEOUT")
+# Addresses are always hidden from safe_summary(); the other two while email is False.
+EMAIL_SUMMARY_FIELDS = frozenset({"email", "email_to", "email_send_timeout"})
+MAX_EMAIL_RECIPIENTS = 10  # fixed, not configurable (FR-068)
+MAX_EMAIL_ADDRESS_CHARS = 254
+MAX_EMAIL_TO_CHARS = 4096  # raw value cap before splitting; bounds the work
+DEFAULT_EMAIL_SEND_TIMEOUT = 90.0
+EMAIL_SEND_TIMEOUT_RANGE: tuple[float, float] = (10, 600)
+_EMAIL_SETUP_HINT = "See README > Email delivery."
+_MAX_EMAIL_LOCAL_CHARS = 64  # the regex alone does not bound the local part
+_EMAIL_ECHO_CHARS = 32
+_EMAIL_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+# Dot-atom: no leading, trailing or double dot. ASCII only, so IDN is rejected.
+_EMAIL_LOCAL = r"[A-Za-z0-9%+_-]+(?:\.[A-Za-z0-9%+_-]+)*"
+# Used with fullmatch, so a trailing newline cannot pass; no comma can ever match.
+EMAIL_ADDRESS_RE = re.compile(rf"{_EMAIL_LOCAL}@{_EMAIL_LABEL}(?:\.{_EMAIL_LABEL})+")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_DISPLAY_NAME_CHARS = frozenset("<>\"'()")
+
 _DAYS_WINDOW_RE = re.compile(r"(\d+)d")
 _Number = TypeVar("_Number", int, float)
 
@@ -172,6 +192,85 @@ def _env_number(
     return value
 
 
+def parse_email_recipients(raw: str | None) -> tuple[str, ...]:
+    """Parse and validate ``EMAIL_TO`` into unique bare addresses (ED-5).
+
+    The value is split on ``,`` only and each entry is stripped of spaces and tabs
+    only, so a CR or LF anywhere is rejected, never trimmed. Empty entries (a
+    trailing comma) are skipped. Every entry must be a plain ASCII address that
+    fullmatches :data:`EMAIL_ADDRESS_RE`, with at most 64 characters before the
+    ``@`` and at most 254 in total. Duplicates are dropped case-insensitively,
+    keeping the first spelling and the first-seen order.
+
+    Raises:
+        ConfigError: if the value is missing or blank, longer than 4096
+            characters, has no addresses, has an invalid entry (only that entry is
+            echoed, as ``ascii()`` of its first 32 characters) or lists more than
+            10 unique addresses.
+    """
+    if raw is None or not raw.strip():
+        raise ConfigError(
+            "EMAIL_TO is not set (needed by --email); add a comma-separated list of "
+            f"addresses to .env, e.g. EMAIL_TO=you@example.com. {_EMAIL_SETUP_HINT}"
+        )
+    if len(raw) > MAX_EMAIL_TO_CHARS:
+        raise ConfigError(
+            f"EMAIL_TO is longer than {MAX_EMAIL_TO_CHARS} characters; list at most "
+            f"{MAX_EMAIL_RECIPIENTS} bare addresses separated by commas. "
+            f"{_EMAIL_SETUP_HINT}"
+        )
+    entries = [segment.strip(" \t") for segment in raw.split(",")]
+    if not any(entries):
+        raise ConfigError(
+            "EMAIL_TO has no addresses; add a comma-separated list of addresses to "
+            f".env, e.g. EMAIL_TO=you@example.com. {_EMAIL_SETUP_HINT}"
+        )
+    addresses: dict[str, str] = {}
+    for number, entry in enumerate(entries, start=1):
+        if not entry:
+            continue
+        problem = _email_address_problem(entry)
+        if problem:
+            cut = "..." if len(entry) > _EMAIL_ECHO_CHARS else ""
+            raise ConfigError(
+                f"EMAIL_TO entry {number} is not a plain email address "
+                f"({ascii(entry[:_EMAIL_ECHO_CHARS])}{cut}): {problem}. Use bare "
+                f"addresses separated by commas. {_EMAIL_SETUP_HINT}"
+            )
+        addresses.setdefault(entry.casefold(), entry)
+    if len(addresses) > MAX_EMAIL_RECIPIENTS:
+        raise ConfigError(
+            f"EMAIL_TO lists {len(addresses)} addresses; at most "
+            f"{MAX_EMAIL_RECIPIENTS} are allowed. {_EMAIL_SETUP_HINT}"
+        )
+    return tuple(addresses.values())
+
+
+def _email_address_problem(entry: str) -> str | None:
+    """Return the first ED-5 reason ``entry`` is not a valid address, else None."""
+    if _CONTROL_CHAR_RE.search(entry):
+        return "control characters such as CR, LF or NUL are not allowed"
+    # Before whitespace (deviation from the ED-5 list, which its own example
+    # contradicts): "Bob <b@x.org>" and "a@x.org; b@x.org" get the specific hint.
+    if _DISPLAY_NAME_CHARS.intersection(entry):
+        return "display names and angle brackets are not supported"
+    if ";" in entry:
+        return "semicolons do not separate addresses (use commas)"
+    if any(char.isspace() for char in entry):
+        return "whitespace inside an address is not allowed"
+    if not entry.isascii():
+        return "non-ASCII (IDN or Unicode) addresses are not supported"
+    if entry.count("@") != 1:
+        return "it must contain exactly one @"
+    if len(entry) > MAX_EMAIL_ADDRESS_CHARS:
+        return f"longer than {MAX_EMAIL_ADDRESS_CHARS} characters"
+    if len(entry.partition("@")[0]) > _MAX_EMAIL_LOCAL_CHARS:
+        return f"longer than {_MAX_EMAIL_LOCAL_CHARS} characters before @"
+    if not EMAIL_ADDRESS_RE.fullmatch(entry):
+        return "not a valid address"
+    return None
+
+
 def build_query(days: int, label: str, query: str | None) -> str:
     """Build the Gmail search query (Decision D1).
 
@@ -193,8 +292,9 @@ class Settings:
     """Immutable run configuration assembled from env vars and CLI flags.
 
     Build it with :meth:`Settings.build`, which applies defaults and validates.
-    The API key and the Telegram bot token are excluded from ``repr`` and from
-    :meth:`safe_summary`; the Telegram chat ID is excluded from the summary.
+    The API key, the Telegram bot token and the email recipients are excluded from
+    ``repr`` and from :meth:`safe_summary`; the Telegram chat ID is excluded from
+    the summary.
     """
 
     openrouter_api_key: str = field(repr=False)
@@ -217,6 +317,9 @@ class Settings:
     telegram: bool = False
     telegram_bot_token: SecretToken | None = field(default=None, repr=False)
     telegram_chat_id: str | None = None
+    email: bool = False
+    email_to: tuple[str, ...] = field(default=(), repr=False)
+    email_send_timeout: float = DEFAULT_EMAIL_SEND_TIMEOUT
     reader_parallelism: int = 5
     fetch_articles: bool = False
     max_fetch: int = DEFAULT_MAX_FETCH
@@ -237,15 +340,23 @@ class Settings:
     def safe_summary(self) -> dict[str, object]:
         """Return every setting except the secrets, safe to log.
 
-        The API key, ``telegram_bot_token`` and ``telegram_chat_id`` are always
-        left out. While ``fetch_articles`` is False the fetch settings
+        The API key, ``telegram_bot_token``, ``telegram_chat_id`` and
+        ``email_to`` are always left out (neither the addresses nor their count are
+        shown). While ``fetch_articles`` is False the fetch settings
         (``fetch_articles``, ``max_fetch`` and every ``fetch_*`` field) are left out
-        too, and so is ``telegram`` while it is False, so the flag-off summary, and
-        the INFO log line built from it, matches the pre-feature one.
+        too, and so are ``telegram`` while it is False and ``email`` and
+        ``email_send_timeout`` while ``email`` is False, so the flag-off summary,
+        and the INFO log line built from it, matches the pre-feature one.
         """
-        hidden = {"openrouter_api_key", *TELEGRAM_SUMMARY_FIELDS}
+        hidden = {
+            "openrouter_api_key",
+            *TELEGRAM_SUMMARY_FIELDS,
+            *EMAIL_SUMMARY_FIELDS,
+        }
         if self.telegram:
             hidden.discard("telegram")
+        if self.email:
+            hidden -= {"email", "email_send_timeout"}
         if not self.fetch_articles:
             hidden |= FETCH_SUMMARY_FIELDS
         return {
@@ -274,6 +385,8 @@ class Settings:
         fetch_env: Mapping[str, str | None] | None = None,
         telegram: bool = False,
         telegram_env: Mapping[str, str | None] | None = None,
+        email: bool = False,
+        email_env: Mapping[str, str | None] | None = None,
     ) -> Settings:
         """Apply defaults, validate and build ``Settings`` (CLI > env > default).
 
@@ -288,13 +401,20 @@ class Settings:
         values. It is ignored entirely while ``telegram`` is False; with the flag on
         it is stripped and validated after every other check.
 
+        ``email_env`` maps the names in :data:`EMAIL_ENV_VARS` to their raw values.
+        It is ignored entirely (not even validated) while ``email`` is False; with
+        the flag on, ``EMAIL_TO`` is parsed by :func:`parse_email_recipients` and
+        ``EMAIL_SEND_TIMEOUT`` (seconds, 10..600, default 90) is range-checked,
+        after every other check including the Telegram one.
+
         Raises:
             ConfigError: with an actionable message for a missing API key or model,
                 an invalid window, ``max_emails`` outside 1..200, an unknown log
                 level, unparsable MCP args, ``max_fetch`` outside 1..50, a fetch
                 env var that does not parse or is out of range or, with
                 ``telegram``, a missing, blank or malformed Telegram variable (the
-                value is never echoed).
+                value is never echoed) or, with ``email``, an invalid ``EMAIL_TO``
+                (see :func:`parse_email_recipients`) or ``EMAIL_SEND_TIMEOUT``.
         """
         key = (api_key or "").strip()
         if not key:
@@ -428,14 +548,28 @@ class Settings:
                 FETCH_LLM_INTERVAL_RANGE,
             ),
         )
-        if not telegram:
+        if telegram:
+            token, chat_id = _telegram_values(telegram_env or {})
+            settings = replace(
+                settings,
+                telegram=True,
+                telegram_bot_token=SecretToken(token),
+                telegram_chat_id=chat_id,
+            )
+        if not email:
             return settings
-        token, chat_id = _telegram_values(telegram_env or {})
+        email_values = email_env or {}
         return replace(
             settings,
-            telegram=True,
-            telegram_bot_token=SecretToken(token),
-            telegram_chat_id=chat_id,
+            email=True,
+            email_to=parse_email_recipients(email_values.get("EMAIL_TO")),
+            email_send_timeout=_env_number(
+                email_values,
+                "EMAIL_SEND_TIMEOUT",
+                float,
+                DEFAULT_EMAIL_SEND_TIMEOUT,
+                EMAIL_SEND_TIMEOUT_RANGE,
+            ),
         )
 
 

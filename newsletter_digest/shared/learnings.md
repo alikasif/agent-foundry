@@ -425,3 +425,7 @@
   splits the value and fails with exit 127. Quote it: `"PATH=$S/bin:$PATH"`.
 - (T067) The CLI names the output `reading-list-<reading_list end date>.html/.pdf`, not
   today's date, so fixture-driven smokes write `reading-list-2026-10-31.*`.
+- (T070) ED-5's reason-order list (whitespace before `<>`/quote/`;`) contradicts its own
+  example and ED-17: `Bob <b@example.com>` and `a@example.com; b@example.org` contain a
+  space. config.py checks display-name characters and `;` before whitespace; test the
+  specific reasons for those inputs (see implementation-notes T070).
