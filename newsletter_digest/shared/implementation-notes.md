@@ -3179,3 +3179,51 @@ suffix, exception text in the build reason, file name in the write reason. Full 
 3510 passed, 2 deselected, 1 xfailed. `ruff check`/`format` are clean on the file and
 `pyrefly` reports no error in it. The repo-wide ruff E501 and pyrefly `not-callable`
 errors are in `tests/test_cli_telegram.py`, another agent's uncommitted file.
+
+## T062 — Flag-off identity: subprocess no-fpdf-import test and in-process flag-off checks
+
+- **Additive only.** `tests/test_flag_off_identity.py` gains new import lines, constants,
+  helpers and 13 tests (26 in the file now); `git diff 5b9f838` of the file has zero
+  `-` lines. To keep it additive, `FETCH_ENV_VARS`/`TELEGRAM_ENV_VARS` are read through a
+  new `from newsletter_digest import config` line (ruff isort would merge a second
+  `from newsletter_digest.config import ...` into the existing `Settings` line), and the
+  in-process fixture restores the logger with `request.addfinalizer` instead of a yield
+  fixture (an `Iterator` import would have merged into the existing `collections.abc` line).
+  The goldens were not touched.
+- **Subprocess test (TD-12 item 2).** TD-12 says `sys.executable -c`; per the task (learnings
+  T016) it runs a script file written to `tmp_path`, with `cwd=tmp_path` and `COV_*`,
+  `COVERAGE_*`, `OPENROUTER_*`, `OPENAI_*`, `NEWSLETTER_*`, `GMAIL_MCP_*`, `TELEGRAM_*`
+  dropped from the child env (dummy API key and `--model x/y` set). The child prints a
+  JSON report, and the parent asserts these: the package is imported from this tree's
+  `src/`, `find_dotenv(usecwd=True) == ""`, exit 0, `settings.telegram is False`, no
+  watched module before importing cli or after the run (prefix match, so `PIL.Image` etc.
+  count), exactly one stdout line (the HTML path), the HTML equals the ranked golden, and no
+  `*.pdf`. It is parametrised with no TELEGRAM_* env and with the valid fixture token and
+  chat ID set (2 child runs, about 2 s each).
+- **Not in the spec: positive controls.**
+  - The child imports `newsletter_digest.delivery` after the run and asserts that all five
+    watched modules then appear, so the detector is not vacuous.
+  - `test_delivery_tripwire_fires_with_the_telegram_flag` and
+    `test_transport_tripwire_fires_with_the_telegram_flag` show the in-process tripwires
+    are reachable. With `--telegram`, the patched `deliver_reading_list` is called once
+    (exit 3). With the real delivery, `_default_transport` is called once (exit 3), the
+    PDF is written and the fixture token is absent from the output.
+- **In-process tripwires.** `delivery.deliver_reading_list`, `telegram._default_transport`
+  and also `cli._deliver_to_telegram` (a TP-5 name; an extra tripwire not in the spec)
+  record the call and raise. The flag-off run exits 0 with all three uncalled and no
+  `*.pdf` anywhere under `tmp_path`.
+- **Env variants (items 3, 4).** The variants are malformed (`not a token`/`x`), blank
+  (`""`/spaces), token-only and valid. With each one set, the flag-off CLI exits 0 with
+  one stdout line and the HTML equals `flag_off_ranked_golden.html`. Also,
+  `sorted(safe_summary())` equals `flag_off_safe_summary_keys.json`, the settings hold
+  `telegram=False` with token and chat ID None, values of 5 or more characters do not
+  appear in the output (whitespace-stripped) and stderr never mentions Telegram. The same
+  key check also runs at `Settings.build(..., telegram=False, telegram_env=...)` level.
+- **Mutation proof (scratch, not committed).**
+  - Adding a module-level `import newsletter_digest.delivery` to a scratch copy of `cli.py`
+    makes the child report `after_run` = `PIL`, `PIL.*` and the other watched modules.
+  - Replacing `if settings.telegram:` with `if True:` (exec into the cli module from a
+    `-p` plugin) fails all 5 in-process flag-off CLI tests.
+- **Verification.** `tests/test_flag_off_identity.py`: 26 passed. Full suite: 3653 passed,
+  2 deselected, 2 xfailed. `ruff check .` and `ruff format --check` on the file are clean,
+  and `pyrefly check` reports 0 errors.

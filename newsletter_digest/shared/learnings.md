@@ -387,3 +387,14 @@
 - (T059) Mutating a function the test module imported by name (`from delivery import
   build_caption`) also needs `monkeypatch.setattr(request.module, ...)`, otherwise the
   direct unit tests still call the original and the mutant looks like it survived.
+- (T062) To keep an edit to an existing test file additive (diff with only `+` lines),
+  do not add names to an existing `from x import ...` line, and do not add a second import
+  from the same module, because ruff isort merges it into the existing line. Import the
+  parent package instead (`from newsletter_digest import config`, then
+  `config.TELEGRAM_ENV_VARS`), and in fixtures use `request.addfinalizer` rather than a
+  yield fixture that needs a new `Iterator` import.
+- (T062) A subprocess "module not imported" test is only meaningful with a positive
+  control. After the CLI run, the child script imports the module itself and asserts that
+  the watched names now appear in `sys.modules` (prefix match catches `PIL.Image`). It
+  also reports `newsletter_digest.__file__`, so the parent can check that the child
+  imported this tree and not a stray copy.
