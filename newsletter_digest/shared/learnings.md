@@ -420,3 +420,8 @@
   unexpected" catch-all after the token was registered.
 - (T061) When exec-mutating `cli.py` in a scratch plugin, replace its import-time
   `load_dotenv(...)` call, or the mutant re-reads the developer's `.env`.
+- (T067) On this WSL machine `$PATH` contains Windows directories with spaces
+  (`/mnt/c/Program Files/...`). `/usr/bin/env -u X PATH=$S/bin:$PATH cmd` therefore
+  splits the value and fails with exit 127. Quote it: `"PATH=$S/bin:$PATH"`.
+- (T067) The CLI names the output `reading-list-<reading_list end date>.html/.pdf`, not
+  today's date, so fixture-driven smokes write `reading-list-2026-10-31.*`.

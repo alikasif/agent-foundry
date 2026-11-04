@@ -3415,3 +3415,90 @@ clean.
   descriptions are redacted in `_description`). It is defence in depth that T056 covers
   directly.
 - No issues found in cli.py, delivery.py or telegram.py beyond the recorded limitation.
+
+## T067 — final verification (Telegram delivery)
+
+Run on 2026-11-04 at HEAD 52ec8e4 (branch feat/newsletter-digest), offline. `.env` and
+`out/` were never read or touched. No request reached api.telegram.org.
+
+| Check | Result |
+| --- | --- |
+| `uv sync` | OK (114 resolved, 111 audited) |
+| `uv lock --check` | OK, exit 0 |
+| `uv run pytest -q` | 3653 passed, 2 deselected (integration), 2 xfailed, 0 failed (43 s) |
+| `uv run pytest tests/test_flag_off_identity.py tests/test_architecture.py tests/test_telegram.py tests/test_telegram_redaction.py tests/test_pdf.py -q` | 686 passed, 1 xfailed |
+| `uv run ruff format --check src tests` / `--check .` | 55 / 104 files already formatted |
+| `uv run ruff check .` | All checks passed |
+| `uv run pyrefly check` | 0 errors (12 suppressed). New suppressions since 5b9f838: `pdf.py` `str_alias_nb_pages = None` (justified in T052 notes, V24) plus 3 deliberate ones in tests |
+| `uv run newsletter-digest --help` | Lists `--telegram` with the privacy text and no `[env var: ...]`. The docstring says TELEGRAM_* are read only with the flag |
+| Empty cwd via `uv run --project ...` and `/usr/bin/env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID`, with `OPENROUTER_API_KEY=dummy --model x/y --telegram` | No vars: exit 2 `TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are not set ... See README > Telegram delivery > Telegram setup.` Token only: exit 2 naming TELEGRAM_CHAT_ID. Malformed token (`abc:<secret>`, and one with a space): exit 2, value not echoed. Chat `-100123`: exit 2, not echoed. A fake `npx` on PATH and a marker `GMAIL_MCP_COMMAND` were never started; `--out` stayed empty |
+| `import newsletter_digest.cli` | Loads none of fpdf, PIL, delivery, pdf, telegram |
+| `uv build --wheel` (scratchpad out-dir) | Wheel has `newsletter_digest/fonts/DejaVuSans.ttf`, `DejaVuSans-Bold.ttf`, `LICENSE` and the template; no `.env` or `out/` |
+| `git diff 5b9f838 -- newsletter_digest/tests/` | Modified only: conftest.py (+1 autouse fixture, `NoReturn` import), test_cli.py (+`"--telegram"` in ALL_OPTIONS), test_flag_off_identity.py (additions only, 0 removed lines), test_architecture.py (T049/T063 rules; the 7 removed lines are the docstring rule 6, `NEW_MODULES` and the `fetch`-only AsyncClient assertions that T063 tightened). Everything else is new files |
+| Goldens `tests/fixtures/flag_off_*` | Only commit is b5b2b50 (T023); `git diff b5b2b50` empty |
+| models.py, render.py, templates/ vs 5b9f838 | No diff |
+| fpdf2 / pypdf | `fpdf2>=2.8.9,<2.9` in `[project]`, locked 2.8.9; `pypdf>=6.21,<7` only in the dev group, locked 6.21.4; not in `uv tree --no-dev` |
+| Secrets | `.env` and `out/` are ignored and unstaged. Token-shaped strings added since 5b9f838 are only test fixtures (`123456789:TESTtoken_secret-...`, `123456789:AAAA...`, `123456789:abcdefghijklmnopqrst`, `987654:ANOTHERtoken_value-...`, `sk-or-v1-TESTSECRET...`, `sk-or-v1-telegram-test-key`) in tests/ and these notes. `.env.example` gained only commented-out, empty TELEGRAM_* lines |
+
+**CLI smoke (scratch script `t067_cli_smoke.py`, outside pytest, empty cwd).** The script
+blocks `socket.getaddrinfo/create_connection/connect/connect_ex`, replaces
+`cli.run_digest` with a fake that returns the AF-9 ranked fixture, and drives `cli.digest`
+through CliRunner into temp dirs under the scratchpad.
+- Flag off, run in its own process with `TELEGRAM_BOT_TOKEN='not a token'` and
+  `TELEGRAM_CHAT_ID=x`: exit 0, one stdout line (the HTML path), only the `.html` written,
+  bytes equal `flag_off_ranked_golden.html`, no PDF. None of fpdf, PIL, delivery, pdf or
+  telegram is in `sys.modules` afterwards.
+- Flag on, run in its own process, with `telegram._default_transport` patched to return
+  `httpx.MockTransport` and the fixture token:
+  - Success: exit 0; stdout has the `.html` path, then the `.pdf` path beside it; the HTML
+    still equals the golden; the PDF starts with `%PDF-` and pypdf reads 4 pages with
+    "Must read"; stderr has `Sent reading-list-2026-10-31.pdf to Telegram.`. Exactly one
+    POST to `api.telegram.org/bot<token>/sendDocument` carrying `chat_id`, the PDF
+    filename and no `parse_mode`. No stray `.part` file.
+  - 401 and 400 "chat not found": exit 3; both paths on stdout; one D-T3 stderr line
+    naming the reason and both saved files; no traceback; no retry.
+  - Missing both vars, missing chat, malformed token: exit 2, nothing written, no request.
+  - The token and its secret half never appear in stdout or stderr, even with all
+    whitespace removed.
+- Note: the file name uses the reading list's end date (fixture 2026-10-31), not today's
+  date.
+
+**Known accepted limitation (still a strict xfail in two tests).** A bare
+`<id>:<secret>` raised by a custom `client_factory` before the first send is not
+redacted. The real client never does this (T053 notes).
+
+**Notes table housekeeping (not owned by T067, left as is).** Rows V23-V26 in the
+"Library verification (Telegram delivery)" table still say TODO, but T052's section
+records them as done (for example "V24 DONE").
+
+**Manual end-to-end for the user (acceptance 24, not run here: needs a real bot).**
+1. Follow README > Telegram delivery > Telegram setup:
+   - Create the bot with @BotFather `/newbot`.
+   - Put `TELEGRAM_BOT_TOKEN=` in `.env` in the directory you run the tool from.
+   - Open `https://t.me/<bot_username>` and press **Start**.
+   - Get your chat ID with the README's `uv run python -c ... getUpdates` one-liner. It
+     reads the token from `.env`, so the token stays out of your shell history.
+   - Put `TELEGRAM_CHAT_ID=<positive number>` in `.env`.
+2. TD-16 re-verify, without logging the token. From the same directory run
+   `uv run python -c "import os, dotenv; dotenv.load_dotenv(); from newsletter_digest.config import _telegram_values; _telegram_values(os.environ); print('TELEGRAM_* format OK')"`.
+   It prints OK, or a ConfigError that does not contain the values. If a real token is
+   rejected, report only its shape (digit count before the colon, length and character
+   classes after it), never the value.
+3. Run `uv run newsletter-digest --window 1w --max-emails 5 --telegram`, then `echo $?`.
+   Expect:
+   - exit 0;
+   - stdout line 1 is `out/reading-list-<date>.html`, line 2 is the `.pdf` beside it;
+   - stderr ends with `Sent reading-list-<date>.pdf to Telegram.`.
+4. In Telegram:
+   - A document arrives with a counts-only caption, for example
+     `Newsletter digest: last 1w - N articles, M must-read`, with no titles.
+   - Open it on the phone. Check the 100 x 178 mm layout is readable and that the title
+     links open.
+5. Failure check. Set a wrong `TELEGRAM_CHAT_ID` (any other positive number), re-run, and
+   expect:
+   - exit 3;
+   - one stderr line `Telegram delivery failed (HTTP 400: chat not found ...). Saved: ...`;
+   - both files kept.
+
+   Restore the correct value. Never paste the token, the getUpdates URL or its output into
+   a terminal log, an issue or a chat.
