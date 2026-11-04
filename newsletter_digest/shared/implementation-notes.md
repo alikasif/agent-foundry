@@ -3124,3 +3124,58 @@ No issues found in pdf.py.
 - The claim "Telegram can read bot chats" is phrased from the CLI help text ("not end-to-end encrypted"). The duplicate-after-timeout note says the tool cannot tell whether the first attempt arrived.
 - .env.example: only appended a commented block (two placeholders, no values); existing lines untouched.
 - Wheel contains the DejaVu licence per T049/T067 plan; README states it but I did not build a wheel here.
+
+## T059 — Delivery orchestration tests: naming, atomic write, size gate, caption, outcomes
+
+New file `tests/test_delivery.py` (172 passed, 1 strict xfail; offline, about 2 s).
+
+**Decisions not covered by the spec**
+- Every client is a real `TelegramClient` built by a recording `client_factory` over a
+  scripted `httpx.MockTransport` and a fake `sleep`, so the outcome mapping goes through
+  the real TD-8 classification instead of a hand-made `TelegramError`.
+- The file has its own autouse guard on `telegram._default_transport` (besides the
+  conftest one, which is not committed yet), so it does not depend on T056's state.
+  Side effect worth knowing: a tripped guard raises `AssertionError`, an `Exception`, so
+  `deliver_reading_list` turns it into a failed outcome instead of failing the test.
+  `test_default_factory_is_the_real_client_and_stays_offline` asserts exactly that
+  outcome. Tests must assert on the outcome, not rely on the guard to fail them.
+- Scenario matrix (success, retried success, 401, 429 exhausted, 5xx exhausted,
+  network error, timeout, unexpected non-httpx exception from the transport, build
+  failure, ENOSPC write failure) runs over a hostile reading list (script tags, the
+  token, newlines, markdown, bidi, emoji in titles, summaries, reasons and sources).
+  Each scenario gets 11 checks: outcome fields, PDF on disk, HTML bytes and mtime unchanged,
+  directory listing, no `.part`, one redacted line with no trailing period, no token in
+  any record (raw, args, formatted), chat ID only at DEBUG, no URL or `exc_info` from
+  `delivery`, one WARNING per retry wait (all from `telegram`, none from `delivery`), and no
+  title in logs or reason. The scenario runs in a fixture (setup phase), so its log
+  records are captured there and stored on the `Run` object. `caplog.records` in the
+  test body only shows the call phase.
+- Write failures are tested three ways: patched `os.replace` (ENOSPC with a file name,
+  which must not reach the reason), a read-only directory (skipped as root), and the PDF
+  path being a directory. A `BaseException` raised from `os.replace` propagates and
+  still leaves no `.part`.
+- The size gate is tested with the TD-13 oversize bytes (exact reason text) and at
+  `MAX_UPLOAD_BYTES - 1`, `==` and `+ 1` with real 50 MB buffers (about 0.1 s each).
+- The caption is checked by exact strings and by a fixed regex for every variant,
+  singular and plural, `must-read` with no plural form, `0 must-read` when ranked with none,
+  unranked ignoring priorities, empty (ranked and unranked), each normalised window,
+  the golden fixtures, fetch stats ignored, and the 1024 cap (a 2000-char window).
+- One test uses the default `builder` (real `build_pdf`) and checks that the INFO page
+  count equals pypdf's.
+
+**Recorded limitation as a strict xfail:**
+`test_bare_token_from_a_factory_exception_before_any_send_is_redacted`. A bare
+`<id>:<secret>` in an exception raised by a custom factory before the first send is not
+redacted when the registry is fresh (T053 note). The `bot<id>:<secret>` form is redacted
+and has its own passing test. If T053's behaviour changes, the XPASS fails, which flags
+this note as stale.
+
+**Verification:** `delivery.py` 100% line and branch coverage from this file alone
+(`uv run --with coverage`). Mutation check (scratch `-p` plugin, `MUTANT` env, no source
+edit): 18/18 killed: `.part` left, direct write, no gate, `>=` gate, title in caption,
+`1 articles`, no caption cap, unranked as `0 must-read`, stale PDF reported as new,
+no redaction, `exc_info` on DEBUG, attempts forced to 0, trailing period kept, wrong
+suffix, exception text in the build reason, file name in the write reason. Full suite
+3510 passed, 2 deselected, 1 xfailed. `ruff check`/`format` are clean on the file and
+`pyrefly` reports no error in it. The repo-wide ruff E501 and pyrefly `not-callable`
+errors are in `tests/test_cli_telegram.py`, another agent's uncommitted file.

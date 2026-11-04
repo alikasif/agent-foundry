@@ -378,3 +378,12 @@
   registered); swap it for an empty set per test with `monkeypatch.setattr` and restore
   the six redacted loggers' filters afterwards, or redaction tests become order-dependent.
 - (T064) README tables are checked by tests only via .env.example; docs claims (retry counts, 50 MB, messages) come straight from telegram.py/delivery.py constants, so re-check them if those change.
+- (T059) Log records from an async fixture (setup phase) are not in `caplog.records`
+  during the test body (call phase). Copy `list(caplog.records)` at the end of the
+  fixture, or use `caplog.get_records("setup")`.
+- (T059) `deliver_reading_list` catches `Exception`, so an `AssertionError` from a test
+  guard (for example the `_default_transport` stand-in) becomes a failed
+  `DeliveryOutcome`, not a test failure. Assert on the outcome.
+- (T059) Mutating a function the test module imported by name (`from delivery import
+  build_caption`) also needs `monkeypatch.setattr(request.module, ...)`, otherwise the
+  direct unit tests still call the original and the mutant looks like it survived.
