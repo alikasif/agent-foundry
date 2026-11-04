@@ -83,3 +83,19 @@ Status: ALL_DONE (T023-T047 done). Flag `--fetch-articles` is off by default; fl
 - T046 #2 (shared untrusted.py for delimiter regex), #4-#7 deferred; T044 #5 (Azure WireServer 168.63.129.16) not blocked
 - Free-tier rate-limit numbers in README should be re-checked against OpenRouter docs
 - Manual end-to-end not run: `uv run newsletter-digest --window 1w --max-emails 5 --fetch-articles --max-fetch 5 --open`
+
+## Telegram PDF delivery (T048-T067), 2026-11-04
+
+All 20 tasks done. Commits (local, not pushed): T048 6c79855, T050 0edbf96, T049 2a0adf3,
+T052 32e4365, T055 254b029, T058 1d310cb, T051 38fdff7, T057 4f17608, T056 42c5cfc,
+T053 67e787a, T054 318bdce, T059 1b0e5f7, T062 81b7d01, T060 49518dd, T063 f7ecf9c,
+T061 d487624, T064 7edfcdb, T065 621aca5 (APPROVED), T066 6bc1552 (APPROVED),
+T067 1a2d74b (final gate: pytest 3653 passed, 2 xfailed; ruff, pyrefly, uv lock --check clean).
+Open MINOR review findings (non-blocking): RecursionError from deep JSON in
+telegram._json_object; Rich emoji codes in cli failure line (emoji=False); token
+registered for redaction on first send (strict xfail pins it); no fsync before os.replace;
+delivery typed to concrete TelegramClient; cli success decided by reason is None.
+Deviations: Telegram Settings fields sit before reader_parallelism; delivery imports pdf at
+module level so cli falls back to class-name-only on import failure; cli reaches redact via
+delivery; PDF built in the event loop; stale-PDF rule. Interruption: usage limit hit
+mid-batch, agents resumed, no work lost. Manual e2e steps: see implementation-notes T067.
