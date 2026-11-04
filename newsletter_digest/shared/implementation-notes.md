@@ -3227,3 +3227,45 @@ errors are in `tests/test_cli_telegram.py`, another agent's uncommitted file.
 - **Verification.** `tests/test_flag_off_identity.py`: 26 passed. Full suite: 3653 passed,
   2 deselected, 2 xfailed. `ruff check .` and `ruff format --check` on the file are clean,
   and `pyrefly check` reports 0 errors.
+
+## T060 — CLI tests for --telegram: exit codes 0/1/2/3, output lines, ordering
+
+- **Files:** new `tests/test_cli_telegram.py` (50 tests); `tests/test_cli.py` differs from
+  `5b9f838` only by `"--telegram"` appended to `ALL_OPTIONS` (appended last, so the
+  existing parametrize ids are unchanged).
+- **Transport seam:** `delivery.deliver_reading_list` is patched with a small async
+  wrapper that records the call (order log, html path, whether the HTML existed) and then
+  awaits `functools.partial(original, client_factory=..., [builder=...])`. The factory
+  builds a real `TelegramClient(token, transport=httpx.MockTransport(handler),
+  sleep=<recording fake>)`. Autouse socket guard plus the conftest transport guard.
+- **Reuse:** `FakeRunDigest`, `squash`, `no_space`, `API_KEY`, `MODEL`, `TOOL_ENV_VARS` are
+  imported from `tests.test_cli` (helpers only, nothing collected twice); the run returns
+  the AF-9 fixture lists from `tests/flag_off_fixture.py`. The isolation fixture also
+  deletes the 10 fetch vars and both `TELEGRAM_*` vars (cli loads `.env` at import).
+- **Test expectations corrected against the contract (cli.py not changed):**
+  - 401 reason is `HTTP 401: invalid bot token - check TELEGRAM_BOT_TOKEN` (TD-8 row,
+    D-T3 example), not the bare text; the first draft of the test was wrong.
+  - `--help`: click wraps the help text and may break `end-to-end` after the hyphen
+    (`end- to-end`), so the help checks compare with all whitespace removed; the block
+    is searched after `Options:` because the docstring also says `--telegram`.
+  - click 8.5 stores `Sentinel.UNSET` as a flag's declared `default`; the test checks the
+    resolved value via `make_context(...).params["telegram"] is False` instead.
+- **Decisions not in the spec:** env reads are checked with a proxy for `cli.os` whose
+  `environ` records lookups (scoped to cli, the real `os.environ` is untouched): flag off
+  never looks up `TELEGRAM_*`, flag on looks up both. Ordering uses recorders on
+  `write_reading_list`, `_report`, `click.echo` (stdout only) and `webbrowser.open`:
+  `write, report, echo <html>, open <uri>, deliver, echo <pdf>` for both success and 401.
+  Import failure is simulated two ways: `sys.modules["newsletter_digest.delivery"] = None`
+  (`ModuleNotFoundError`) and a meta-path finder that raises `ImportError` for `fpdf` with
+  delivery/pdf/fpdf evicted (monkeypatch restores them); both give exit 3 with only the
+  class name and no message text. Extra cases: unexpected delivery exception (safety net,
+  redacted, one line), a previous same-day PDF kept on build failure, HTML bytes equal to
+  a flag-off run, config-error precedence (API key before Telegram), stripped values, and
+  a `pdf_path` that does not exist on disk is not echoed.
+- **Oversize** uses a builder seam returning `MAX_UPLOAD_BYTES + 1` bytes (one 50 MB file
+  in `tmp_path`).
+- **Verification:** `tests/test_cli_telegram.py` + `tests/test_cli.py` 153 passed; full
+  suite 3653 passed, 2 deselected, 2 xfailed; `ruff format`/`ruff check` clean on own
+  files; `pyrefly check` clean on own files. During the run, `ruff check .` and `pyrefly`
+  reported errors only in other agents' in-progress files (`tests/test_flag_off_identity.py`
+  unused imports, `tests/test_telegram_redaction.py:296`), not touched here.

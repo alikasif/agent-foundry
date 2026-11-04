@@ -398,3 +398,9 @@
   the watched names now appear in `sys.modules` (prefix match catches `PIL.Image`). It
   also reports `newsletter_digest.__file__`, so the parent can check that the child
   imported this tree and not a stray copy.
+- (T060) click 8.5: a flag option's `.default` is `Sentinel.UNSET`, not `False`; check the
+  resolved value with `cmd.make_context(name, []).params[...]`. Click's help wrapper can
+  break a hyphenated word (`end- to-end`), so compare help text with all whitespace removed.
+- (T060) To prove the CLI never reads an env var, swap `cli.os` for a `types.ModuleType`
+  proxy whose `environ` is a recording dict copy and whose `__getattr__` delegates to `os`;
+  it is scoped to cli and leaves the real `os.environ` alone.

@@ -55,6 +55,7 @@ ALL_OPTIONS = (
     "--out",
     "--open",
     "--log-level",
+    "--telegram",
 )
 
 
