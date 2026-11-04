@@ -411,3 +411,12 @@
 - (T063) Positive architecture detectors should follow call paths, not exact function
   names: cli's lazy delivery import sits in `_run_delivery`, called by
   `_deliver_to_telegram`, not in `_deliver_to_telegram` as the task text says.
+- (T061) To inspect the real `TelegramError` in a CLI-level test, subclass
+  `TelegramClient` in the `client_factory` and record what `send_document` raises
+  before re-raising. Do not count the test's own injected exceptions as leak evidence:
+  they hold the token by construction.
+- (T061) A non-httpx exception raised inside an `httpx.MockTransport` handler propagates
+  unchanged out of `AsyncClient.post`. That makes it an easy way to reach a "truly
+  unexpected" catch-all after the token was registered.
+- (T061) When exec-mutating `cli.py` in a scratch plugin, replace its import-time
+  `load_dotenv(...)` call, or the mutant re-reads the developer's `.env`.

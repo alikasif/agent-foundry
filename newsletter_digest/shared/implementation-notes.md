@@ -3339,3 +3339,79 @@ mutant tests also fail (their unmutated baseline is no longer clean), as expecte
 **Verification:** `tests/test_architecture.py` 215 passed; full suite 3653 passed,
 2 deselected, 2 xfailed; `ruff check`/`ruff format` clean for this file; `pyrefly check`
 reports only errors in `tests/test_telegram_redaction.py` (T061, concurrent, not mine).
+
+## T061 — End-to-end token-redaction tests across logs, output and exceptions
+
+`tests/test_telegram_redaction.py` (new, 44 passed + 1 strict xfail, ~13 s). No source or
+other test file edited. Full suite 3653 passed, 2 deselected, 2 xfailed; ruff and pyrefly
+clean.
+
+- **Harness.** CliRunner runs `--telegram --log-level DEBUG --out <tmp>` with the fixture
+  token and chat ID set in a monkeypatched env (every CLI env var deleted first, since
+  `cli` loads a `.env` at import). `cli.run_digest` is a fake that returns
+  `flag_off_fixture.build_ranked_reading_list()` and logs `safe_summary()` (INFO) and
+  `repr(settings)` (DEBUG). The client is injected the T060 way:
+  `delivery.deliver_reading_list = partial(original, client_factory=...)`. The factory
+  builds a `RecordingClient(TelegramClient)` on `httpx.MockTransport` with a recording fake
+  sleep. The subclass only re-raises after recording what `send_document` raised, so the
+  test can check `str`/`repr`/traceback and `__cause__`/`__context__` of the real
+  `TelegramError`. The real PDF builder and the real httpx client run, so httpx's INFO
+  `HTTP Request` record goes through the real logger path and the filters.
+- **Fresh-process state.** An autouse fixture swaps `telegram._SECRETS` for an empty set
+  per test (learnings T056). Another restores the filters, handlers and levels of
+  `newsletter_digest` and the six `REDACTED_LOGGERS`. Both are stricter than one long
+  process, and they keep test order irrelevant.
+- **Evidence per run:** stdout, stderr, combined output, `caplog.text`, and for each record
+  `getMessage()`, `msg`, `args` and `exc_text`. Also every file in `--out` as latin-1 bytes,
+  plus pypdf text and metadata of the PDF; `str`/`repr`/`format_exception` of each
+  `TelegramError` and of `result.exception`. Each piece is checked for the full token and
+  its secret half after removing all whitespace, and a failure names the source. Exceptions
+  the test injects itself (they hold the token by construction) are not evidence; what the
+  code made of them is.
+- **Matrix (14 CLI paths), beyond the TD-9 list:**
+  - two timeout kinds: `httpx.ReadTimeout` whose message holds the token URL, and the
+    anyio per-attempt deadline with `attempt_deadline=0.05`;
+  - four description echoes: the full token, the bare secret half, the `bot<token>` URL,
+    and 200 `ok:false` without an `error_code`;
+  - a 502 HTML body echoing the URL, and a 302 whose `Location` holds the token.
+
+  Each path also asserts it really ran: the exit code, the stderr reason fragment, the
+  request count (all request URLs hold the token), the recorded delays, the stdout lines
+  and whether an httpx `HTTP Request` record is expected. That way the leak check can
+  never pass vacuously.
+- **Unexpected exception "inside delivery"** = the transport raising a non-httpx
+  `RuntimeError` naming the token after the token is registered. It leaves
+  `send_document` uncaught and reaches `delivery`'s catch-all. The test asserts the
+  redacted reason, one DEBUG traceback record with `***`, and that no
+  `newsletter_digest`/httpx/httpcore record has `exc_info`. Also tested:
+  - the CLI's own safety net (a wrapper that sends, then raises);
+  - a builder failure naming the token (reason is the class name only);
+  - a factory error with a `bot<id>:<secret>` URL before any send (redacted by the regex).
+- **Known limitation pinned as strict xfail** (T053 notes): a custom `client_factory` that
+  raises a bare `<id>:<secret>` before any request leaks it into stderr in a fresh
+  process, because the token is registered on the first `_post`. The real
+  `TelegramClient` never does this. Strict, so a fix turns it into a failing XPASS and
+  the marker gets removed.
+- **With `--log-level DEBUG` the redacted traceback reaches stderr** through the
+  RichHandler. That is TD-9 behaviour, so "no traceback in stderr" is not asserted here
+  (T060 covers it at the default level).
+- **Filters:** after each run that entered the client, each of the six loggers carries
+  exactly one `_RedactingFilter`. Three runs in one process still leave one each. A
+  user-added handler on `httpx` at INFO sees exactly
+  `HTTP Request: POST https://api.telegram.org/bot***/sendDocument "HTTP/1.1 200 OK"`, and
+  the logger level is left as the user set it.
+- **Mutation check** (scratch `-p` plugin that execs a text-mutated module copy, with
+  `load_dotenv` neutralised so `.env` is never re-read; no source edited): 13 of 14
+  killed. Killed:
+  - filter no-op; `httpx` filter skipped; regex removed; secret half or registry not
+    registered;
+  - unredacted network DEBUG, delivery reason, delivery traceback, and CLI line and
+    traceback;
+  - `exc_info=` used; chat-ID log also printing the token; the builder reason including
+    the message.
+
+  The survivor drops `redact()` inside `TelegramError.__init__`. It is equivalent end to
+  end, because every reason the client builds is already redacted (class names only, and
+  descriptions are redacted in `_description`). It is defence in depth that T056 covers
+  directly.
+- No issues found in cli.py, delivery.py or telegram.py beyond the recorded limitation.
