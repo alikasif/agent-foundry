@@ -2223,3 +2223,1405 @@ class Settings:
    - a possible duplicate message after a timeout.
 
 DESIGN_COMPLETE
+
+# Email delivery (2026-11-04)
+
+Amendment design for PRD FR-053 to FR-072, NFR-E1 to NFR-E8, acceptance criteria 25 to 34,
+the final user decisions D-E1 to D-E4, and Q-E1 to Q-E12. The user approved every
+recommended default (PRD "Approval record (2026-11-04)"):
+- Q-E1: a second, short-lived MCP session.
+- Q-E2: the send helper lives in `gmail_mcp.py`.
+- Q-E3: one message, with every recipient in `To`.
+- Q-E4: `multipart/alternative` with an ASCII plain-text part.
+- Q-E5: an empty-state email is sent.
+- Q-E6: a missing send tool is detected at delivery time.
+- Q-E7: documentation only.
+- Q-E8: `--email-dry-run` is deferred.
+- Q-E9: a 95 KB budget, with skim items dropped first.
+- Q-E10: key points are included.
+- Q-E11: a 10-recipient cap and a 90 s send timeout.
+- Q-E12: the token scope is confirmed on the first real send.
+
+Everything above this line is approved and unchanged. Decision IDs in this section are
+`DMn`, so they do not clash with the PRD's `D-E1` to `D-E4`.
+
+How the facts were checked (2026-11-04):
+- `shared/verified_facts.md`, section "Email delivery via the Gmail MCP send tool
+  (2026-11-04)". It covers the `send_email` schema, encoding hazards, result texts and
+  OAuth scopes.
+- The current sources under `src/newsletter_digest/` and `tests/`, read in full where
+  they matter: `gmail_mcp`, `cli`, `config`, `render`, the template, `delivery`, `agent`,
+  `models`, `conftest`, the `test_architecture` rules and the `test_gmail_mcp` fakes.
+- The locked libraries in the project venv (`mcp` 1.30.0, `langchain-mcp-adapters` 0.3.2,
+  `anyio` 4.15.1), read only:
+  - `ClientSession.call_tool(name, arguments=None, read_timeout_seconds=None,
+    progress_callback=None, *, meta=None) -> CallToolResult`;
+  - `ClientSession.list_tools(cursor=None, *, params=None) -> ListToolsResult`;
+  - `mcp.client.stdio`: `PROCESS_TERMINATION_TIMEOUT = 2.0`, so on close the server
+    process tree is terminated after at most about 2 s.
+- **Not used:** `.env`, the `out/` directory and any real output. The withdrawn
+  `out/`-derived size figures are not used anywhere below. Every size number in this
+  section is an analytical estimate, or is measured by a test on a synthetic fixture
+  (ED-10).
+- Items marked **[re-verify]** must be re-checked by the implementing task and recorded
+  in `shared/implementation-notes.md` (FR-022).
+
+## ED-1 Flow Design
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant CLI as cli.digest
+    participant CFG as Settings.build
+    participant RUN as run_digest (unchanged)
+    participant S1 as MCP session 1 (agent, read-only)
+    participant R as render.write_reading_list (unchanged)
+    participant TG as Telegram path (unchanged)
+    participant ED as email_delivery.send_reading_list_email
+    participant ER as email_render.render_email
+    participant GS as gmail_mcp.send_gmail_message
+    participant S2 as MCP session 2 (send only, short-lived)
+    U->>CLI: newsletter-digest --window 1w --email [--telegram]
+    CLI->>CFG: email=True, email_env={EMAIL_TO, EMAIL_SEND_TIMEOUT}
+    CFG-->>CLI: ConfigError -> exit 2 (before any Gmail/LLM work)
+    CLI->>RUN: anyio.run(run_digest, settings)
+    RUN->>S1: open_gmail_tools -> filter_read_only -> {search_emails, read_email}
+    RUN->>S1: agent run, then the session closes (async with exits)
+    RUN-->>CLI: ReadingList (exception -> exit 1, nothing sent)
+    CLI->>R: write HTML (unchanged bytes)
+    CLI->>CLI: _report, echo HTML path, --open
+    CLI->>TG: with --telegram only: _deliver_to_telegram (returns bool now)
+    CLI->>ED: lazy import + anyio.run(send_reading_list_email, ...)
+    ED->>ER: render_email(reading_list, html_name) -> ASCII HTML <= 95,000 B + ASCII text
+    ED->>ED: build_subject (counts only, printable ASCII, <= 150 chars)
+    ED->>GS: OutgoingEmail(to, subject, text_body, html_body)
+    GS->>GS: re-validate (defence in depth); no session on failure
+    GS->>S2: start (60 s), list_tools, exact-name lookup "send_email", schema check
+    S2-->>GS: start failure -> pause 2 s, one more start; still failing -> FAILED
+    GS->>S2: call_tool("send_email", 5 fixed keys) under fail_after(90 s), exactly once
+    S2-->>GS: "Email sent successfully with ID: <id>" | "Error: ..." | timeout/transport
+    GS-->>ED: GmailSendReceipt | GmailSendError(kind, call_issued)
+    ED-->>CLI: EmailOutcome(status sent | failed | unknown)
+    CLI-->>U: stderr "Email: ..." line; exit 0, or 3 if any requested channel failed
+```
+
+Steps with `--email` on:
+1. **Config (fail fast, FR-054).** `cli` reads `EMAIL_TO` and `EMAIL_SEND_TIMEOUT` from
+   `os.environ` only when `--email` is set. `Settings.build` parses and validates them
+   (ED-5). A problem raises `ConfigError`, which becomes `click.UsageError` and exit 2.
+   This happens before `run_digest`, so no npx, Gmail or LLM work starts.
+2. **Digest.** `run_digest` and `write_reading_list` are unchanged. The agent's MCP
+   session (session 1) is opened and closed inside `run_digest`. A run failure exits 1,
+   and nothing is sent on any channel (FR-055).
+3. **Report.** `_report`, then the HTML path on stdout, then `--open`, as today.
+4. **Telegram** (only with `--telegram`). This is the existing path, with one change: it
+   returns a bool instead of exiting (ED-14).
+5. **Email.** `_deliver_by_email` does the single lazy import of `email_delivery`
+   (ED-16), then runs `anyio.run(partial(send_reading_list_email, reading_list,
+   html_path, settings))`. This is the third `anyio.run` in the process at most, which
+   is supported (V29).
+6. **Render (pure, no network).** `email_render.render_email` renders the email
+   template from the same in-memory `ReadingList`. It produces ASCII-only HTML with no
+   line over 900 characters, applies the 95,000-byte budget (ED-10) and builds the
+   ASCII plain-text part (ED-9). A render failure becomes `FAILED` (nothing was sent).
+7. **Send.** `gmail_mcp.send_gmail_message` opens session 2 (ED-3, ED-4), finds the
+   `send_email` tool by exact name and calls it once with exactly five arguments. Then
+   it closes the session.
+8. **Outcome.** One stderr line for the email channel (ED-12). The exit code is 0 when
+   every requested channel delivered, otherwise 3 (ED-14). No traceback is printed for
+   expected failures, and the HTML (and the PDF, with `--telegram`) stay on disk.
+
+With `--email` off, the run is exactly today's: steps 1 and 5 to 8 do not happen,
+`email_delivery`, `email_render` and the email template are never loaded, no
+`EMAIL_*` variable is read, and the HTML is byte-identical (ED-16).
+
+## ED-2 Components, modules and layer order
+
+New modules and files (under `src/newsletter_digest/`):
+
+| Module / file | Responsibility | Project imports | External |
+|---|---|---|---|
+| `email_render.py` | Pure email rendering: `render_email(rl, *, html_name, budget=EMAIL_HTML_BUDGET) -> EmailContent`, `render_email_html(...)`, `render_email_text(...)`, `to_email_ascii(text)`, `wrap_long_lines(text, limit)`, `drop_order(rl)`, `email_link(url)`, constants. Uses `render.ENVIRONMENT` (same autoescape, `StrictUndefined` and `safe_url`/`slug` filters); registers nothing on it | `render` (`ENVIRONMENT`, `safe_url` only), `models` | `markupsafe` (jinja2's dependency), stdlib |
+| `templates/reading_list_email.html.j2` | Email-only template: inline `style=""`, tables, no `<style>`, script, CSP, `<details>`, inputs or images (ED-7) | - | - |
+| `email_delivery.py` | Orchestration: `send_reading_list_email(...) -> EmailOutcome`, `build_subject(rl)`, `failure_reason(err)`, `EmailOutcome`; re-exports `redact_addresses` for `cli` | `gmail_mcp` (send names only), `email_render`, `models`, `config` | `anyio`, stdlib |
+
+Changed modules:
+- `gmail_mcp.py` gains the send mapping and helper (ED-4): `GMAIL_SEND_TOOL_MAP`,
+  `GMAIL_SEND_ARG_MAP`, `SEND_MIME_TYPE`, `OutgoingEmail`, `GmailSendErrorKind`,
+  `GmailSendError`, `GmailSendReceipt`, `build_send_arguments`, `send_gmail_message`,
+  `redact_addresses` and `_default_send_client`. These things stay **unchanged**:
+  `open_gmail_tools`, `filter_read_only`, `GMAIL_TOOL_MAP`, `GMAIL_ARG_MAP` and every
+  read helper.
+- `config.py`: email constants, `parse_email_recipients`, three `Settings` fields, the
+  `Settings.build(..., email=False, email_env=None)` kwargs and the `safe_summary`
+  hiding (ED-5, ED-13). It stays pure stdlib.
+- `cli.py`: the `--email` flag, the conditional env read, `_deliver_by_email` and
+  `_run_email_delivery`, `_deliver_to_telegram` returning a bool, and the merged exit
+  code (ED-14). The module docstring's exit-code block is updated.
+- `.env.example` and `README.md` (ED-13, ED-18).
+- **Unchanged:** `render.py`, `templates/reading_list.html.j2`, `models.py`, `agent.py`,
+  `tools.py`, `prompts.py`, `store.py`, `delivery.py`, `pdf.py`, `telegram.py` and the
+  fetching modules.
+
+Why the renderer is a new module rather than a function in `render.py`: FR-053 and
+FR-067 require that a flag-off run loads no email rendering code, and `render` is
+imported on every run. A separate `email_render` that only takes `ENVIRONMENT` and
+`safe_url` from `render` keeps the shared escaping and URL rules without loading
+anything new on a flag-off run. `render_html` and its template are not touched, so the
+T023 goldens and the `flag_off_*_golden.html` files stay byte-identical.
+
+Why `email_delivery` is not merged into `delivery`: `delivery` imports `pdf` and
+`telegram` (and with them fpdf2). FR-067 forbids the email module from importing
+`pdf` or `telegram`, and `--email` alone must not load fpdf2. The two delivery
+orchestrators are therefore siblings.
+
+**Layer order (amended).** Every edge points down. There are no lateral imports and no
+cycles:
+
+```
+cli > {agent, delivery, email_delivery} > enrich > {tools, prompts, llm}
+    > {gmail_mcp, pdf, email_render} > {store, render, fetch}
+    > {extract, netguard, telegram} > {models, config, links}
+```
+
+- The PRD order and the AF-2 and TD-2 orders are preserved as sub-orders. The two new
+  modules only join existing tiers as peers.
+- `email_delivery` is tier 1, a peer of `agent` and `delivery`, and is imported only by
+  `cli`, lazily.
+- `email_render` is tier 4, a peer of `gmail_mcp` and `pdf`, because it imports
+  `render`. It does not import `gmail_mcp`, so rendering cannot reach any MCP code.
+
+```mermaid
+flowchart TD
+    cli --> agent
+    cli -. lazy import, --telegram only .-> delivery
+    cli -. lazy import, --email only .-> email_delivery
+    agent --> gmail_mcp
+    email_delivery --> gmail_mcp & email_render & models & config
+    email_render --> render & models
+    gmail_mcp -->|session 1: open_gmail_tools, filter_read_only| S1[(npx Gmail MCP 1.1.11)]
+    gmail_mcp -->|session 2: send_gmail_message, raw ClientSession.call_tool| S2[(npx Gmail MCP 1.1.11, new process)]
+```
+
+**Import-boundary tests (`tests/test_architecture.py`), extended.** The existing
+checkers stay. Each new rule gets a synthetic-source self-test and a `RealTreeMutant`
+proving it can fail, as for TD-2:
+
+| Rule | Change |
+|---|---|
+| `TIER_RANKS` | add `"email_delivery": 1`, `"email_render": 4` |
+| `EMAIL_MODULES = ("email_delivery", "email_render")` | added to `NEW_MODULES` (no `gmail*` parameters) and `LANGCHAIN_FREE` (neither imports langchain, langgraph, deepagents or mcp directly) |
+| `FORBIDDEN_PROJECT_IMPORTS` | both ban `EMAIL_BANNED = {"agent", "tools", "store", "prompts", "llm", "fetch", "enrich", "netguard", "extract", "pdf", "telegram", "delivery"}` (FR-067) |
+| `ONLY_PROJECT_IMPORTS` | `email_delivery -> {"gmail_mcp", "email_render", "models", "config"}`; `email_render -> {"render", "models"}` |
+| `ALLOWED_IMPORTERS` | `email_delivery` only by `cli`; `email_render` only by `email_delivery` |
+| `ONLY_IMPORTED_NAMES` | `(email_render, render) -> {ENVIRONMENT, safe_url}`; `(email_delivery, gmail_mcp) -> SEND_NAMES` (below) |
+| `find_eager_delivery_imports` | also covers `newsletter_digest.email_delivery` and `newsletter_digest.email_render`: never at module level in `cli` |
+| `_lazy_cli_import_violations` | second entry: exactly one import of `email_delivery` in `cli`, inside `_deliver_by_email` or a function it calls directly (`_run_email_delivery`). `LAZY_DELIVERY_ENTRY` for Telegram is unchanged |
+| new `find_send_capability_violations` | see ED-3 |
+| `test_detector_sees_the_known_project_edges` | expected edges gain `cli->email_delivery`, `email_delivery->{gmail_mcp, email_render, models, config}`, `email_render->{render, models}` |
+
+`SEND_NAMES = {"GMAIL_SEND_TOOL_MAP", "GMAIL_SEND_ARG_MAP", "SEND_MIME_TYPE",
+"OutgoingEmail", "GmailSendError", "GmailSendErrorKind", "GmailSendReceipt",
+"build_send_arguments", "send_gmail_message", "redact_addresses",
+"_default_send_client"}`.
+
+## ED-3 Agent isolation: the separate send session (FR-057, NFR-E1, NFR-E8, Q-E1)
+
+The guarantee rests on five independent layers. Any one of them failing still leaves
+the others.
+
+1. **No send tool object ever exists on the agent path.** `open_gmail_tools` is
+   unchanged. It calls `load_mcp_tools`, then `filter_read_only(tools)`, and yields only
+   `{"search_emails", "read_email"}`. The send path does **not** call `load_mcp_tools`.
+   It talks to the raw `mcp.ClientSession` (`list_tools()` and `call_tool()`) inside
+   one function (`send_gmail_message`). No LangChain `BaseTool` for `send_email` is
+   ever built, so there is no object that could be passed to `build_agent`,
+   `make_store_tools`, `run_digest` or a prompt. The `send_email` tool name exists
+   only as a dict value in `GMAIL_SEND_TOOL_MAP` and as a local string inside
+   `send_gmail_message`.
+2. **Separate process, separate time.** Session 2 is a new `MultiServerMCPClient` and a
+   new `npx` process, created in `send_gmail_message`. That function is reachable only
+   from `email_delivery`, which is reachable only from `cli._deliver_by_email`, which
+   runs only after `anyio.run(run_digest, ...)` has returned. By then the agent
+   session's `async with` has exited, the subprocess is closed, and the compiled graph
+   (local to `run_digest`) is unreachable. No reference to session 1 or the graph is
+   kept anywhere. The cost is one extra `npx` start (a few seconds) per `--email` run,
+   which was accepted in Q-E1.
+3. **The allowlist is unchanged.** `GMAIL_TOOL_MAP`, `GMAIL_ARG_MAP` and
+   `filter_read_only` are byte-for-byte as before (the diff for `gmail_mcp.py` only
+   adds code), with or without `--email`. The agent prompts are unchanged and do not
+   mention email sending.
+4. **Static (AST) rule `find_send_capability_violations`**, over `src/` only:
+   - `SEND_NAMES` may be imported or referenced (`from newsletter_digest.gmail_mcp
+     import X`, or the attribute `gmail_mcp.X`) only by `gmail_mcp` itself and
+     `email_delivery`. In particular `agent`, `tools`, `prompts`, `enrich`, `store` and
+     `cli` never reference them. `cli` reaches `redact_addresses` only through
+     `email_delivery`.
+   - Inside `gmail_mcp`, the bodies of `open_gmail_tools` and `filter_read_only` (and
+     the default value of `filter_read_only`'s `tool_map` parameter, which must be the
+     name `GMAIL_TOOL_MAP`) reference no `SEND_NAMES`.
+   - A string constant **equal to** a known server write-tool name (`WRITE_TOOL_NAMES`
+     in the test: `send_email`, `draft_email`, `modify_email`, `delete_email`,
+     `batch_modify_emails`, `batch_delete_emails`, `create_label`, `update_label`,
+     `delete_label`, `get_or_create_label`, `create_filter`,
+     `create_filter_from_template`, `delete_filter`) appears in `src/` only as a key or
+     value of the `GMAIL_SEND_TOOL_MAP` dict literal, and only `"send_email"` appears
+     there.
+   - The attribute `call_tool` is referenced only in `gmail_mcp`, and only inside
+     `send_gmail_message` or its private helpers (`_send_attempt`).
+   - `email_delivery` never references `open_gmail_tools`, `filter_read_only` or
+     `load_mcp_tools`.
+   - `agent`, `tools` and `prompts` do not import `email_delivery` or `email_render`
+     (this is also covered by `ALLOWED_IMPORTERS`).
+5. **Runtime tests** (ED-17 lists them all):
+   - **Graph allowlist with email on and off.** This reuses the `run_real_graph` and
+     `ModelFactoryRecorder` harness of `test_agent.py`. The Gmail tools are produced by
+     the real `open_gmail_tools` over a `FakeClient` offering **all 19** 1.1.11 tool
+     names (with `send_email`, `draft_email`, `modify_email` and `delete_email`). The
+     test is parametrised over `Settings` built with `email=False` and `email=True`
+     (with a valid `EMAIL_TO`). It asserts that the bound tool names of the main agent
+     and of the reader (after construction, including deepagents built-ins) are
+     exactly today's sets (`MAIN_TOOLS | {"read_file", "task"}` and
+     `READER_TOOLS | {"read_file"}`), and that their intersection with
+     `WRITE_TOOL_NAMES` and with the 19 server names is empty.
+   - **`open_gmail_tools` can never yield a send tool.** For every subset of the 19 names
+     that contains the two allowlisted ones (or a sampled 200 of them, seeded), the
+     yielded keys are `{"search_emails", "read_email"}` and the values' `.name` are the
+     two read tools. A missing allowlisted tool still raises `GmailMCPError`.
+   - **Maps are disjoint.** `set(GMAIL_TOOL_MAP.values())` and
+     `set(GMAIL_SEND_TOOL_MAP.values())` are disjoint, and the first is disjoint from
+     `WRITE_TOOL_NAMES`.
+   - **Event order through the real CLI.** `cli.run_digest` is monkeypatched to a
+     `partial` of the real `run_digest` with `gmail_opener=partial(open_gmail_tools,
+     client_factory=factory)`, a recording `agent_builder` (it wraps the real
+     `build_agent` and records the bound tool names) and a fake model factory.
+     `gmail_mcp._default_send_client` is patched to the same `factory`. `shutil.which`
+     is patched. The test runs CliRunner with `--email` and asserts this event log:
+     `open#1, list#1, close#1, open#2, list#2, call#2(send_email), close#2`. No
+     `call_tool("send_email")` may happen on session 1, and the recorded agent tool
+     names contain no write tool. It is repeated without `--email`: there is only one
+     session and no `call#2`.
+
+## ED-4 The send helper in `gmail_mcp.py` (FR-056, FR-063, FR-064, Q-E2)
+
+**Mapping (the only place that knows the server's send tool and argument names):**
+
+```python
+# logical -> server tool name. Never merged into GMAIL_TOOL_MAP (agent allowlist).
+GMAIL_SEND_TOOL_MAP: dict[str, str] = {"send_email": "send_email"}
+# logical -> server argument name. The ONLY five keys ever sent (FR-056).
+GMAIL_SEND_ARG_MAP: dict[str, str] = {
+    "to": "to",
+    "subject": "subject",
+    "text_body": "body",
+    "html_body": "htmlBody",
+    "mime_type": "mimeType",
+}
+SEND_MIME_TYPE = "multipart/alternative"
+SEND_SUCCESS_RE = re.compile(
+    r"\s*Email sent successfully with ID:\s*([A-Za-z0-9_-]{1,64})\s*"
+)  # fullmatch
+SEND_START_TIMEOUT_S = 60.0
+SEND_START_ATTEMPTS = 2           # first start + one retry, start phase only
+SEND_START_RETRY_PAUSE_S = 2.0
+MAX_SEND_DETAIL_CHARS = 200
+_ADDRESS_LIKE_RE = re.compile(r"[^\s<>()\[\],;:\"']+@[^\s<>()\[\],;:\"']+")
+```
+
+**Message type and fixed argument set:**
+
+```python
+@dataclass(frozen=True)
+class OutgoingEmail:
+    to: tuple[str, ...]       # validated bare addresses (ED-5)
+    subject: str              # printable ASCII, <= 150 chars (ED-6)
+    text_body: str            # ASCII plain part (ED-9)
+    html_body: str            # ASCII HTML part (ED-7, ED-8)
+
+def build_send_arguments(message: OutgoingEmail) -> dict[str, object]:
+    """Exactly {to, subject, body, htmlBody, mimeType}; never cc/bcc/threadId/
+    inReplyTo/attachments (attachments would make the server read local files)."""
+```
+
+- `to` is sent as a **list** (the schema says `array of string`), all in one message,
+  with every recipient visible in `To` (Q-E3).
+- `mimeType` is always `"multipart/alternative"`. With `htmlBody` set, 1.1.11 then
+  builds a plain `body` part followed by an HTML part (verified facts).
+- `build_send_arguments` **re-validates** (defence in depth; the config check in ED-5 is
+  the primary one). It raises `GmailSendError(INVALID_MESSAGE, call_issued=False)`
+  before any session is started if any of these hold:
+  - `to` is empty, or has more than `MAX_EMAIL_RECIPIENTS`;
+  - an address fails `config.EMAIL_ADDRESS_RE` or contains `,`;
+  - the subject is empty, longer than 150 characters or contains a character outside
+    `\x20-\x7e`;
+  - either body is not ASCII, or has a line over 900 characters.
+
+  The detail text is fixed and names no value.
+
+**`send_gmail_message` (the one function that holds a send-capable session):**
+
+```python
+async def send_gmail_message(
+    settings: Settings,
+    message: OutgoingEmail,
+    *,
+    send_timeout: float,                       # settings.email_send_timeout (90 s)
+    client_factory: Callable[[dict[str, Any]], Any] | None = None,  # None -> _default_send_client, resolved at call time
+    start_timeout: float = SEND_START_TIMEOUT_S,
+    retry_pause: float = SEND_START_RETRY_PAUSE_S,
+    sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+) -> GmailSendReceipt:            # raises GmailSendError for every expected failure
+```
+
+Algorithm:
+1. `args = build_send_arguments(message)`. A failure here means no session is started.
+2. `shutil.which(settings.gmail_mcp_command)` is None: raise `START_FAILED` with
+   `not_on_path=True`, without retrying (the cause is deterministic).
+3. Start attempts, at most `SEND_START_ATTEMPTS` (2). Each attempt (`_send_attempt`)
+   runs:
+
+   ```
+   state = _AttemptState(phase="start", reply=None, deterministic=None)
+   client = factory(build_connections(settings))      # same command/args/env passthrough
+   async with AsyncExitStack() as stack:
+       with anyio.fail_after(start_timeout):
+           session = await stack.enter_async_context(client.session(SERVER_NAME))
+           tools = await _list_all_tools(session)        # follows nextCursor, <= 10 pages
+       tool = by exact name GMAIL_SEND_TOOL_MAP["send_email"]; absent -> state.deterministic=TOOL_MISSING; return
+       schema check: inputSchema.properties ⊇ GMAIL_SEND_ARG_MAP.values() and
+                     inputSchema.required ⊆ GMAIL_SEND_ARG_MAP.values()
+                     else state.deterministic=TOOL_SCHEMA_CHANGED; return
+       state.phase = "call"                              # the call is now issued
+       with anyio.fail_after(send_timeout):
+           state.reply = await session.call_tool(tool.name, args)
+       state.phase = "done"
+   ```
+
+   - Every `Exception` (including `ExceptionGroup`s raised by the session's task
+     groups) is caught **around the whole attempt** and classified only from `state`,
+     never from the exception's shape.
+   - A `BaseExceptionGroup` that holds a cancellation, and `KeyboardInterrupt`, are
+     re-raised.
+   - An exception raised while closing the session after `state.reply` was recorded is
+     logged at DEBUG and ignored: the reply decides the outcome.
+   - The `stdio_client` close is bounded by mcp's 2 s termination timeout, so the
+     subprocess is closed on every path.
+4. Classification of one attempt:
+
+| `state` at the end | Result | Retry? |
+|---|---|---|
+| `phase == "start"`, exception or start timeout | `START_FAILED` (transient) | **yes, once**, after `sleep(retry_pause)`; the first session is fully closed first |
+| `deterministic == TOOL_MISSING` | `TOOL_MISSING` (FR-064: never falls back to `draft_email` or anything else) | no |
+| `deterministic == TOOL_SCHEMA_CHANGED` | `TOOL_SCHEMA_CHANGED` (names the missing keys) | no |
+| `phase == "call"`, `TimeoutError` | `TIMEOUT_AFTER_SEND` (ambiguous) | **never** |
+| `phase == "call"`, any other exception | `TRANSPORT_AFTER_SEND` (ambiguous; the detail is the exception class name only) | **never** |
+| reply `isError` true, or text starts with `Error:` | `REJECTED` (Gmail did not accept it; detail is the clipped server text) | never (the user re-runs) |
+| reply text fullmatches `SEND_SUCCESS_RE` | success: `GmailSendReceipt(message_id, session_starts)` | - |
+| any other reply text | `UNKNOWN_REPLY` (ambiguous: the server answered, but not in the 1.1.11 form) | never |
+
+- The reply text is `tool_result_text(result.content)` (existing helper; it handles
+  `TextContent` objects).
+- `call_tool` is invoked **at most once per `send_gmail_message` call**, whatever
+  happens. This is asserted by every failure-branch test.
+- `anyio.fail_after` is the only timeout mechanism. `read_timeout_seconds` is not
+  passed, so there is one clock and one exception type to classify.
+
+```python
+class GmailSendErrorKind(StrEnum):
+    INVALID_MESSAGE = "invalid_message"          # pre-send, app check
+    START_FAILED = "start_failed"                # pre-send, after 1 or 2 starts
+    TOOL_MISSING = "tool_missing"                # pre-send
+    TOOL_SCHEMA_CHANGED = "tool_schema_changed"  # pre-send
+    REJECTED = "rejected"                        # Error: reply, not sent
+    TIMEOUT_AFTER_SEND = "timeout_after_send"    # ambiguous
+    TRANSPORT_AFTER_SEND = "transport_after_send"  # ambiguous
+    UNKNOWN_REPLY = "unknown_reply"              # ambiguous
+
+class GmailSendError(Exception):
+    kind: GmailSendErrorKind
+    detail: str            # one line, clipped to 200, addresses redacted, printable ASCII
+    call_issued: bool      # True only for REJECTED and the three ambiguous kinds
+    session_starts: int    # 0, 1 or 2
+    not_on_path: bool = False
+    @property
+    def ambiguous(self) -> bool: ...  # TIMEOUT_AFTER_SEND, TRANSPORT_AFTER_SEND, UNKNOWN_REPLY
+
+@dataclass(frozen=True)
+class GmailSendReceipt:
+    message_id: str        # [A-Za-z0-9_-]{1,64}
+    session_starts: int
+```
+
+- **`redact_addresses(text, extra=())`.** Replaces every `_ADDRESS_LIKE_RE` match and
+  every `extra` string (case-insensitive) with `<address>`. Every `detail` is redacted
+  before it is stored. The server's own errors can echo an address, for example
+  1.1.11's invalid-recipient error.
+- **No logging of arguments.** `send_gmail_message` logs only fixed text and counts:
+  INFO `Starting a separate Gmail MCP session to send the email`, WARNING
+  `Gmail MCP send session failed to start (attempt 1/2); retrying in 2 s`, and DEBUG
+  for the tool-list size. It never logs `args`, the subject or the bodies.
+- **`_default_send_client(connections) -> MultiServerMCPClient`** is the single place on
+  the send path where a real client is built. It is resolved at call time (the
+  parameter default is `None`), so the suite-wide fixture can replace it (ED-17).
+
+## ED-5 Recipients (`config.py`, FR-054)
+
+```python
+EMAIL_ENV_VARS = ("EMAIL_TO", "EMAIL_SEND_TIMEOUT")
+EMAIL_SUMMARY_FIELDS = frozenset({"email", "email_to", "email_send_timeout"})
+MAX_EMAIL_RECIPIENTS = 10                 # fixed, not configurable (FR-068, Q-E11)
+MAX_EMAIL_ADDRESS_CHARS = 254
+MAX_EMAIL_TO_CHARS = 4096                 # raw value cap before splitting
+DEFAULT_EMAIL_SEND_TIMEOUT = 90.0
+EMAIL_SEND_TIMEOUT_RANGE: tuple[float, float] = (10, 600)
+_EMAIL_SETUP_HINT = "See README > Email delivery."
+_EMAIL_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_EMAIL_LOCAL = r"[A-Za-z0-9%+_-]+(?:\.[A-Za-z0-9%+_-]+)*"   # dot-atom: no leading/trailing/double dot
+EMAIL_ADDRESS_RE = re.compile(rf"{_EMAIL_LOCAL}@{_EMAIL_LABEL}(?:\.{_EMAIL_LABEL})+")
+
+def parse_email_recipients(raw: str | None) -> tuple[str, ...]: ...
+```
+
+`parse_email_recipients` rules:
+1. `None`, empty or whitespace-only: `ConfigError`:
+   `EMAIL_TO is not set (needed by --email); add a comma-separated list of addresses to .env, e.g. EMAIL_TO=you@example.com. See README > Email delivery.`
+2. A raw value longer than 4096 characters is rejected (this bounds the work).
+3. Split on `,` **only**. Each segment is stripped of spaces and tabs only
+   (`strip(" \t")`), never of CR or LF, so a CR/LF anywhere is rejected rather than
+   silently trimmed. Empty segments (a trailing comma, or `a@x.io,,b@y.io`) are
+   skipped. If no segments remain: `EMAIL_TO has no addresses ...`.
+4. Each segment must `fullmatch` `EMAIL_ADDRESS_RE` (local part at most 64 characters)
+   and be at most 254 characters long.
+   - `fullmatch` is used, not `match` with `$`, so a trailing `\n` cannot pass.
+   - The character classes are explicit ASCII ranges, so IDN or Unicode addresses are
+     rejected.
+5. The first invalid segment raises `ConfigError` naming the variable, the 1-based entry
+   number, a truncated safe echo and the first matching reason:
+   `EMAIL_TO entry 2 is not a plain email address ('Bob <bob@exa...'): display names and angle brackets are not supported. Use bare addresses separated by commas. See README > Email delivery.`
+   - The echo is `ascii(segment[:32])` plus `...` when cut. `ascii()` escapes CR, LF
+     and every non-ASCII character, so the terminal line stays one line.
+   - No other entry is echoed.
+   - The reasons are checked in this order:
+     - a control character (CR, LF, NUL and so on);
+     - whitespace inside the address;
+     - `<`, `>`, a quote or a parenthesis (display names are not supported);
+     - `;` (use commas);
+     - a non-ASCII character;
+     - no `@` or more than one `@`;
+     - longer than 254 characters;
+     - otherwise "not a valid address".
+6. Duplicates are removed case-insensitively (on `casefold()`). The first spelling and
+   the first-seen order are kept.
+7. More than 10 unique addresses: `EMAIL_TO lists 12 addresses; at most 10 are allowed. See README > Email delivery.`
+8. Returns a tuple of the bare addresses.
+
+**The comma hazard.** 1.1.11's own check accepts `a@x.io,b@y.io` as one address and
+writes it as two recipients. Because this app splits on commas first and then requires
+each element to fullmatch a comma-free regex, no element of `to` can ever contain a
+comma. Each comma-separated entry is a separate, validated recipient.
+`build_send_arguments` re-asserts this (ED-4). A quoted local part such as
+`"a,b"@x.io` splits into `"a` and `b"@x.io`, both of which are rejected.
+
+`EMAIL_SEND_TIMEOUT` is parsed with the existing `_env_number` (`float`, range 10 to
+600, default 90).
+
+Both variables are read and validated **only with `--email`**, after every existing
+check and after the Telegram check. With the flag off, `email_env` is ignored entirely,
+so a malformed `EMAIL_TO` in `.env` cannot affect a flag-off run.
+
+## ED-6 Subject (FR-058, FR-069)
+
+`email_delivery.build_subject(reading_list) -> str` takes the window, the end date and
+counts only:
+
+| Case | Subject |
+|---|---|
+| ranked | `Newsletter digest: last 1w (2026-11-04) - 42 articles, 7 must-read` |
+| unranked (`not ranked`, items present) | `Newsletter digest: last 1w (2026-11-04) - 42 articles, unranked` |
+| empty (`article_count == 0`) | `Newsletter digest: last 1w (2026-11-04) - no articles found` |
+| one article | `... - 1 article, 0 must-read` (singular, as in the Telegram caption) |
+
+- **Sanitising.** The subject is built from `meta.window` (already normalised by
+  `window_to_days` to `1w`, `2w`, `1m` or `<N>d`), `meta.end_date.isoformat()` and
+  integers. It still goes through a sanitiser:
+  `re.sub(r"[^\x20-\x7e]", "", s)` removes CR, LF, every other C0 or C1 control,
+  U+2028/U+2029 and anything non-ASCII. Runs of spaces are then collapsed and the result
+  is cut to 150 characters.
+- **ASCII on purpose.** An ASCII subject is written raw by the server. This sanitiser
+  makes it one printable line, so no header injection is possible, and the server never
+  needs its RFC 2047 path.
+- **Fixed prefix.** The subject always starts with `Newsletter digest:` (FR-069), so the
+  user can exclude it with `-subject:"Newsletter digest"`. Query construction is
+  unchanged (Q-E7).
+- **Recipients and subject come only from config and fixed code.** No title, summary,
+  newsletter name or model text reaches the subject or `to`. A test builds a list with
+  hostile titles and a `meta.window` forced (via `model_copy`) to
+  `"1w\r\nBcc: x@evil.io"`. It asserts a single-line subject from `[ -~]` only,
+  starting with the prefix and containing no title text. It also asserts that
+  `build_send_arguments` keys are unchanged.
+
+## ED-7 Email HTML template and renderer (FR-059, FR-060, Q-E10)
+
+**Template `templates/reading_list_email.html.j2`**, rendered through
+`render.ENVIRONMENT` (autoescape on, `StrictUndefined`, `trim_blocks`/`lstrip_blocks`,
+the `safe_url` filter). It contains **no `|safe`** and no
+`{% autoescape false %}`; a test greps the template source for both.
+
+Skeleton (style strings are `{% set %}` constants at the top of the template, so each
+appears once in the source; inline repetition per item is the price of Gmail
+robustness):
+
+```
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light"><title>Newsletter reading list - {{ date }}</title></head>
+<body style="margin:0;padding:0;background:#f7f6f2;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f7f6f2;">
+<tr><td align="center" style="padding:16px 8px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+ style="max-width:600px;background:#ffffff;border:1px solid #e2e0d8;font-family:Arial,Helvetica,sans-serif;color:#1d1d1b;">
+  header row: h1 "Newsletter reading list"; window (days): start - end;
+     "Emails: F found, P processed, X failed - Articles: N"; fetch line when fetch is on;
+     notes (unranked, failed emails, fetch skipped);
+     omitted line when omitted > 0 (FR-059):
+     "M of N items are shown; K lower-priority items were left out to fit Gmail's size
+      limit. The full list is in reading-list-YYYY-MM-DD.html on the computer that ran
+      the digest."
+  Must read section (ranked and must_read): heading row "Must read (n)", one row per item
+  topic sections in by_topic order: heading row "Topic (n)", one row per item
+  empty state (ED-11)
+  footer row: "Generated YYYY-MM-DD HH:MM." + the summaries-source line of the page footer
+</table></td></tr></table></body></html>
+```
+
+**Item row (macro `email_item(item)`):**
+- The title is a link when `href = item.url | safe_url` is set and `item.id in
+  linkable`. Otherwise it is plain text, and an unlinked long URL adds
+  `(link too long for email; see the saved HTML)`.
+- The anchor is written as `<a` newline `href="{{ href }}" style="color:#1f5fbf;text-decoration:none;">`,
+  so the URL starts its own line (ED-8). There is no `target` or `rel` (Gmail adds its
+  own), no `id`, no `class` and no `data-*`.
+- The Q3 rule of AF-8 is kept: when `item.fetched` is set, show `fetched.summary` and a
+  `<ul>` of `key_points` (Q-E10: included). Otherwise show `item.summary` when present.
+  In compact mode (ED-10 stage 3), key points are left out.
+- A meta line: sources joined with `, `, then the date, then `mentioned in N` only when
+  N > 1, joined with ` &middot; `.
+- `Why: {{ item.reason }}` when present. It is left out in compact mode.
+- **Excluded** (FR-059): `full_text`/"Read here", the checkbox, scripts, CSP meta,
+  `<details>`, CSS variables, `prefers-color-scheme`, `<style>`, `<link>`, `<img>`,
+  fonts, `url(`, ids/anchors and the nav block. In-page anchors are unreliable in Gmail,
+  and they cost bytes. The fetch-failure note is excluded too (it is not in the FR-059
+  field list, and saving bytes matters here).
+- **Ordering and grouping** come from the same model helpers as the page:
+  `must_read()` first (ranked only), then `by_topic()` (which excludes must-read items
+  when ranked, D8). There is no Must read section when unranked; then the template
+  shows the page's unranked note.
+- **Colours** are fixed light values from the page's light palette (`#1d1d1b` text,
+  `#5f5e58` muted, `#1f5fbf` links, `#9a2f12` Must read heading). Every block sets both
+  a background and a text colour, so a client that forces dark mode by inversion
+  inverts consistently. Font sizes are in px. The container `max-width` is 600 px.
+
+**Renderer (`email_render.py`):**
+
+```python
+EMAIL_TEMPLATE_NAME = "reading_list_email.html.j2"
+EMAIL_HTML_BUDGET = 95_000          # bytes of the final ASCII HTML (Q-E9)
+MAX_EMAIL_LINE_CHARS = 900          # hard limit asserted by tests
+WRAP_AT = 880                       # wrapper target, leaves headroom
+MAX_EMAIL_HREF_CHARS = 800          # escaped + ASCII-encoded href length
+MAX_TEXT_PART_BYTES = 8_000
+TEXT_PART_MAX_ITEMS = 30
+
+@dataclass(frozen=True)
+class EmailContent:
+    html: str            # ASCII, every line <= 900
+    text: str            # ASCII, every line <= 900, <= 8,000 bytes
+    shown: int           # items rendered
+    omitted: int         # items dropped by the budget
+    compact: bool        # stage-3 compaction applied
+    over_budget: bool    # still > budget after every stage (ED-10)
+
+def email_link(url: str | None) -> str | None:
+    """safe_url(url), kept only if len(to_email_ascii(escape(href))) <= 800."""
+```
+
+- `render_email_html(rl, *, html_name, total, omitted, compact)` does one pass:
+  `ENVIRONMENT.get_template(EMAIL_TEMPLATE_NAME).render(...)`, then `to_email_ascii`,
+  then `wrap_long_lines(..., WRAP_AT)`.
+- The template variables are: `reading_list`, `meta`, `must_read`, `by_topic` (all from
+  the reduced list), `total_articles` (from the full list), `omitted`, `html_name`,
+  `compact` and `linkable` (the set of item ids whose `email_link` is set).
+- `linkable` is computed in Python, so the template still applies `| safe_url` itself
+  (same scheme rule as the page), and the length gate cannot be bypassed.
+- `ENVIRONMENT` is **not** mutated: no filter or global is added, so importing
+  `email_render` cannot change `render_html`. A test renders the page before and after
+  importing `email_render` and compares the bytes.
+
+**Body safety (FR-060), by construction:**
+- All dynamic text goes through Jinja autoescape.
+- Every `href` comes from `safe_url` (http and https with a host only). Non-http(s)
+  URLs render as plain text.
+- The template has no event attributes, forms, `src` or `background` attributes, and
+  no external resources, so there is no tracking pixel. No redirect or tracking wrapper
+  is added.
+- **Hostile fixtures:** `<script>` and markup-like titles, `javascript:`, `data:` and
+  `vbscript:` URLs, `<img src=http://...>` in summaries, CR/LF and bidi overrides in
+  titles. They are parsed with lxml in the test, which asserts:
+  - no element among `script`, `style`, `img`, `link`, `iframe`, `form`, `input`,
+    `details`, `object` or `embed`;
+  - no attribute starting with `on`, and no `src`, `srcset`, `background`, `id`,
+    `class` or `data-*` attribute;
+  - every `href` scheme is http or https;
+  - hostile title text appears only as escaped text.
+- **The forbidden-substring list** of FR-059 (`<script`, `<details`, `<input`, `var(`,
+  `@media`, `http-equiv`, `<img`, `<link`, `url(`) is asserted on the template source
+  and on the rendering of the standard synthetic fixture, whose text contains none of
+  these words. Hostile text is covered by the parser-based test, because a title may
+  legitimately contain the text `url(`.
+
+## ED-8 ASCII-only encoding and line length (FR-059, NFR-E5)
+
+The server declares every part `7bit` but writes raw UTF-8, and it does not fold long
+lines (verified facts). The renderer therefore guarantees ASCII and short lines itself.
+
+**`to_email_ascii(text)`**, applied to the whole rendered document:
+1. Sanitise:
+   - remove CR and the C0 controls except TAB and LF (`\x00-\x08`, `\x0b`, `\x0c`,
+     `\x0e-\x1f`), plus DEL and the C1 controls (`\x80-\x9f`);
+   - remove the bidi embedding, override and isolate controls (U+202A to U+202E and
+     U+2066 to U+2069), mirroring the PDF sanitiser's rule; this stops spoofed
+     link text;
+   - map U+2028/U+2029 to a space;
+   - map lone surrogates to U+FFFD.
+
+   The template itself contains none of these characters, so whole-document sanitising
+   only affects data.
+2. `text.encode("ascii", "xmlcharrefreplace").decode("ascii")`: every non-ASCII code
+   point becomes a decimal numeric character reference (`é` -> `&#233;`, `日` ->
+   `&#26085;`, an astral emoji -> one `&#128512;`, never a surrogate pair). This is safe
+   after autoescape in both text and attribute values. In an `href`, the browser
+   decodes the reference and then percent-encodes as usual.
+
+**`wrap_long_lines(text, limit)`**, applied after step 2 to the whole document (not line
+by line, because a tag may span lines):
+- **Tokens:** a tag `<...>` (one token, may contain LF), a character reference
+  `&#?[A-Za-z0-9]+;`, a whitespace run, a text run without `<`, `&` or whitespace, or a
+  single `&`. The tag regex is safe: autoescape guarantees that data contains no raw
+  `<` or `>`.
+- **Greedy columns:** track the current column. A token that would push the column past
+  `limit` causes a break:
+  - preferably by replacing the last whitespace token of the current line (in text, or
+    between attributes inside a tag, where LF is equivalent) with LF;
+  - otherwise by inserting LF before the token. This is only allowed in text context
+    (between a text run, a character reference or a tag). In CJK text it can show as a
+    space; this is accepted.
+  - A text run longer than `limit` on its own (for example a 2,000-character word) is
+    split into `limit`-sized chunks.
+- **Tags are never split inside an attribute value.** The only tag that could exceed
+  the limit is `<a href>`. The `MAX_EMAIL_HREF_CHARS` gate (800, measured after
+  escaping and ASCII encoding) and the template putting `href=` on its own line make
+  that impossible. If a tag token is still longer than `limit`, `wrap_long_lines`
+  raises `ValueError`. That is a bug, and it surfaces as a pre-send render failure
+  (exit 3, nothing sent), never as an over-long line.
+- **Tests** cover CJK, emoji (including ZWJ sequences), Arabic, 2,000-character unbroken
+  words, a 2,048-character URL (rendered unlinked), a URL with 300 `&` (escaped to
+  `&amp;`), and NUL and bidi controls. They assert
+  `html.isascii()`, `max(map(len, html.split("\n"))) <= 900`, and that lxml parses the
+  same visible text as the unwrapped document (modulo whitespace).
+
+## ED-9 Plain-text part (Q-E4)
+
+`render_email_text(rl, *, html_name) -> str`, ASCII only:
+
+```
+Newsletter digest: last 1w (2026-10-28 to 2026-11-04)
+42 articles from 30 of 31 emails; 7 must-read.
+
+Must read:
+1. <ASCII title>
+   <url>
+2. ...
+
+Open the HTML version of this email for the full list. It is also saved as
+reading-list-2026-11-04.html on the computer that ran the digest.
+```
+
+- **Titles** are converted to ASCII by NFKD normalisation, dropping combining marks,
+  replacing every remaining non-ASCII run with `?`, and dropping controls, then cut to
+  200 characters.
+- **URLs:** `safe_url(url)` only, written on their own line. A URL that is not pure
+  ASCII, or longer than 800 characters, is replaced by `(link in the HTML version)`.
+- At most `TEXT_PART_MAX_ITEMS` (30) Must-read entries are listed, then
+  `... and N more in the HTML version.`
+- **Variants.** Unranked: `Ranking was not completed; open the HTML version for the
+  list.` with no item list. Empty: the empty-state sentence of ED-11.
+- **Bounds:** the whole part is at most 8,000 bytes (entries stop being added before
+  the cap) and every line is at most 900 characters (`textwrap`-style wrapping at 76
+  for prose; URL lines are already at most 800).
+
+## ED-10 Size budget (FR-059, Q-E9)
+
+The **budget** is `len(html.encode("ascii")) <= 95_000`, measured on the final HTML part
+(after ASCII encoding and wrapping). The plain part is bounded separately (8,000 bytes).
+Gmail's clipping threshold (about 102 KB) is general knowledge, not verified here, so
+95,000 leaves headroom. The manual check (acceptance 34) confirms it.
+
+**Drop order** (`drop_order(rl) -> list[str]`, item ids, first dropped first):
+- **Ranked:** first the items whose `priority` is `"skim"` or `None`, in **reverse
+  display order** (the email's order: Must read, then `by_topic` flattened). Then the
+  `"worth-reading"` items, in reverse display order. **Must-read items are never in
+  the drop order.**
+- **Unranked:** all items in reverse display order (there are no Must-read items).
+
+**Algorithm (`render_email`):**
+1. Render the full list (`omitted=0`). If it fits the budget, return it.
+2. Use binary search on `k` (0 to `len(drop_order)`) for the smallest `k` whose
+   rendering, without the first `k` dropped items and with the omitted line saying
+   `k`, fits.
+   - Size is monotonically non-increasing in `k`. Each dropped item removes at least
+     its fixed row markup (over 300 bytes), while the omitted line grows by at most one
+     digit. An emptied topic section disappears entirely.
+   - The binary search needs about `log2(n) + 1` renders. That is about 10 renders for
+     300 items, and each one renders a smaller list.
+   - Items are dropped whole. A list is never cut in the middle of an item.
+3. If everything droppable is dropped and the HTML still does not fit (a pathological
+   number of large Must-read items), render in **compact** mode: key points and `Why:`
+   lines are left out for all kept items. Each Must-read item keeps its title, link,
+   summary and meta line, so it is still "not dropped".
+4. If it still does not fit, the compact rendering is returned with
+   `over_budget=True`. Delivery sends it anyway: Gmail then clips with "View entire
+   message", which is better than not sending. It also logs a WARNING with the byte
+   count, and the stderr success line says the email is over the size budget (DM12;
+   see the open items in ED-21).
+
+The **omitted line** gives the shown count, the total and the omitted count, plus the
+HTML **file name** only (never the directory, which can contain the user's name).
+
+**Analytical size estimate** (not measured, from the ED-7 markup):
+- **Fixed overhead per item row:** about 400 bytes.
+- **Typical newsletter-only item:** the title (about 80), the escaped URL (about 120 to
+  200), the summary (up to 300; models cap it at `MAX_SUMMARY_CHARS`), the meta line
+  (about 60) and the reason (up to 200), so about 1.0 to 1.3 KB.
+- **Fetched item:** the summary is up to 1,200 characters and the key points are up to
+  5 x 240, so up to about 3.5 KB.
+- **Non-ASCII text** grows when encoded: 6 to 10 bytes per character as a numeric
+  reference, against 2 to 4 bytes in UTF-8.
+- **Rough capacity:** 95,000 bytes hold about 70 to 90 plain English items, or about
+  25 fully fetched ones.
+
+Implication: a default run (`--max-emails 60`, with several articles per email) can
+exceed the budget. The skim-first drop is then the normal path, not an edge case. The
+implementing task measures the real per-item size on the synthetic fixtures below and
+records it in `implementation-notes.md`.
+
+**Synthetic fixtures and tests** (`tests/email_fixture.py`, deterministic, no real
+data):
+- `make_list(n, *, must, worth, skim, fetched=0, non_ascii=False, ranked=True)` builds a
+  `ReadingList` with seeded titles, summaries at the model caps, URLs of 150 to 300
+  characters with `&` query strings, reasons, sources and dates.
+- **Test: `size_300`.** 300 items (10 must-read, 90 worth-reading, 200 skim, 15
+  fetched with 5 key points). It first asserts that the **unbudgeted** rendering is
+  over 95,000 bytes; the test measures this and does not hard-code a size, so the drop
+  path is really exercised. It then asserts that:
+  - the result is at most 95,000 bytes;
+  - all 10 Must-read titles are present, with their summaries;
+  - the omitted line is present and its numbers equal `300 - shown`;
+  - every dropped item comes from the head of `drop_order`: no worth-reading item is
+    dropped while a skim item is kept;
+  - each kept item's title, summary and meta appear completely, and no item is
+    partial;
+  - the HTML is ASCII and its lines are at most 900 characters.
+- **Test: `fits_exactly`.** A list whose full rendering is at most the budget gets no
+  omitted line and `omitted == 0`.
+- **Test: `unranked_300`.** Items are dropped from the end of the display order.
+- **Test: `must_heavy`.** 120 fetched Must-read items: compact mode, then
+  `over_budget=True`, and no Must-read item is missing.
+- **Test: `cjk_heavy`.** The budget holds with 8 to 10 byte references.
+- **Performance (NFR-E6):** 100 items render, budget included, in under 1 s.
+
+## ED-11 Empty state (FR-061, Q-E5)
+
+An empty list is always emailed (silence would be ambiguous):
+- **Subject:** `... - no articles found` (ED-6).
+- **No matching emails** (`meta.emails_found == 0`): the HTML header, then one
+  paragraph: `No newsletter emails matched <query> in this window (start - end).` The
+  query is config-derived.
+- **Matching emails but no articles:** the page's
+  `No articles were found in the N matching emails.`
+- **Plain part:** the same sentence.
+- **Exit code:** 0 on a successful send.
+
+`run_digest` already returns the empty list without building an agent, so session 1
+is short and session 2 still runs.
+
+## ED-12 Outcomes, failure mapping and messages (FR-062 to FR-065)
+
+```python
+@dataclass(frozen=True)
+class EmailOutcome:
+    status: Literal["sent", "failed", "unknown"]
+    recipients: int
+    message_id: str | None
+    reason: str | None        # one line, no trailing period, no addresses; None when sent
+    shown: int
+    omitted: int
+    over_budget: bool
+    send_calls: int           # 0 or 1
+    session_starts: int       # 0, 1 or 2
+    @property
+    def delivered(self) -> bool: return self.status == "sent"
+```
+
+`send_reading_list_email(reading_list, html_path, settings, *, sender=send_gmail_message,
+renderer=render_email)` steps:
+1. Render, catching `Exception`. On failure, the outcome is `failed`, with
+   `could not build the email (<ExcClass>); nothing was sent`.
+2. Build the subject and `OutgoingEmail(to=settings.email_to, ...)`.
+3. Call `sender(settings, message, send_timeout=settings.email_send_timeout)`.
+4. Map the result. `GmailSendError` goes to `failure_reason` and the status. Any other
+   exception escaping the sender is classified conservatively as `unknown`: the sender
+   is responsible for proving that a failure happened before the send.
+
+It never touches the HTML file, never builds a PDF and never imports `delivery`.
+
+**`failure_reason(err)` (FR-065).** Every reason goes through
+`redact_addresses(text, extra=settings.email_to)`, is clipped to 300 characters and
+has whitespace collapsed:
+
+| Kind / match (case-insensitive substrings, checked in this order) | Status | Reason text |
+|---|---|---|
+| `INVALID_MESSAGE` | failed | `the email failed this app's own checks (<detail>); nothing was sent` |
+| `START_FAILED`, not on PATH | failed | `'<command>' not found on PATH; install Node.js >= 18 (it provides npx) or set GMAIL_MCP_COMMAND` |
+| `START_FAILED` | failed | `could not start the Gmail MCP server after 2 attempts (<detail>); check Node.js, GMAIL_MCP_COMMAND and GMAIL_MCP_ARGS` |
+| `TOOL_MISSING` | failed | `the Gmail MCP server offers no send_email tool; check that GMAIL_MCP_ARGS points at @gongrzhe/server-gmail-autoauth-mcp@1.1.11` |
+| `TOOL_SCHEMA_CHANGED` | failed | `the Gmail MCP server's send_email arguments differ from version 1.1.11 (missing: <keys>); check GMAIL_MCP_ARGS` |
+| `REJECTED` + `insufficient`, `invalid_grant`, `unauthorized`, `unauthorised`, `credentials`, `permission`, `401`, `403` | failed | `Gmail refused the send (permission or login problem: <detail>); re-run npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth` |
+| `REJECTED` + `recipient`, `invalid to`, `invalid email address`, `invalid address` | failed | `Gmail rejected a recipient address (<detail>); check EMAIL_TO` |
+| `REJECTED` + `rate limit`, `ratelimit`, `quota`, `429`, `too many`, `limit exceeded` | failed | `Gmail rate or sending limit reached (<detail>); try again later` |
+| `REJECTED` (other) | failed | `Gmail returned an error: <detail>` |
+| `TIMEOUT_AFTER_SEND` | unknown | `no reply from the Gmail MCP server within <N> s after the send was issued` |
+| `TRANSPORT_AFTER_SEND` | unknown | `the Gmail MCP connection failed after the send was issued (<ExcClass>)` |
+| `UNKNOWN_REPLY` | unknown | `unrecognised reply from send_email: <detail>` |
+
+**stderr lines (the `Email:` prefix is stable; `markup=False`, `highlight=False`,
+`soft_wrap=True`):**
+- sent:
+  `Email: sent to 2 recipients (Gmail id 18c2f0a1b2c3d4e5).` With `omitted > 0`, the
+  line adds ` 120 of 300 items included; the full list is in the saved HTML.` With
+  `over_budget`, it adds ` The email is over Gmail's size budget and may be clipped.`
+  For one recipient: `1 recipient`.
+- failed:
+  `Email: FAILED (<reason>). Saved: <html path>. See README > Email delivery.`
+- unknown:
+  `Email: OUTCOME UNKNOWN (<reason>); the email may have been sent, check your Gmail Sent folder before re-running. Saved: <html path>. See README > Email delivery.`
+- The **Telegram lines are unchanged** (`Sent <name> to Telegram.` and
+  `Telegram delivery failed (...)`). This keeps the Telegram suites passing unchanged
+  (FR-072). The `Email:` / `Telegram` prefixes still identify each channel on its own
+  line, as FR-062 requires (its examples are illustrative).
+- The HTML path is still the only stdout line, plus the PDF path with `--telegram`.
+
+## ED-13 Settings additions and `.env.example` (FR-066, FR-068)
+
+```python
+@dataclass(frozen=True)
+class Settings:
+    ...existing fields...
+    telegram_chat_id: str | None = None
+    email: bool = False                                          # new, after telegram_*
+    email_to: tuple[str, ...] = field(default=(), repr=False)    # new
+    email_send_timeout: float = DEFAULT_EMAIL_SEND_TIMEOUT       # new
+    reader_parallelism: int = 5
+    ...fetch fields stay last (test_config_fetch.py)...
+```
+
+- **`Settings.build(..., email: bool = False, email_env: Mapping[str, str | None] |
+  None = None)`.** The new kwargs are keyword-only with defaults, so every existing call
+  is untouched. With the flag on, after the Telegram block, it runs
+  `replace(settings, email=True, email_to=parse_email_recipients(env.get("EMAIL_TO")),
+  email_send_timeout=_env_number(env, "EMAIL_SEND_TIMEOUT", float, 90.0, (10, 600)))`.
+- **`safe_summary()`:**
+  - always hides `email_to`;
+  - hides `email` and `email_send_timeout` while `email` is False, so the flag-off key
+    set still equals `tests/fixtures/flag_off_safe_summary_keys.json`;
+  - with the flag on, shows `email: True` and `email_send_timeout`. It never shows the
+    recipient count or addresses: `run_digest` logs the summary at INFO.
+- **`repr(settings)`** contains no address (`repr=False`).
+- **`.env.example`** gains a commented block after the Telegram one, so copying the file
+  still changes nothing. An uncommented placeholder would make `--email` send to
+  `example.com`:
+
+  ```
+  # --- Email delivery (optional, off by default) ---
+  # Every line below is commented out, so copying this file to .env changes nothing.
+  # Read only with --email. Sent through the same Gmail MCP server and login (no SMTP).
+  # Comma-separated bare addresses, at most 10; every recipient sees the others in To.
+  # EMAIL_TO=you@example.com
+  # Seconds to wait for Gmail to accept the send (10-600, default 90)
+  # EMAIL_SEND_TIMEOUT=90
+  ```
+
+## ED-14 CLI wiring, exit codes and the `--telegram` merge (FR-055, FR-062, FR-067)
+
+- **Flag.** `--email` (`is_flag=True`, **no `envvar`**). Help text:
+
+  > Also email the reading list as HTML to the addresses in EMAIL_TO (.env), through the
+  > same Gmail MCP server and login (no SMTP, no PDF). The AI agent never gets the send
+  > tool. Privacy: every recipient sees the others in To.
+
+  The `digest` docstring names `EMAIL_TO` and `EMAIL_SEND_TIMEOUT`. `ALL_OPTIONS` in
+  `test_cli.py` gains `--email` (an additive change).
+- **Env read.** `email_env = {n: os.environ.get(n) for n in EMAIL_ENV_VARS} if email
+  else None`, passed to `Settings.build`.
+- **Order after the run:**
+
+  ```python
+  path = write_reading_list(reading_list, settings.out_dir)
+  _report(reading_list, settings)
+  click.echo(str(path))
+  if settings.open_browser:
+      _open_in_browser(path.resolve())
+  delivered = True
+  if settings.telegram:
+      delivered &= _deliver_to_telegram(reading_list, path, settings)
+  if settings.email:
+      delivered &= _deliver_by_email(reading_list, path, settings)
+  if not delivered:
+      click.get_current_context().exit(EXIT_NOT_DELIVERED)
+  ```
+
+  - Telegram goes first because that is the existing position. Its stdout PDF line
+    keeps its place, and no ordering assertion in `test_cli_telegram.py` changes.
+  - Both channels are always attempted. A failed Telegram never skips the email, and
+    vice versa.
+- **`_deliver_to_telegram` change (minimal).** It returns `True` on success and
+  `False` where it used to call `click.get_current_context().exit(EXIT_NOT_DELIVERED)`.
+  The lines `pdf_path, reason = _run_delivery(reading_list, html_path, settings)` and
+  `from newsletter_digest.delivery import deliver_reading_list, redact` stay
+  **verbatim**, because the TD-2 `RealTreeMutant`s edit those exact strings. The
+  printed lines and the `--telegram`-only exit codes are identical.
+- **`_deliver_by_email(reading_list, html_path, settings) -> bool`** prints the ED-12
+  line and returns `outcome.delivered`.
+- **`_run_email_delivery(...) -> EmailOutcome`:**
+  1. `from newsletter_digest.email_delivery import EmailOutcome, redact_addresses,
+     send_reading_list_email`. This is the single lazy import (ED-16). If the import
+     raises, the outcome is `failed` with the reason `<ExcClass>`: nothing could have
+     been sent.
+  2. `anyio.run(partial(send_reading_list_email, reading_list, html_path, settings))`.
+  3. Safety net: any other `Exception` gives `status="unknown"` with the reason
+     `unexpected error (<ExcClass>)`. It is conservative because it cannot be proven
+     pre-send. The traceback goes to DEBUG only, through `redact_addresses`.
+- **Exit codes** (module docstring and README):
+
+| Code | Meaning |
+|---|---|
+| 0 | success: the digest is saved and every requested channel (`--telegram`, `--email`) delivered |
+| 1 | runtime failure; no digest saved, nothing sent on any channel |
+| 2 | usage or config error, including a missing or invalid `EMAIL_TO` / `EMAIL_SEND_TIMEOUT` with `--email` or Telegram variables with `--telegram`, before any work |
+| 3 | the digest is saved (HTML, and the PDF when built), but at least one requested channel failed, was skipped or has an unknown outcome |
+
+## ED-15 Logging and privacy (FR-066, NFR-E3)
+
+| Logger / level | Text |
+|---|---|
+| `email_delivery` INFO | `Email body: <bytes> bytes HTML, <shown> of <total> items (<omitted> omitted)` |
+| `email_delivery` INFO | `Sending the digest email to <n> recipient(s)` |
+| `gmail_mcp` INFO | `Starting a separate Gmail MCP session to send the email` |
+| `gmail_mcp` WARNING | `Gmail MCP send session failed to start (attempt 1/2); retrying in 2 s` |
+| `email_delivery` INFO | `Gmail accepted the digest email (id <message id>)` |
+| `email_delivery` WARNING | `Email delivery failed (<reason>)` / `Email delivery outcome unknown (<reason>)` |
+| `email_delivery` WARNING | `The email is <n> bytes, over the 95,000-byte budget; Gmail may clip it` |
+| `email_delivery` DEBUG | the recipient list and the subject (the only place addresses may appear) |
+
+Rules:
+- The body is never logged at any level.
+- Reasons, stderr lines and exception messages pass through `redact_addresses`.
+- `send_gmail_message` never logs `args`.
+- Third-party loggers (`mcp`, `langchain_mcp_adapters`) are not configured by the CLI.
+  Their DEBUG records may contain JSON-RPC payloads with addresses, and DEBUG is the
+  level at which addresses are allowed.
+- **Privacy notes for the README:**
+  - the reading list (titles, summaries, reasons, links, newsletter names and the Gmail
+    query or label) goes to every `To` recipient, and each recipient sees the others;
+  - the email is not end-to-end encrypted;
+  - a copy stays in the sender's Gmail Sent folder.
+
+## ED-16 Flag-off identity and lazy import (FR-053, FR-067, acceptance 25)
+
+1. **The one sanctioned lazy import** is in `cli._run_email_delivery`, called directly
+   by `_deliver_by_email` and enforced by the ED-2 AST rules.
+   - `email_delivery` imports `email_render` and `gmail_mcp` at module level, and
+     `email_render` imports `render`.
+   - Nothing at module level in `cli` names either email module.
+   - `gmail_mcp` (with the inert send helper) is loaded on every run, as it is today.
+     That is the Q-E2 decision: no session is started and no send code runs without
+     `--email`.
+2. **Subprocess test** (`tests/test_flag_off_identity.py`), the same technique as TD-12:
+   - Without flags: `newsletter_digest.email_delivery` and
+     `newsletter_digest.email_render` are absent from `sys.modules`, exit 0, one stdout
+     line.
+   - With `--telegram` only (the Telegram transport faked): both are absent.
+   - With `--email` only (send faked via `_default_send_client`): `newsletter_digest.pdf`,
+     `newsletter_digest.delivery`, `newsletter_digest.telegram` and `fpdf` are absent,
+     no `*.pdf` exists in the out dir, and exactly one stdout line is printed
+     (FR-055: `--email` produces no PDF).
+3. **In-process flag-off checks:**
+   - `cli._deliver_by_email` and `gmail_mcp.send_gmail_message` are tripwired, the CLI
+     runs without `--email`, and the test asserts exit 0 and that neither was called;
+   - `EMAIL_TO="not an address"` and `EMAIL_SEND_TIMEOUT="x"` in the env do not affect
+     a flag-off run (exit 0);
+   - the `safe_summary()` keys equal the golden;
+   - a test proves that the `EMAIL_*` names are not read with the flag off: a
+     `monkeypatch`ed `os.environ` mapping records `get` calls during `digest`.
+4. **Unchanged bytes.** `render.py`, `reading_list.html.j2` and `models.py` are
+   untouched, so `flag_off_*_golden.html` and the T023 goldens stay byte-identical. A new
+   email golden (`tests/fixtures/email_ranked_golden.html`) covers the email template.
+
+## ED-17 Test seams and test plan (FR-072, all offline)
+
+| Seam | Where | Used for |
+|---|---|---|
+| `client_factory` (None -> `_default_send_client`, resolved at call time) | `send_gmail_message` | a `FakeSendClient`/`FakeSendSession` with `list_tools()` (offering the 19 names with the real 1.1.11 `send_email` input schema, `SEND_EMAIL_SCHEMA_1_1_11` in the test) and `call_tool()` that records calls and returns, raises or `await anyio.sleep_forever()` per script; start errors and `ExceptionGroup`-wrapped errors; an event log |
+| `start_timeout`, `send_timeout`, `retry_pause`, `sleep` | `send_gmail_message` | 0.05 s timeouts, recorded pauses, no real waiting |
+| `sender`, `renderer` | `send_reading_list_email` | outcome mapping without MCP; render failure |
+| `budget` | `render_email` | small budgets to drive every stage on small lists |
+| `_default_send_client` | module attribute | the CLI tests patch it with the fake factory |
+
+**Guard against a real client:** `tests/conftest.py` gets an **autouse** fixture
+`_no_real_mcp_send_client`. It monkeypatches
+`newsletter_digest.gmail_mcp._default_send_client` to raise
+`AssertionError("real Gmail MCP send client constructed in tests")`, as TD-13 does for
+Telegram.
+- A blanket guard on `MultiServerMCPClient.__init__` is **not** used. The existing
+  `test_gmail_mcp.py` test legitimately runs the real client against a local FastMCP
+  stdio server (no npx, no Gmail).
+- The AST rule makes `_default_send_client` the only place on the send path where a real
+  client is built.
+- The new email test modules also get the autouse socket guard used by the Telegram
+  modules.
+- The email tests also patch `shutil.which`.
+
+**Tests (minimum):**
+- `test_config_email.py`:
+  - missing, blank, whitespace-only and only-commas values; a trailing comma is
+    tolerated, and surrounding spaces and tabs are tolerated;
+  - case-insensitive de-duplication keeps the first spelling and order; 10 unique
+    addresses plus duplicates are accepted; 11 unique addresses are rejected;
+  - one bad entry among several: the message names its index and only its echo,
+    and no other address appears;
+  - `a@x.io,b@y.io` gives two addresses, and no element contains a comma;
+    `"a,b"@x.io` is rejected;
+  - rejected forms: CR or LF inside or at the end, NUL, a display name `Bob <b@x.io>`,
+    a semicolon separator (with the hint), an IDN or Unicode address, a leading,
+    trailing or double dot in the local part, a label that starts or ends with `-`, a
+    single-label domain, and over 254 or over 64 characters;
+  - `EMAIL_SEND_TIMEOUT` range and parsing;
+  - with the flag off, `email_env` is ignored;
+  - `repr(settings)` contains no address; `safe_summary` hides the fields on and off.
+- `test_email_render.py`:
+  - structure and order: header counts, Must read first, then `by_topic`; the unranked
+    note and no Must read section; both empty states;
+  - the badge only when N > 1; the Q3 fetched rule and key points; compact mode;
+  - the golden for the fixed synthetic list;
+  - the forbidden substrings (template source and standard fixture), and the
+    parser-based hostile checks of ED-7;
+  - the ED-8 ASCII and line-length matrix; the ED-9 plain-part rules;
+  - the ED-10 budget tests; determinism (two renders are identical);
+  - `ENVIRONMENT` is not mutated and `render_html` bytes are unchanged after importing
+    `email_render`;
+  - 100 items render in under 1 s.
+- `test_gmail_mcp_send.py`:
+  - `build_send_arguments`: the key set is exactly `{to, subject, body, htmlBody,
+    mimeType}` and `to` is a list; `cc`, `bcc`, `attachments`, `threadId` and
+    `inReplyTo` are never present (asserted across every branch's recorded call);
+  - defensive rejects (comma or CR in an address, CR in the subject, a non-ASCII body,
+    a 901-character line, 11 recipients) start **no session**;
+  - success: one session, one call, the receipt id;
+  - an `Error:` reply and an `isError` reply give `REJECTED` with one call;
+  - an unknown reply text gives `UNKNOWN_REPLY` with one call;
+  - a start failure then success: 2 sessions, `sleep(2.0)` recorded once, 1 call;
+  - a start failure twice: 2 sessions, 0 calls, `START_FAILED`;
+  - a start timeout counts as a start failure;
+  - the command not on PATH: 0 sessions and no retry;
+  - tool missing (with `draft_email` offered): 1 session, 0 calls, no fallback, no
+    retry; a changed schema: 0 calls;
+  - a timeout after the call gives exactly 1 call and `TIMEOUT_AFTER_SEND`, with no
+    second session;
+  - a transport exception after the call (also wrapped in an `ExceptionGroup`) gives 1
+    call and `TRANSPORT_AFTER_SEND`;
+  - a close error after a success reply still succeeds;
+  - the session is closed in every branch;
+  - the detail redacts addresses; no address and no body text in INFO and above
+    (`caplog`);
+  - optional: a local FastMCP stdio `send_email` tool that sleeps, to
+    **[re-verify]** that `fail_after` around the real `ClientSession.call_tool` works
+    and the subprocess is reaped.
+- `test_email_delivery.py`:
+  - the subject variants and hostile inputs (ED-6);
+  - the outcome mapping for every `GmailSendErrorKind` and every FR-065 class;
+  - reasons free of addresses; a render failure is pre-send;
+  - an unexpected sender exception gives `unknown`;
+  - no PDF is created and the HTML file is unchanged (bytes and mtime);
+  - the logs follow ED-15.
+- `test_cli_email.py`:
+  - exit 2 per config failure class, with `run_digest` asserted not called and the
+    message naming `EMAIL_TO` and `README > Email delivery`;
+  - success: exit 0, one stdout line, the `Email: sent` line;
+  - the omitted and over-budget suffixes;
+  - FAILED and OUTCOME UNKNOWN: exit 3, HTML saved;
+  - a run failure gives exit 1 with no send;
+  - `--open` happens before delivery;
+  - a lazy import failure gives FAILED;
+  - **`--email --telegram`, all four success/failure combinations:** both channels are
+    attempted every time, the exit code is 0 only if both succeed, both stderr lines
+    are printed, and stdout holds the HTML path plus the PDF path when written;
+  - the ED-3 event-order test.
+- `test_agent.py`: the ED-3 graph allowlist test, parametrised over email on and off,
+  with the 19 offered tools.
+- `test_gmail_mcp.py`: `open_gmail_tools` never yields a send tool (subsets of the 19
+  names); the maps are disjoint.
+- `test_architecture.py`: the ED-2 and ED-3 rules, with self-tests and real-tree
+  mutants. Examples:
+  - `agent` imports `send_gmail_message`;
+  - `tools` imports `email_delivery`;
+  - `cli` imports `email_delivery` at module level;
+  - `open_gmail_tools` references `GMAIL_SEND_TOOL_MAP`;
+  - `"draft_email"` appears as a literal in `gmail_mcp`;
+  - `email_delivery` imports `telegram`;
+  - `email_render` imports `gmail_mcp`.
+- `test_flag_off_identity.py`: the ED-16 checks.
+- Existing suites (the T023 goldens and the Telegram suites) pass unchanged, except for
+  the additive `ALL_OPTIONS` entry. `uv run ruff check .` and `pyrefly check` are clean.
+
+## ED-18 README requirements (FR-071)
+
+A new `## Email delivery` section (the anchor named in every message), after
+`## Telegram delivery`, covering:
+1. **What `--email` does.** It sends one HTML email (plus a short plain-text part)
+   through the same pinned Gmail MCP server and login: no SMTP, no new credentials, no
+   PDF. It combines with `--telegram`. An example command is
+   `uv run newsletter-digest --window 1w --email`.
+2. **`EMAIL_TO`:**
+   - format: comma-separated bare addresses, at most 10, duplicates removed;
+   - what is rejected: display names, semicolons, non-ASCII addresses, spaces;
+   - the variable is read only with `--email`;
+   - `EMAIL_SEND_TIMEOUT` (default 90 s).
+3. **The security model, stated plainly.** The AI agent still has only `search_emails`
+   and `read_email` (default-deny allowlist, unchanged). The app's own deterministic
+   delivery code can now call `send_email`, in a separate, later, short-lived session,
+   with recipients from `.env` and a fixed counts-only subject. No other Gmail write
+   tool (draft, modify, delete, label, filter) is used by anything.
+4. **The OAuth scope statement** (verbatim substance from FR-071):
+   - the server's `auth` requests `gmail.modify` and `gmail.settings.basic`;
+   - `gmail.modify` already permits sending, so no scope change and no re-auth are
+     expected for an existing token;
+   - on a permission error, re-run `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11
+     auth`;
+   - the first real send confirms the token (Q-E12).
+5. **What is in the email.** The fields per item; what is left out (full text,
+   mark-read, the interactive page); the subject format.
+6. **Gmail limits:**
+   - clipping at about 102 KB and the 95,000-byte budget;
+   - the skim-first, then worth-reading drop and the omitted line (Must read is never
+     dropped);
+   - compact mode and the over-budget note;
+   - Gmail's consumer sending limits (a link to Google's page, with no number
+     asserted);
+   - links longer than about 800 characters are shown unlinked;
+   - non-ASCII text is sent as character references (rendering is unaffected).
+7. **The loop warning (FR-069).** If the digest is sent to the mailbox the run reads,
+   a broad `--query` or label can pick it up next time. Add `-subject:"Newsletter
+   digest"` to a custom query, or keep the label filter narrow.
+8. **Exit codes and stderr lines,** including the combination with `--telegram` (both
+   attempted, exit 3 if any fails) and the meaning of OUTCOME UNKNOWN: check the Sent
+   folder before re-running, because a re-run may send a duplicate.
+9. **Troubleshooting per FR-065:** permission or login (re-run `auth`), recipient
+   rejected, rate limit, server start failure (Node.js, npx, a cold `npx` cache can be
+   slow), no `send_email` tool or changed arguments (the pin), and timeouts.
+10. **Privacy (ED-15):** recipients see each other, the email is not end-to-end
+    encrypted, a copy stays in Sent, and the query or label appears in the email.
+11. **Rewording.** The existing "read-only" statements (overview line 18, the Gmail MCP
+    troubleshooting row, `## Safety model` "Read-only allowlist", and the module table
+    row for `gmail_mcp.py`) are reworded so they stay true: the **agent** is read-only,
+    and the **delivery code** can send with `--email`. The module table gains
+    `email_delivery.py` and `email_render.py`.
+12. `.env.example` (ED-13) and the CLI options table (`--email`) are updated, and
+    deviations are recorded in `shared/implementation-notes.md`.
+
+## ED-19 Non-Functional Considerations (email)
+
+- **Performance:**
+  - rendering plus the budget search is about 10 Jinja renders for 300 items, well
+    under 1 s for 100 items (tested);
+  - delivery adds one `npx` session start (a few seconds when warm, and at most 60 s
+    plus 2 s plus another 60 s in the worst case) and one send of at most 90 s by
+    default;
+  - flag-off cost is zero: no import, no env read and no session (ED-16).
+- **Security:**
+  - the agent cannot send, by construction (ED-3, five layers);
+  - the send path has a fixed five-key argument set, no `cc`, `bcc` or attachments, and
+    strict recipients, both config-validated and re-validated;
+  - the subject is printable ASCII built from counts only;
+  - the body is autoescaped, uses `safe_url` hrefs and has no external resources or
+    scripts;
+  - the output is ASCII with short lines, so there is no 7bit or header smuggling;
+  - server error text is clipped and has addresses redacted.
+- **Privacy:** see ED-15. The INFO logs carry counts and the Gmail message id only.
+- **Reliability:**
+  - delivery never alters the saved files;
+  - one start retry, and no retry once the call is issued;
+  - ambiguous outcomes are reported as unknown, with exit 3;
+  - the subprocess is closed on every path (mcp's 2 s termination timeout);
+  - the third `anyio.run` in one process is supported (V29).
+- **Scaling:** one message per run to at most 10 recipients, far below Gmail's consumer
+  sending limits.
+- **Dependencies:** none new. `jinja2`/`markupsafe`, `mcp` and
+  `langchain-mcp-adapters` are already locked. There are no new system packages and
+  no new network hosts (the Gmail API is reached by the same server process).
+
+## ED-20 Decisions (email)
+
+- **DM1 Modules:**
+  - `email_render` (tier 4) and `email_delivery` (tier 1, peer of `agent` and
+    `delivery`);
+  - the send mapping and helper are in `gmail_mcp` (Q-E2);
+  - a new template `reading_list_email.html.j2`;
+  - only `cli` imports `email_delivery` (lazily), and only `email_delivery` imports
+    `email_render`;
+  - `render.py`, the page template, `models.py`, `agent.py`, `tools.py`, `prompts.py`
+    and the Telegram modules are unchanged.
+- **DM2 Session:** a second, short-lived MCP session (new process), opened only by
+  `send_gmail_message` after `run_digest` returned (Q-E1). It uses the raw
+  `ClientSession.list_tools`/`call_tool`. `load_mcp_tools` is not called on the send
+  path, so no send `BaseTool` exists.
+- **DM3 Isolation proof:**
+  - the allowlist and `filter_read_only` are unchanged;
+  - the AST rule `find_send_capability_violations`;
+  - a graph tool-list test with 19 offered tools, with email on and off;
+  - an event-order test through the real CLI.
+- **DM4 Arguments:** exactly `to` (list), `subject`, `body`, `htmlBody`, and
+  `mimeType="multipart/alternative"`; never `cc`, `bcc`, `threadId`, `inReplyTo` or
+  `attachments`. One message with every recipient in `To` (Q-E3, Q-E4).
+- **DM5 Recipients:**
+  - strict ASCII dot-atom `@` LDH-labels regex with `fullmatch`;
+  - split on commas only, strip spaces and tabs only, skip empty segments;
+  - case-insensitive de-duplication; cap 10, raw value at most 4096 characters;
+  - exit 2 naming the entry index, an `ascii()` echo of the first 32 characters and the
+    reason.
+- **DM6 Subject:** counts only, with ranked, unranked and empty variants; the
+  `Newsletter digest:` prefix; filtered to printable ASCII; at most 150 characters.
+- **DM7 Body:**
+  - a table layout with inline styles and no `<style>` block;
+  - fixed light colours, 600 px wide;
+  - includes key points (Q-E10); excludes full text, the checkbox, nav and the fetch
+    note.
+- **DM8 Encoding:**
+  - whole-document sanitise, then `xmlcharrefreplace`;
+  - a tokenising wrapper at 880 with a hard limit of 900;
+  - hrefs over 800 encoded characters are rendered unlinked.
+- **DM9 Plain part:**
+  - ASCII transliteration;
+  - counts plus up to 30 Must-read titles and links;
+  - at most 8,000 bytes.
+- **DM10 Budget:**
+  - 95,000 bytes on the final ASCII HTML;
+  - drop skim (and `None` priority), then worth-reading, each in reverse display order,
+    found by binary search;
+  - Must read is never dropped; then compact mode; then send with `over_budget`.
+- **DM11 Empty state:** an empty list is always emailed, with the `no articles found`
+  subject, and exits 0 on success (Q-E5).
+- **DM12 Outcomes:**
+  - `sent`, `failed` or `unknown`;
+  - retry once, only for transient start-phase failures (tool missing and schema
+    changes are deterministic and not retried);
+  - never retry after `call_tool` is issued;
+  - timeouts: 60 s start, 90 s send (`EMAIL_SEND_TIMEOUT`, 10 to 600);
+  - an unexpected exception after delegation counts as `unknown`.
+- **DM13 Exit codes:**
+  - 0, 1, 2, or 3 as in ED-14;
+  - Telegram first, then email, both always attempted, and one merged exit 3;
+  - the Telegram stderr lines are unchanged; the email lines use a stable `Email:`
+    prefix.
+- **DM14 Config:**
+  - `EMAIL_TO` is required with `--email`, and `EMAIL_SEND_TIMEOUT` is optional; both
+    env only and read only with the flag;
+  - `safe_summary` always hides `email_to`, and hides `email` and
+    `email_send_timeout` while the flag is off;
+  - the `.env.example` block is commented.
+- **DM15 Logging:** counts and the message id at INFO; addresses and the subject only at
+  DEBUG; the body never; every reason has addresses redacted.
+- **DM16 Lazy import:** the one sanctioned email import is in
+  `cli._run_email_delivery`, enforced by AST and subprocess tests. `--telegram` alone
+  never loads the email modules, and `--email` alone never loads fpdf2.
+- **DM17 Test guard:** an autouse fixture refuses `_default_send_client`, plus socket
+  guards in the new modules. There is no blanket `MultiServerMCPClient` guard (see ED-17
+  for why).
+- **DM18 Dry run:** `--email-dry-run` is deferred (Q-E8). `render_email` plus
+  `build_subject` make it a small later addition.
+
+## ED-21 Open Architecture Decisions and Risks (email)
+
+None of these blocks planning. Recommended defaults are marked.
+- **Decision: over budget after compact mode.**
+  - Options: (a) send anyway with `over_budget=True`, a WARNING and a note on the
+    stderr line (exit 0);
+    (b) do not send, exit 3; (c) also truncate Must-read summaries.
+  - **Recommended: (a).** Must read is never dropped, and Gmail's "View entire message"
+    still works. This needs about 30 or more fully fetched Must-read items, which is
+    unlikely with `--max-fetch` at most 50.
+- **Decision: the long-link rule.** URLs whose escaped form is over 800 characters are
+  rendered unlinked in the email (the saved HTML keeps them).
+  - Options: 800 (recommended) or 880. Splitting an `href` across lines is rejected:
+    it relies on URL-parser newline stripping, and how Gmail's link rewriting handles
+    that is unknown.
+- **Decision: the retry scope.** FR-063's wording lists "send_email absent" among the
+  pre-send failures that "may be retried ... for session start only".
+  **Recommended:** retry only transient start failures (process start, initialise,
+  `tools/list`, start timeout), not tool-missing or schema changes, which are
+  deterministic. FR-064 (fail with exit 3) is then met with one `npx` start.
+- **Decision: the schema check** before the call (the five properties exist and every
+  required property is among them). **Recommended: keep.** It turns server drift into a
+  provable pre-send failure instead of an ambiguous one. Risk: a compatible newer server
+  with a renamed field fails closed. That is acceptable under the pin.
+- **Decision: `.env.example` uses a commented placeholder** rather than FR-068's literal
+  `EMAIL_TO=you@example.com` line. **Recommended: commented** (the Telegram precedent;
+  copying the file never enables a real destination). Record it in
+  `implementation-notes.md`.
+- **Decision: the stderr line format.** FR-062's examples
+  (`Telegram: sent <name>` / `Telegram: FAILED`) would change the existing Telegram
+  lines and break the unchanged Telegram suites (FR-072). **Recommended:** keep the
+  Telegram lines and use the `Email:` forms of ED-12.
+- **Risk: the 95,000-byte figure and the Gmail rendering are unverified here** (Q-E9).
+  Mitigation: the manual end-to-end test (acceptance 34) with a large window checks for
+  "[Message clipped]", tappable links, legibility in the Gmail web and phone apps, and
+  forced dark mode.
+- **Risk: LF-only line endings and 7bit with the Gmail API.** The server assembles the
+  MIME message, and the body uses `\n`. The Gmail API normally normalises this.
+  **[re-verify]** in the manual send. If the parts are mangled, a fallback is
+  `mimeType="text/html"` with the HTML as `body` (still ASCII).
+- **Risk: `anyio.fail_after` around `ClientSession.call_tool` inside the session's task
+  groups.** The cancellation semantics are expected to be clean (TimeoutError at the
+  scope exit, and stdio close terminates the process within about 2 s).
+  **[re-verify]** with the optional local FastMCP sleeping-tool test.
+- **Risk: a duplicate email after an `OUTCOME UNKNOWN` re-run.** Accepted: the PRD
+  prefers a duplicate over automatic retries. The stderr line and README tell the user
+  to check Sent first.
+- **Risk: a cold `npx` cache can exceed the 60 s start timeout** on the first `--email`
+  run after the cache was cleared. The start is retried once. The start timeout is not
+  configurable (the PRD only proposes `EMAIL_SEND_TIMEOUT`). The README says to run the
+  digest once without `--email` to warm the cache, if needed.
+- **Risk: the plain-text part is lossy for non-Latin titles** (`?` runs). Accepted: the
+  HTML part is authoritative, and the plain part says so.
+- **Risk: the Gmail query or label and model-written reasons go to every recipient.**
+  Accepted and documented (privacy, ED-15).
+- **Risk: Google's error texts change.** Classification keys on the `Error:` prefix and
+  coarse keyword classes. An unmatched text falls into "Gmail returned an error"
+  (failed, not ambiguous), which is still correct, because `Error:` means the API call
+  threw.
+
+Items for the orchestrator to append to the PRD "Open Questions" (this agent was told to
+edit only `designs.md`): the six decisions above (over budget, long links, retry scope,
+schema check, `.env.example` commented, stderr format), with their recommended
+defaults.
+
+DESIGN_COMPLETE

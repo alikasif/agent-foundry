@@ -222,3 +222,129 @@ resolved 113 packages (114 with pypdf). It added only `fpdf2`, `pillow`, `fontto
   **does**. Never chain them (`__cause__`/`__context__`) into user-visible errors.
 - `files={"document": (name, bytes, "application/pdf")}` plus `data={...}` sends
   `multipart/form-data; boundary=...`.
+
+# Email delivery via the Gmail MCP send tool (2026-11-04)
+
+Probed by the product-requirements-agent on 2026-11-04 for the `--email` amendment
+(PRD FR-053 onwards). Nothing was installed or run: the package was only downloaded and
+read.
+
+How it was probed:
+- `npm pack @gongrzhe/server-gmail-autoauth-mcp@1.1.11 --ignore-scripts` into a new empty
+  scratchpad directory (`.../scratchpad/pk`), then `tar -xzf` into a second new directory
+  (`.../scratchpad/pkx`). Tarball sha256
+  `ef33ac0ea7f0ce38254863a3e34067995016f1e0bd1681c31cd5c6c80144035a`. npm
+  `dist.integrity` `sha512-IP9nbCmJZ5h8wrtld0LBpJCV7coyfeOrhsNdPhIbkFzKBmgf06Gy4bnsr3zVOi8Leey0az3s4UPIdcQmIb/iJw==`.
+  Only `dist/index.js` (1017 lines) and `dist/utl.js` were read. No code was executed.
+- The pin is unchanged: `1.1.11` is the npm `latest` dist-tag (published 2025-08-06).
+- The user's token files and `.env` were not read.
+
+## send_email in 1.1.11 (dist/index.js, dist/utl.js)
+- **Tool name:** `send_email` (listed at index.js 267-270, handled at 501-506). `draft_email`
+  shares the same schema.
+- **Input schema** (zod `SendEmailSchema`, index.js 137-148):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `to` | array of string | yes | "List of recipient email addresses" (an array, not a comma string) |
+| `subject` | string | yes | |
+| `body` | string | yes | text/plain part, "or when htmlBody not provided" |
+| `htmlBody` | string | no | HTML version |
+| `mimeType` | enum `text/plain` \| `text/html` \| `multipart/alternative` | no, default `text/plain` | |
+| `cc` | array of string | no | |
+| `bcc` | array of string | no | |
+| `threadId`, `inReplyTo` | string | no | |
+| `attachments` | array of string (local file paths) | no | read from the server's disk (utl.js `createEmailWithNodemailer`) |
+
+- **HTML support: yes.** utl.js `createEmailMessage`: with `htmlBody` and a `mimeType` other
+  than `text/plain` it builds `multipart/alternative` (plain `body` part, then `htmlBody`
+  part, `Content-Type: text/html; charset=UTF-8`). With `mimeType: "text/html"` and no
+  `htmlBody` it sends `body` as the HTML. So 1.1.11 can send HTML; the pin stays.
+- **Multiple recipients: yes**, `to` is an array and is joined with `", "` into one `To:`
+  header; one message goes to all of them. `cc` and `bcc` are separate arrays (joined into
+  `Cc:` and `Bcc:` headers).
+- **Encoding hazards (read from utl.js):**
+  - Every part is declared `Content-Transfer-Encoding: 7bit` but the text is raw UTF-8, so
+    non-ASCII characters and lines over 998 characters are sent as is. The server does not
+    quoted-printable or base64 the body. Mitigation to require: send ASCII-only HTML
+    (non-ASCII as numeric character references) with line lengths kept under 998, and an
+    ASCII-only plain part.
+  - `subject` is RFC 2047 base64-encoded only when it contains non-ASCII; an ASCII subject
+    is written into the header **unsanitised**, so a CR/LF in an ASCII subject would inject
+    headers. The caller must strip CR/LF itself.
+  - Recipient check is only `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`. It rejects whitespace but
+    **accepts a comma**: `a@x.io,b@y.io` is one valid "address" and is written as two
+    recipients. `cc`, `bcc` and `inReplyTo` are written into headers with no check at all.
+    The caller must validate strictly and use `to` only.
+  - `From:` is the literal `me` (the Gmail API substitutes the authenticated user).
+  - The raw message is base64url-encoded and sent with `gmail.users.messages.send(userId
+    'me', raw)`. The server applies no size limit of its own.
+- **Success result:** one text block, `Email sent successfully with ID: <gmail message id>`
+  (index.js 421-441; the attachment branch returns the same text).
+- **Failure result:** the tool **does not set `isError`**. Any thrown error (zod validation,
+  invalid recipient, Gmail API error such as insufficient permission or rate limit) is
+  caught at index.js 1000-1010 and returned as a normal text block
+  `Error: <message>`. Unknown tool: `Error: Unknown tool: <name>`. The existing
+  `gmail_mcp._is_server_error` (`Error:` prefix) already matches this shape.
+  - Ambiguity: `Error:` text means the Gmail API call threw, so the message was not
+    accepted. A transport failure, process crash or client timeout **after** the call was
+    written gives no result at all, and the message may or may not have been sent. Those
+    are the ambiguous cases (never auto-retried).
+- **Tool list size:** 19 tools including `send_email`, `draft_email`, `modify_email`,
+  `delete_email` (matches the 2026-10-30 entry above).
+
+## OAuth scopes (`auth` command, index.js 99-104)
+- Requests exactly: `https://www.googleapis.com/auth/gmail.modify` and
+  `https://www.googleapis.com/auth/gmail.settings.basic`, `access_type: offline`. The token
+  is written to `~/.gmail-mcp/credentials.json` (or `GMAIL_CREDENTIALS_PATH`). The local
+  callback is `http://localhost:3000/oauth2callback`.
+- Google's `users.messages.send` reference
+  (https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send,
+  fetched 2026-11-04): "Requires one of the following OAuth scopes": `https://mail.google.com/`,
+  `.../auth/gmail.modify`, `.../auth/gmail.compose`, `.../auth/gmail.send`.
+- Conclusion: `gmail.modify` is on the list, so a token created by the pinned server's `auth`
+  already allows sending. **No scope change and no re-auth is expected.** The user's actual
+  token was not inspected; if a send returns `Error: ... insufficient ...`, re-run
+  `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth`. Plainly: the stored grant already
+  includes mail-modify/send power today; `--email` is the first time this app uses it, in
+  deterministic code only (FR-057).
+- Google's size limits for `messages.send` were not stated on the fetched page and are not
+  asserted here.
+
+## Gmail rendering of the current HTML (`render.py` + `templates/reading_list.html.j2`)
+Read from the template. **Correction 2026-11-04:** the first draft of this section read real files under `out/`, which breaks the project constraint (never read or touch `out/`). The file sizes taken from them are withdrawn and must not be relied on. The size claim is to be re-established from a synthetic fixture (a task for the test and design work), not from real output.
+- Size: unverified. A full reading list with a few dozen items plausibly approaches Gmail's clipping threshold; the 95 KB budget (FR-059) is a safeguard, not a measured need. This number (about 102 KB) is general knowledge, not verified in this environment.
+- The template relies on features Gmail web does not support or strips (from general
+  knowledge of Gmail's CSS support, not tested here; confirm with the manual send in the
+  acceptance criteria): CSS custom properties (`var(--...)`, used for all colours),
+  `@media (prefers-color-scheme: dark)`, a `<meta>` CSP, `<script>`, `<input type=checkbox>`
+  (the "mark read" box), and `<details>`/`<summary>` ("Read here"). Gmail web does keep a
+  `<style>` block in `<head>` for Gmail accounts, but strips it for some other account
+  types and apps, so only inline `style=""` is robust.
+- Verdict: **the current HTML is not acceptable as an email body.** Without `var()` the
+  page loses all colours, the checkboxes would be dead controls, `<details>` text would show
+  expanded or be lost, and the size gets it clipped. An email-specific variant is required
+  (FR-059).
+- Sharing: `render.py` already has `safe_url`, `slug`, the Jinja environment with
+  autoescape and `StrictUndefined`, and `ReadingList.must_read()`/`by_topic()`. The email
+  variant should be a second template rendered from the same data model through the same
+  environment and filters, so escaping and URL rules cannot drift. `render_html` and the
+  `reading_list.html.j2` template must not change (T023 goldens, byte-identical). The
+  Telegram path (`pdf.py`, `delivery.py`) does not use the HTML template, so it is
+  unaffected.
+
+## Existing code facts relevant to the design (src read 2026-11-04)
+- `gmail_mcp.open_gmail_tools` starts one stdio session and returns only the logical dict
+  from `filter_read_only(tools)` (`search_emails`, `read_email`); every other tool,
+  `send_email` included, is dropped before `agent.build_agent` sees anything. It raises
+  `GmailMCPError` if an allowlisted tool is missing. `GMAIL_TOOL_MAP` and `GMAIL_ARG_MAP`
+  are the only place that knows server tool and argument names. A send path needs its own
+  opener and mapping beside them, and its own session.
+- `cli.digest` builds `Settings` (a `ConfigError` becomes `click.UsageError`, exit 2), runs
+  `anyio.run(run_digest, settings)`, writes the HTML, then calls
+  `_deliver_to_telegram`, which lazily imports `delivery` and exits 3 on failure via
+  `ctx.exit(EXIT_NOT_DELIVERED)`. The Telegram env vars are read only when `--telegram` is
+  set (`telegram_env` is None otherwise). `--email` would add a second, independent step
+  and a combined exit-code rule.
+- `anyio.run` can be called a second time after `run_digest` (V29), so a second MCP session
+  in delivery code is feasible.
