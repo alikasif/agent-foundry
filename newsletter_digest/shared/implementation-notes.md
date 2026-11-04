@@ -46,6 +46,19 @@
 | V29 | `import newsletter_digest.cli` loads neither `fpdf` nor `PIL`; `anyio.run` can run a second time after `run_digest` | T054 | fpdf2 2.8.9, pillow 13.0.0, anyio (uv.lock), Python 3.13 | `uv run python -I -c 'import newsletter_digest.cli, sys; print("fpdf" in sys.modules, "PIL" in sys.modules, ...)'`; offline CliRunner smoke (sockets patched to raise, `run_digest` faked through `anyio.run`, `telegram._default_transport` patched to a `MockTransport`) | Confirmed: prints `False False` and none of `newsletter_digest.delivery`/`.pdf`/`.telegram`/`fontTools` is loaded after importing cli. A second `anyio.run` after the `run_digest` one works in the same process: success (exit 0), 401 and 500x3 (exit 3) all ran the real `deliver_reading_list` + `TelegramClient` in the second loop |
 | V30 | click 8.5: `is_flag` without `envvar` ignores env; `ctx.exit(3)` gives exit code 3 under `CliRunner` and the console script | T054 | click 8.5.0 (uv.lock) | `cli.digest.params` inspection; CliRunner with `TELEGRAM=1`, `NEWSLETTER_TELEGRAM=1` and a malformed `TELEGRAM_BOT_TOKEN` but no flag; offline 401 run through CliRunner and through `cli.main()` (the console-script entry) in a subprocess | Confirmed: the option has `envvar=None` and the command no `auto_envvar_prefix`, so no env value turns it on (flag-off runs exit 0, one stdout line, no PDF). `click.get_current_context().exit(3)` inside `digest` gives `result.exit_code == 3` under CliRunner and process exit status 3 through `main()` (standalone mode), with no traceback |
 
+## Library verification (Email delivery, 2026-11-04)
+
+| ID | Item | Owner task | Version | How checked | Result/consequence |
+|---|---|---|---|---|---|
+| V31 | No new dependency: jinja2, markupsafe, mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1 and lxml already locked; `uv lock --check` passes; `pyproject.toml`/`uv.lock` unchanged | T068 | jinja2 3.1.6, markupsafe 3.0.4, mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1, lxml 6.1.3 (uv.lock) | `grep -A1 '^name = "<pkg>"$' uv.lock` for each; `uv lock --check`; `git status`/`git diff` on pyproject.toml and uv.lock; no `uv add` run | Confirmed. All six are locked at the expected versions; `uv lock --check` passes (Resolved 114 packages); pyproject.toml and uv.lock are unchanged. No dependency is added for email delivery. |
+| V32 | `mcp.ClientSession.list_tools(cursor=None)` / `ListToolsResult.nextCursor`, `Tool.inputSchema` (`properties`, `required`), `call_tool(name, arguments=None, read_timeout_seconds=None, ...)`, `CallToolResult.isError/.content`; `MultiServerMCPClient.session(name)` yields a raw `ClientSession` without loading tools | T071 |  |  | TODO |
+| V33 | `anyio.fail_after` around `ClientSession.call_tool` inside the session task groups raises `TimeoutError` at scope exit, the stdio subprocess is reaped within mcp's 2 s `PROCESS_TERMINATION_TIMEOUT` (local FastMCP sleeping `send_email` tool, no npx) | T077 |  |  | TODO |
+| V34 | Shape of session-start failures through `MultiServerMCPClient.session` (plain exception vs `ExceptionGroup`), and that state-based classification handles both | T071 |  |  | TODO |
+| V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) |  |  | TODO |
+| V36 | `str.encode("ascii", "xmlcharrefreplace")` emits one decimal reference per astral code point (no surrogate pairs); lone surrogates must be mapped first | T073 |  |  | TODO |
+| V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) |  |  | TODO |
+| V38 | click 8.5: `--email` `is_flag` without `envvar` ignores env; three `anyio.run` calls in one process (`run_digest`, Telegram, email); `ctx.exit(3)` after both channels | T075 |  |  | TODO |
+
 ## Task notes
 
 ### T001 — Scaffold
@@ -3502,3 +3515,18 @@ records them as done (for example "V24 DONE").
 
    Restore the correct value. Never paste the token, the getUpdates URL or its output into
    a terminal log, an issue or a chat.
+
+## T068 — Scaffold (email delivery): identity pre-check, no-new-dependency check, module stubs, TIER_RANKS, V31-V38 table
+
+- Pre-check: `tests/test_flag_off_identity.py` 26 passed; `git diff --quiet e41b124 --
+  newsletter_digest/src newsletter_digest/tests` was clean before any edit.
+- No dependency change (V31): nothing added, `uv lock --check` passes.
+- `email_render.py` and `email_delivery.py` are docstring-only stubs (no imports, no code),
+  so they import cleanly. No template created (T073 owns it).
+- `tests/test_architecture.py`: only two lines added to `TIER_RANKS`
+  (`email_delivery: 1`, `email_render: 4`), placed beside `delivery` and `pdf`. The
+  email-specific architecture rules are for a later task.
+- Decision not in the spec: the V31-V38 table has the same six columns as the Telegram
+  table; V32-V38 carry empty Version/How checked cells and `TODO` until their owners fill
+  them.
+- No deviations from ED-*/DM-*; no tradeoffs.
