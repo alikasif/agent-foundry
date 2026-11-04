@@ -969,6 +969,14 @@ def test_detector_sees_the_known_project_edges(
         ("fetch", ROOT),
         ("store", "links"),
         ("tools", "gmail_mcp"),
+        ("cli", "delivery"),
+        ("delivery", "pdf"),
+        ("delivery", "telegram"),
+        ("delivery", "models"),
+        ("delivery", "config"),
+        ("pdf", "render"),
+        ("pdf", "models"),
+        ("telegram", "config"),
     }
     assert expected <= edges, f"edges not seen: {sorted(expected - edges)}"
 
@@ -982,8 +990,8 @@ def test_detector_sees_the_allowed_usages(package: dict[str, SourceModule]) -> N
     for owner in sorted(HTML_PARSER_OWNERS):
         assert "lxml" in {_root(r.target) for r in package[owner].imports}, owner
     assert "langchain_core" in enrich_roots
-    sites = [name for name, _ in async_client_sites(package)]
-    assert "fetch" in sites and set(sites) <= {"fetch", "telegram"}, sites
+    sites = sorted(name for name, _ in async_client_sites(package))
+    assert sites == ["fetch", "telegram"], sites
 
 
 # ---------------------------------------------------------------- checker self-tests
@@ -1879,3 +1887,535 @@ def test_load_package_reads_every_source_file(tmp_path: Path) -> None:
     modules = load_package(tmp_path)
     assert sorted(modules) == [ROOT, "links"]
     assert modules["links"].imports == (ImportRef("re", 1, ()),)
+
+
+# ------------------------------------------- positive delivery detectors (T063)
+
+
+EXPECTED_DELIVERY_EDGES = frozenset(
+    {
+        ("cli", "delivery"),
+        *(
+            (source, target)
+            for source, deps in ONLY_PROJECT_IMPORTS.items()
+            for target in deps
+        ),
+    }
+)
+"""Every TD-2 delivery edge, which the real tree must contain (not only allow)."""
+
+ONLY_IMPORTED_NAMES: dict[tuple[str, str], frozenset[str]] = {
+    ("telegram", "config"): frozenset({"SecretToken"}),
+    ("pdf", "render"): frozenset({"safe_url"}),
+}
+"""TD-2 name limits: telegram takes only `SecretToken`, pdf only `render.safe_url`."""
+
+LAZY_DELIVERY_ENTRY = "_deliver_to_telegram"
+DELIVERY_IMPORT = f"{PACKAGE}.delivery"
+
+
+def _top_level_function_of_lines(module: SourceModule) -> dict[int, str]:
+    """Map each line inside a module-level function to that function's name."""
+    owners: dict[int, str] = {}
+    for stmt in module.tree.body:
+        if not isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Import | ast.ImportFrom):
+                owners[node.lineno] = stmt.name
+    return owners
+
+
+def _direct_callees(module: SourceModule, function: str) -> set[str]:
+    """Return the plain names that module-level `function` calls directly."""
+    return {
+        node.func.id
+        for stmt in module.tree.body
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef)
+        and stmt.name == function
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+
+def _missing_edges(modules: Modules) -> list[str]:
+    """Report the TD-2 delivery edges that the import graph does not contain."""
+    edges = {(e.source, e.target) for e in all_edges(modules)}
+    return [
+        f"{source} -> {target}: expected TD-2 edge not seen"
+        for source, target in sorted(EXPECTED_DELIVERY_EDGES - edges)
+    ]
+
+
+def _imported_name_violations(modules: Modules) -> list[str]:
+    """Report imports that take more than `ONLY_IMPORTED_NAMES` (or the module)."""
+    violations: list[str] = []
+    for (source, target), allowed in ONLY_IMPORTED_NAMES.items():
+        module = modules.get(source)
+        if module is None:
+            continue
+        for ref in module.imports:
+            if ref.target == PACKAGE and target in ref.names:
+                violations.append(
+                    f"{source}.py:{ref.line}: imports the {target} module; "
+                    f"take only {', '.join(sorted(allowed))}"
+                )
+            elif ref.target == f"{PACKAGE}.{target}":
+                extra = sorted(set(ref.names) - allowed) or ["<module>"] * (
+                    not ref.names
+                )
+                violations.extend(
+                    f"{source}.py:{ref.line}: {source} takes {name} from {target}; "
+                    f"only {', '.join(sorted(allowed))}"
+                    for name in extra
+                )
+    return violations
+
+
+def _lazy_cli_import_violations(modules: Modules) -> list[str]:
+    """Check cli loads delivery exactly once, nested in the `--telegram` path."""
+    cli = modules.get(LAZY_IMPORTER)
+    if cli is None:
+        return [f"{LAZY_IMPORTER}.py: module missing"]
+    refs = [r for r in cli.imports if DELIVERY_IMPORT in _lazy_only_targets(r)]
+    if len(refs) != 1:
+        lines = [r.line for r in refs]
+        return [f"cli.py: {len(refs)} imports of {DELIVERY_IMPORT} (lines {lines})"]
+    ref = refs[0]
+    owner = _top_level_function_of_lines(cli).get(ref.line)
+    entry_path = {LAZY_DELIVERY_ENTRY} | _direct_callees(cli, LAZY_DELIVERY_ENTRY)
+    if owner is None or owner not in entry_path:
+        return [
+            f"cli.py:{ref.line}: {DELIVERY_IMPORT} imported in {owner or '<module>'}, "
+            f"not in {LAZY_DELIVERY_ENTRY} or a function it calls"
+        ]
+    return []
+
+
+def _fpdf_owner_violations(modules: Modules) -> list[str]:
+    """Check that pdf, and only pdf, imports fpdf."""
+    owners = sorted(
+        name
+        for name, module in modules.items()
+        if any(_root(r.target) == "fpdf" for r in module.imports)
+    )
+    if owners == [FPDF_OWNER]:
+        return []
+    return [f"fpdf importers are {owners}, expected ['{FPDF_OWNER}']"]
+
+
+def _transport_factory_violations(modules: Modules) -> list[str]:
+    """Check `_default_transport` is the one real-transport site and the default."""
+    telegram = modules.get(TELEGRAM_MODULE)
+    if telegram is None:
+        return [f"{TELEGRAM_MODULE}.py: module missing"]
+    factory = top_level_function_nodes(telegram, REAL_TRANSPORT_FACTORY)
+    if not factory:
+        return [f"telegram.py: no module-level {REAL_TRANSPORT_FACTORY}()"]
+    violations: list[str] = []
+    sites = [
+        (name, node)
+        for name, module in modules.items()
+        if name not in TRANSPORT_SUBCLASS_OWNERS
+        for target, node in resolved_references(module)
+        if target == REAL_TRANSPORT
+    ]
+    inside = [n for name, n in sites if name == TELEGRAM_MODULE and id(n) in factory]
+    if len(sites) != 1 or len(inside) != 1:
+        where = [f"{name}.py:{node.lineno}" for name, node in sites]
+        violations.append(
+            f"{REAL_TRANSPORT} sites {where}, expected one in the factory"
+        )
+    for name, call in async_client_sites(modules):
+        if name != TELEGRAM_MODULE:
+            continue
+        transport = [kw.value for kw in call.keywords if kw.arg == "transport"]
+        calls_factory = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == REAL_TRANSPORT_FACTORY
+            for value in transport
+            for node in ast.walk(value)
+        )
+        if not calls_factory:
+            violations.append(
+                f"telegram.py:{call.lineno}: AsyncClient transport= does not "
+                f"fall back to {REAL_TRANSPORT_FACTORY}()"
+            )
+    return violations
+
+
+def _reveal_call_violations(modules: Modules) -> list[str]:
+    """Check `.reveal()` is called exactly once in the package, in telegram (TD-9)."""
+    calls = [
+        f"{name}.py:{node.lineno}"
+        for name, module in modules.items()
+        for node in ast.walk(module.tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == SECRET_REVEAL
+    ]
+    if len(calls) == 1 and calls[0].startswith(f"{SECRET_OWNER}.py:"):
+        return []
+    return [f".{SECRET_REVEAL}() calls {calls}, expected exactly one in telegram.py"]
+
+
+def find_missing_delivery_wiring(modules: Modules) -> list[str]:
+    """Report TD-2/TD-9/TD-12 facts the real delivery code must show (positive)."""
+    sites = sorted(name for name, _ in async_client_sites(modules))
+    violations = [
+        *_missing_edges(modules),
+        *_imported_name_violations(modules),
+        *_lazy_cli_import_violations(modules),
+        *_fpdf_owner_violations(modules),
+        *_transport_factory_violations(modules),
+        *_reveal_call_violations(modules),
+    ]
+    if sites != sorted(ASYNC_CLIENT_OWNERS):
+        violations.append(f"httpx.AsyncClient sites {sites}, expected fetch, telegram")
+    return violations
+
+
+def test_detector_sees_the_delivery_wiring(
+    package: dict[str, SourceModule],
+) -> None:
+    violations = find_missing_delivery_wiring(package)
+    assert violations == [], _report(violations)
+
+
+def test_detector_sees_the_lazy_cli_delivery_import(
+    package: dict[str, SourceModule],
+) -> None:
+    cli = package[LAZY_IMPORTER]
+    refs = [r for r in cli.imports if DELIVERY_IMPORT in _lazy_only_targets(r)]
+    assert len(refs) == 1, refs
+    assert refs[0] not in module_level_imports(cli)
+    owner = _top_level_function_of_lines(cli)[refs[0].line]
+    assert owner == LAZY_DELIVERY_ENTRY or owner in _direct_callees(
+        cli, LAZY_DELIVERY_ENTRY
+    ), owner
+
+
+def test_detector_sees_the_single_reveal_and_transport_sites(
+    package: dict[str, SourceModule],
+) -> None:
+    telegram = package[TELEGRAM_MODULE]
+    reveals = [
+        node
+        for node in ast.walk(telegram.tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == SECRET_REVEAL
+    ]
+    factory = top_level_function_nodes(telegram, REAL_TRANSPORT_FACTORY)
+    transports = [n for t, n in resolved_references(telegram) if t == REAL_TRANSPORT]
+    assert len(reveals) == 1
+    assert factory and len(transports) == 1 and id(transports[0]) in factory
+    assert "fpdf" in {_root(r.target) for r in package[FPDF_OWNER].imports}
+
+
+# --------------------------------------------- real-tree mutants (T063, TD-2)
+
+
+class RealTreeMutant(NamedTuple):
+    """Text edits to one real module and the violation a checker must then report."""
+
+    module: str
+    edits: tuple[tuple[str, str], ...]
+    checker: Checker
+    expected: str
+
+
+_CLI_AGENT = "from newsletter_digest.agent import run_digest\n"
+_CLI_LAZY = "from newsletter_digest.delivery import deliver_reading_list, redact"
+_PDF_RENDER = "from newsletter_digest.render import safe_url\n"
+_PDF_FPDF = "from fpdf import FPDF\n"
+_TG_CONFIG = "from newsletter_digest.config import SecretToken\n"
+_TG_TRANSPORT = "transport=self._transport or _default_transport(),"
+_TG_REDIRECTS = "follow_redirects=False,"
+_DELIVERY_PDF = "from newsletter_digest.pdf import build_pdf\n"
+_TOOLS_CONFIG = "from newsletter_digest.config import Settings\n"
+_PDF_MARKDOWN = "markdown=False,"
+
+REAL_TREE_MUTANTS: dict[str, RealTreeMutant] = {
+    "cli-module-level-delivery": RealTreeMutant(
+        "cli",
+        ((_CLI_AGENT, _CLI_AGENT + f"from {DELIVERY_IMPORT} import redact\n"),),
+        find_eager_delivery_imports,
+        f"module-level import of {DELIVERY_IMPORT}; import it inside",
+    ),
+    "cli-type-checking-delivery": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_AGENT,
+                _CLI_AGENT
+                + "if TYPE_CHECKING:\n    from newsletter_digest import pdf\n",
+            ),
+        ),
+        find_eager_delivery_imports,
+        f"module-level import of {PACKAGE}.pdf",
+    ),
+    "cli-nested-telegram": RealTreeMutant(
+        "cli",
+        ((_CLI_LAZY, _CLI_LAZY + "\n        from newsletter_digest import telegram"),),
+        find_importer_violations,
+        "cli -> telegram: only delivery may import telegram",
+    ),
+    "cli-second-delivery-import": RealTreeMutant(
+        "cli",
+        ((_CLI_AGENT, _CLI_AGENT + f"from {DELIVERY_IMPORT} import redact\n"),),
+        find_missing_delivery_wiring,
+        f"cli.py: 2 imports of {DELIVERY_IMPORT}",
+    ),
+    "cli-no-delivery-import": RealTreeMutant(
+        "cli",
+        ((_CLI_LAZY, "deliver_reading_list = redact = None"),),
+        find_missing_delivery_wiring,
+        "cli -> delivery: expected TD-2 edge not seen",
+    ),
+    "cli-entry-skips-lazy-import": RealTreeMutant(
+        "cli",
+        (("reason = _run_delivery(", "reason = _other_delivery("),),
+        find_missing_delivery_wiring,
+        f"not in {LAZY_DELIVERY_ENTRY} or a function it calls",
+    ),
+    "tools-imports-delivery": RealTreeMutant(
+        "tools",
+        ((_TOOLS_CONFIG, _TOOLS_CONFIG + f"from {DELIVERY_IMPORT} import redact\n"),),
+        find_importer_violations,
+        "tools -> delivery: only cli may import delivery",
+    ),
+    "pdf-imports-telegram": RealTreeMutant(
+        "pdf",
+        (
+            (
+                _PDF_RENDER,
+                _PDF_RENDER + "from newsletter_digest.telegram import redact\n",
+            ),
+        ),
+        find_only_project_import_violations,
+        "pdf -> telegram: pdf may import only models, render",
+    ),
+    "pdf-imports-telegram-importer": RealTreeMutant(
+        "pdf",
+        (
+            (
+                _PDF_RENDER,
+                _PDF_RENDER + "from newsletter_digest.telegram import redact\n",
+            ),
+        ),
+        find_importer_violations,
+        "pdf -> telegram: only delivery may import telegram",
+    ),
+    "pdf-takes-more-from-render": RealTreeMutant(
+        "pdf",
+        ((_PDF_RENDER, _PDF_RENDER.replace("safe_url", "safe_url, render_html")),),
+        find_missing_delivery_wiring,
+        "pdf takes render_html from render; only safe_url",
+    ),
+    "pdf-drops-fpdf": RealTreeMutant(
+        "pdf",
+        (
+            (_PDF_FPDF, "FPDF = object\n"),
+            ("from fpdf.enums import", "from enum import"),
+            ("from fpdf.fonts import", "from typing import"),
+        ),
+        find_missing_delivery_wiring,
+        "fpdf importers are [], expected ['pdf']",
+    ),
+    "pdf-markdown-true": RealTreeMutant(
+        "pdf",
+        ((_PDF_MARKDOWN, "markdown=True,"),),
+        find_fpdf_violations,
+        "markdown=True",
+    ),
+    "pdf-write-html": RealTreeMutant(
+        "pdf",
+        (
+            (
+                _PDF_RENDER,
+                _PDF_RENDER + "\n\ndef _html(doc: FPDF) -> None:\n"
+                '    doc.write_html("<b>x</b>")\n',
+            ),
+        ),
+        find_fpdf_violations,
+        "references fpdf write_html",
+    ),
+    "pdf-image": RealTreeMutant(
+        "pdf",
+        (
+            (
+                _PDF_RENDER,
+                _PDF_RENDER + "\n\ndef _img(doc: FPDF) -> None:\n"
+                '    getattr(doc, "image")("x.png")\n',
+            ),
+        ),
+        find_fpdf_violations,
+        "string 'image'",
+    ),
+    "pdf-imports-fpdf-html": RealTreeMutant(
+        "pdf",
+        ((_PDF_FPDF, _PDF_FPDF + "from fpdf.html import HTML2FPDF\n"),),
+        find_fpdf_violations,
+        "imports fpdf.html",
+    ),
+    "delivery-imports-fpdf": RealTreeMutant(
+        "delivery",
+        ((_DELIVERY_PDF, _DELIVERY_PDF + _PDF_FPDF),),
+        find_fpdf_violations,
+        "only pdf.py may import fpdf",
+    ),
+    "delivery-imports-fpdf-eager": RealTreeMutant(
+        "delivery",
+        ((_DELIVERY_PDF, _DELIVERY_PDF + _PDF_FPDF),),
+        find_eager_delivery_imports,
+        "fpdf imported outside pdf.py (TD-12)",
+    ),
+    "delivery-imports-fetch": RealTreeMutant(
+        "delivery",
+        ((_DELIVERY_PDF, _DELIVERY_PDF + "from newsletter_digest import fetch\n"),),
+        find_forbidden_project_imports,
+        "delivery -> fetch is banned",
+    ),
+    "delivery-reveal": RealTreeMutant(
+        "delivery",
+        (
+            (
+                _DELIVERY_PDF,
+                _DELIVERY_PDF + "\n\ndef _leak(token: SecretToken) -> str:\n"
+                "    return token.reveal()\n",
+            ),
+        ),
+        find_secret_reveal_violations,
+        "references .reveal(); only telegram.py may reveal",
+    ),
+    "delivery-reveal-count": RealTreeMutant(
+        "delivery",
+        (
+            (
+                _DELIVERY_PDF,
+                _DELIVERY_PDF + "\n\ndef _leak(token: SecretToken) -> str:\n"
+                "    return token.reveal()\n",
+            ),
+        ),
+        find_missing_delivery_wiring,
+        "expected exactly one in telegram.py",
+    ),
+    "delivery-builds-client": RealTreeMutant(
+        "delivery",
+        (
+            (
+                _DELIVERY_PDF,
+                _DELIVERY_PDF
+                + "import httpx\n_C = httpx.AsyncClient(trust_env=False)\n",
+            ),
+        ),
+        find_http_client_violations,
+        "built outside fetch.py and telegram.py",
+    ),
+    "telegram-imports-models": RealTreeMutant(
+        "telegram",
+        (
+            (
+                _TG_CONFIG,
+                _TG_CONFIG + "from newsletter_digest.models import ReadingList\n",
+            ),
+        ),
+        find_only_project_import_violations,
+        "telegram -> models: telegram may import only config",
+    ),
+    "telegram-takes-settings": RealTreeMutant(
+        "telegram",
+        ((_TG_CONFIG, _TG_CONFIG.replace("SecretToken", "SecretToken, Settings")),),
+        find_missing_delivery_wiring,
+        "telegram takes Settings from config; only SecretToken",
+    ),
+    "telegram-follows-redirects": RealTreeMutant(
+        "telegram",
+        ((_TG_REDIRECTS, ""),),
+        find_http_client_violations,
+        "httpx.AsyncClient without follow_redirects=False",
+    ),
+    "telegram-redirects-true": RealTreeMutant(
+        "telegram",
+        ((_TG_REDIRECTS, "follow_redirects=True,"),),
+        find_http_client_violations,
+        "httpx.AsyncClient without follow_redirects=False",
+    ),
+    "telegram-trust-env-true": RealTreeMutant(
+        "telegram",
+        (("trust_env=False,", "trust_env=True,"),),
+        find_http_client_violations,
+        "httpx.AsyncClient without trust_env=False",
+    ),
+    "telegram-no-transport": RealTreeMutant(
+        "telegram",
+        ((_TG_TRANSPORT, ""),),
+        find_http_client_violations,
+        "httpx.AsyncClient without an explicit transport=",
+    ),
+    "telegram-real-transport-inline": RealTreeMutant(
+        "telegram",
+        (
+            (
+                _TG_TRANSPORT,
+                "transport=self._transport or httpx.AsyncHTTPTransport(),",
+            ),
+        ),
+        find_http_client_violations,
+        "httpx.AsyncHTTPTransport used outside telegram._default_transport()",
+    ),
+    "telegram-transport-skips-factory": RealTreeMutant(
+        "telegram",
+        ((_TG_TRANSPORT, "transport=self._transport,"),),
+        find_missing_delivery_wiring,
+        "does not fall back to _default_transport()",
+    ),
+    "telegram-verify-false": RealTreeMutant(
+        "telegram",
+        ((_TG_REDIRECTS, _TG_REDIRECTS + " verify=False,"),),
+        find_http_client_violations,
+        "verify= passed",
+    ),
+    "telegram-no-client": RealTreeMutant(
+        "telegram",
+        (("self._client = httpx.AsyncClient(", "self._client = _make_client("),),
+        find_missing_delivery_wiring,
+        "httpx.AsyncClient sites ['fetch'], expected fetch, telegram",
+    ),
+    "telegram-second-reveal": RealTreeMutant(
+        "telegram",
+        (
+            (
+                _TG_CONFIG,
+                _TG_CONFIG + "\n\ndef _again(token: SecretToken) -> str:\n"
+                "    return token.reveal()\n",
+            ),
+        ),
+        find_missing_delivery_wiring,
+        "expected exactly one in telegram.py",
+    ),
+}
+"""Each TD-2 rule (T049 and T063) applied to a mutated copy of the real tree."""
+
+
+def apply_mutant(source: str, mutant: RealTreeMutant) -> str:
+    """Apply `mutant.edits` to `source`; each anchor must still be in the code."""
+    for anchor, replacement in mutant.edits:
+        assert anchor in source, f"stale mutant anchor in {mutant.module}: {anchor!r}"
+        source = source.replace(anchor, replacement, 1)
+    return source
+
+
+@pytest.mark.parametrize("mutant_id", sorted(REAL_TREE_MUTANTS))
+def test_rule_fails_on_mutated_real_tree(
+    package: dict[str, SourceModule], mutant_id: str
+) -> None:
+    mutant = REAL_TREE_MUTANTS[mutant_id]
+    original = (SOURCE_DIR / f"{mutant.module}.py").read_text(encoding="utf-8")
+    changed = parse_module(mutant.module, apply_mutant(original, mutant))
+    mutated = {**package, mutant.module: changed}
+    assert mutant.checker(package) == []
+    violations = mutant.checker(mutated)
+    assert any(mutant.expected in v for v in violations), violations

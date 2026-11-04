@@ -404,3 +404,10 @@
 - (T060) To prove the CLI never reads an env var, swap `cli.os` for a `types.ModuleType`
   proxy whose `environ` is a recording dict copy and whose `__getattr__` delegates to `os`;
   it is scoped to cli and leaves the real `os.environ` alone.
+- (T063) Real-tree mutation proof can live in the suite: read the real source text,
+  apply an anchored `str.replace(anchor, new, 1)` in memory (assert the anchor still
+  exists), re-parse only that module into a copy of the parsed package and assert the
+  checker reports. Use line-free expected substrings; line numbers shift with every edit.
+- (T063) Positive architecture detectors should follow call paths, not exact function
+  names: cli's lazy delivery import sits in `_run_delivery`, called by
+  `_deliver_to_telegram`, not in `_deliver_to_telegram` as the task text says.

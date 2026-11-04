@@ -3269,3 +3269,73 @@ errors are in `tests/test_cli_telegram.py`, another agent's uncommitted file.
   files; `pyrefly check` clean on own files. During the run, `ruff check .` and `pyrefly`
   reported errors only in other agents' in-progress files (`tests/test_flag_off_identity.py`
   unused imports, `tests/test_telegram_redaction.py:296`), not touched here.
+
+## T063 — Import-boundary tests: positive detectors for delivery modules and mutation proof
+
+**Hunks changed in `tests/test_architecture.py`** (TP-6 item 2): (1)
+`test_detector_sees_the_known_project_edges` gains the eight TD-2 edges (cli->delivery,
+delivery->{pdf, telegram, models, config}, pdf->{render, models}, telegram->config);
+(2) `test_detector_sees_the_allowed_usages` tightens T049's relaxed assertion to
+`sorted(...) == ["fetch", "telegram"]`; (3) a new section appended at the end of the file
+(positive checker `find_missing_delivery_wiring` and helpers, three real-tree positive
+tests, `REAL_TREE_MUTANTS` + `test_rule_fails_on_mutated_real_tree`). No T049 rule,
+checker, `VIOLATION_CASES` or `ALLOWED_CASES` entry changed; existing ids are unchanged.
+File tests 180 -> 215.
+
+**Deviation from the task text:** the task says the cli delivery import sits "inside
+`_deliver_to_telegram`". T054 put it in `_run_delivery`, which `_deliver_to_telegram`
+calls directly. The positive detector therefore requires exactly one import of
+`newsletter_digest.delivery` in cli, not at module level, inside `_deliver_to_telegram`
+or a module-level function that `_deliver_to_telegram` calls by name. Moving the call
+away from `_run_delivery` is reported (mutant `cli-entry-skips-lazy-import`).
+
+**Decisions not covered by the spec (all pass on the real tree):**
+- Name limits (TD-2 table "config (`SecretToken` only)", "render (`safe_url` only)"),
+  left open by T049, are now checked positively: telegram takes only `SecretToken` from
+  config and pdf only `safe_url` from render; importing the module object
+  (`from newsletter_digest import render`) is also reported.
+- Expected delivery edges are derived from `ONLY_PROJECT_IMPORTS` plus cli->delivery, so
+  every allowed delivery edge must also be present (allowed == used).
+- telegram's `AsyncClient(transport=...)` must contain a call to `_default_transport()`
+  (TD-13: the conftest guard only works if the client falls back to the factory).
+- `.reveal()` call count is checked package-wide (exactly one call, in telegram), not
+  only inside telegram.
+- In-suite mutation proof: 32 `REAL_TREE_MUTANTS` apply text edits to the real source
+  in memory (anchor must still exist, so a stale mutant fails loudly) and assert the
+  named checker reports. Tradeoff: an anchor rename in src breaks the matching mutant
+  test; that is intended as a staleness signal.
+
+**Scratch mutation proof (learnings T042, `-p` plugin overriding `SOURCE_DIR`, copies
+under scratch `T063_mutants/`, whole `tests/test_architecture.py` run per mutant):**
+baseline clean; 20/20 mutants killed by the intended real-tree tests:
+
+| Mutant | Failing real-tree tests |
+|---|---|
+| module-level delivery import in cli | eager_delivery_imports, delivery_wiring, lazy_cli_delivery_import |
+| tools imports delivery | importer_violations, layer_violations |
+| pdf imports telegram | only_project_import, importer_violations |
+| telegram imports models | only_project_import |
+| fpdf imported in delivery | fpdf_violations, eager_delivery_imports, delivery_wiring |
+| markdown=True in pdf | fpdf_violations |
+| write_html in pdf | fpdf_violations |
+| telegram AsyncClient without follow_redirects=False | http_client_violations |
+| reveal() in delivery | secret_reveal_violations, delivery_wiring |
+| delivery imports fetch | forbidden_project_imports, only_project_import |
+| nested telegram import in cli | importer_violations |
+| pdf imports fpdf.html | fpdf_violations |
+| telegram trust_env=True | http_client, trust_env |
+| telegram AsyncClient without transport= | http_client, delivery_wiring |
+| inline AsyncHTTPTransport in telegram | http_client, delivery_wiring, single_reveal_and_transport_sites |
+| telegram verify=False | http_client |
+| no AsyncClient in telegram | allowed_usages, delivery_wiring |
+| second reveal() in telegram | delivery_wiring, single_reveal_and_transport_sites |
+| cli lazy import removed | known_project_edges, delivery_wiring, lazy_cli_delivery_import |
+| pdf takes render_html too | delivery_wiring |
+
+(`delivery imports fetch` is not a layer violation: delivery is tier 1 and fetch tier 5,
+so only the explicit bans catch it, as designed.) On mutated copies the in-suite
+mutant tests also fail (their unmutated baseline is no longer clean), as expected.
+
+**Verification:** `tests/test_architecture.py` 215 passed; full suite 3653 passed,
+2 deselected, 2 xfailed; `ruff check`/`ruff format` clean for this file; `pyrefly check`
+reports only errors in `tests/test_telegram_redaction.py` (T061, concurrent, not mine).
