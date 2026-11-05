@@ -439,3 +439,7 @@
 - (T069) In synthetic `make_modules` trees, `from newsletter_digest import X` is an edge
   to X only if X is a key of the tree. Otherwise it counts as a package-root import, and
   importer/forbidden rules miss it. Add `"X": ""` to the case.
+- (T076) `"@"` alone has exactly one `@`, so config gives "not a valid address", not the
+  `@`-count reason; use `"@@"` for that. And a flag-on `safe_summary()` legitimately
+  contains `@` (`gmail_mcp_args` is `@gongrzhe/...@1.1.11`): assert `@example` (or the
+  addresses) is absent, never a bare `@`.

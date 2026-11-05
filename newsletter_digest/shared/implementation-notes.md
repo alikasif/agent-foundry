@@ -3721,3 +3721,55 @@ today's real tree checked that the rules fail: send map in `filter_read_only`,
 Results: `uv run pytest -q tests/test_architecture.py`: 309 passed. Full suite: 3811
 passed, 2 deselected, 2 xfailed. ruff check clean; pyrefly 0 errors. `ruff format
 --check .` flags only a code block in `shared/designs.md` (not owned by this task).
+
+## T076 — Tests for email settings: EMAIL_TO validation matrix, timeout, safe_summary, .env.example
+
+- New file `tests/test_config_email.py` (372 tests, pure config, no I/O apart from reading
+  `.env.example` and the `flag_off_safe_summary_keys.json` golden). No existing test file
+  or golden touched. Reserved domains only (`example.com/.org/.net` and subdomains).
+- **Tests pin the T070 behaviour, not the ED-5 list, where the two differ** (lead
+  instruction; each item is reported as a finding):
+  - Reason order: control, `<>"'()`, `;`, whitespace, non-ASCII, `@` count, > 254,
+    local > 64, regex. ED-5 rule 5 puts whitespace before `<>`/`;`, but its own example
+    message and ED-17 ("display name 'Bob <b@x.io>'", "semicolon separator (with the
+    hint)") need the specific reason for inputs that also contain a space, so the
+    design is self-contradictory. `ORDER_CASES` pins every adjacent pair; the "design
+    order" mutant (whitespace first) is killed. ED-5 should be amended to T070's order.
+  - Echo: `ascii(entry[:32])` with `...` *outside* the quotes (`('aaa...aaa'...)`).
+    ED-5's example shows it inside and cut at 12; the rule text matches the code.
+- **Decisions not in the spec:**
+  - The entry number is the comma-separated position *including* skipped empty
+    segments (`",bad"` -> entry 2, `"a@example.com,,bad"` -> entry 3). ED-5 does not say;
+    tested as implemented.
+  - Exact full-message equality for every per-entry error (via `entry_message()`), so
+    the reason, echo, index and tail are all asserted at once; the expected reason texts
+    are the T070 notes' wording.
+  - "No other address appears" is checked with distinctive local parts and
+    `message.count("@") == 1`; the 11-unique cap message has no `@` at all.
+  - safe_summary "no address" checks look for `@example`, not `@`: the default
+    `gmail_mcp_args` (`@gongrzhe/server-gmail-autoauth-mcp@1.1.11`) is a legitimate `@`.
+  - "Never reads email_env while off" uses a `Mapping` whose every access raises
+    (`ExplodingMapping`), stronger than "a malformed value does not raise".
+  - `.env.example`: the ED-13 block is asserted line-for-line, after the Telegram block,
+    every line from it to EOF commented, no line starting `EMAIL_`, `dotenv_values` has no
+    EMAIL_ key, and the commented values parse to the defaults (90 s, `you@example.com`).
+- **Usability observations (design-consistent, not defects):** RFC-valid local-part
+  characters outside the ED-5 class are rejected; an apostrophe (`o'brien@example.com`)
+  gets the display-name reason, other atext (`!`, `/`) gets "not a valid address".
+  `"\r\n"` alone is "not set" (rule 1 strips all whitespace before the CR check).
+  U+2028 counts as whitespace (not Cc) and is ascii-escaped in the echo.
+- **Mutation probes** (scratch `-p` plugin that execs a text-mutated `config.py` into the
+  module before collection; no source edit): 27/27 killed, no-op control survives:
+  strip CR/LF (`strip()`), no dedup, case-sensitive dedup, dedup keeps last, `match`
+  instead of `fullmatch`, no local-64 check, no 254 check, echo whole entry, echo `!r`
+  instead of `ascii`, no cut mark, cap `>=`, cap counted before dedup, raw cap `>=`, no
+  raw cap, blank check without strip, empties not skipped, no control check, ED-5 list
+  order (whitespace first), flag off validates env, email before Telegram, email before
+  the existing checks, timeout before EMAIL_TO, timeout range (1, 600), timeout default
+  60, `email_to` in repr, summary shows `email_to` when on, summary shows email fields
+  when off.
+- Coverage (`uv run --with coverage`, ephemeral, no project change): config.py 95% from
+  this file alone; every email line is hit (the 12 misses are query/window/log paths
+  covered by `test_config.py`).
+- Results: `tests/test_config_email.py` 372 passed; full suite 4183 passed, 2
+  deselected, 2 xfailed. `ruff format`, `ruff check .`, `pyrefly check` clean.
