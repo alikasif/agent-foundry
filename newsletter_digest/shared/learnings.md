@@ -447,3 +447,12 @@
   (`re.search(r"\|\s*safe\b", src)`): `item.url | safe_url` contains the substring
   `| safe`. Also keep the forbidden FR-059 words (`url(`, `<img` ...) out of Jinja
   comments, because the check runs on the raw template source.
+- (T071) mcp 1.30 marks `ClientSession.list_tools(cursor)` `@deprecated` (an overload,
+  so there is no runtime warning, only a type-checker one). Page with
+  `list_tools(params=PaginatedRequestParams(cursor=...))`. The T072 fake accepts both.
+- (T071) To classify a timeout from state, not from the exception's shape, wrap only
+  the `with anyio.fail_after(...)` block in `try/except TimeoutError: state.timed_out =
+  True; raise`. The flag is set before the error unwinds through the MCP session's task
+  groups, which can wrap it in nested `ExceptionGroup`s. A failing `client.session()`
+  enter in the T072 fake logs `open#i` but no `close#i`, because nothing was opened.
+  Count closes only for sessions that were entered.

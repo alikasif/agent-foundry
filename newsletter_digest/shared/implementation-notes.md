@@ -51,9 +51,9 @@
 | ID | Item | Owner task | Version | How checked | Result/consequence |
 |---|---|---|---|---|---|
 | V31 | No new dependency: jinja2, markupsafe, mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1 and lxml already locked; `uv lock --check` passes; `pyproject.toml`/`uv.lock` unchanged | T068 | jinja2 3.1.6, markupsafe 3.0.4, mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1, lxml 6.1.3 (uv.lock) | `grep -A1 '^name = "<pkg>"$' uv.lock` for each; `uv lock --check`; `git status`/`git diff` on pyproject.toml and uv.lock; no `uv add` run | Confirmed. All six are locked at the expected versions; `uv lock --check` passes (Resolved 114 packages); pyproject.toml and uv.lock are unchanged. No dependency is added for email delivery. |
-| V32 | `mcp.ClientSession.list_tools(cursor=None)` / `ListToolsResult.nextCursor`, `Tool.inputSchema` (`properties`, `required`), `call_tool(name, arguments=None, read_timeout_seconds=None, ...)`, `CallToolResult.isError/.content`; `MultiServerMCPClient.session(name)` yields a raw `ClientSession` without loading tools | T071 |  |  | TODO |
+| V32 | `mcp.ClientSession.list_tools(cursor=None)` / `ListToolsResult.nextCursor`, `Tool.inputSchema` (`properties`, `required`), `call_tool(name, arguments=None, read_timeout_seconds=None, ...)`, `CallToolResult.isError/.content`; `MultiServerMCPClient.session(name)` yields a raw `ClientSession` without loading tools | T071 | mcp 1.30.0, langchain-mcp-adapters 0.3.2 | Read (read only) `.venv/.../mcp/client/session.py`, `mcp/types.py`, `langchain_mcp_adapters/client.py`, `sessions.py`; real-client run against local python subprocesses (no npx, no Gmail) | Confirmed with one deviation. `list_tools(cursor=None, *, params=None)`: the `cursor=` overload is `@deprecated` in favour of `params=PaginatedRequestParams(cursor=...)`, so T071 uses `params`. `ListToolsResult(PaginatedResult)` has `tools: list[Tool]` and `nextCursor: str \| None`. `Tool.inputSchema: dict[str, Any]`. `call_tool(name, arguments=None, read_timeout_seconds=None, progress_callback=None, *, meta=None) -> CallToolResult`. `CallToolResult.content: list[ContentBlock]`, `isError: bool = False`. When `isError` is False, `call_tool` validates structured output and calls `list_tools()` again only if the tool was not cached; it is cached here because the session listed first. `MultiServerMCPClient.session(name, *, auto_initialize=True)` enters `create_session` -> `stdio_client` + `ClientSession`, awaits `initialize()` and yields the raw `ClientSession`. No `load_mcp_tools` is involved and no `BaseTool` is built. `ValueError` for an unknown server name. |
 | V33 | `anyio.fail_after` around `ClientSession.call_tool` inside the session task groups raises `TimeoutError` at scope exit, the stdio subprocess is reaped within mcp's 2 s `PROCESS_TERMINATION_TIMEOUT` (local FastMCP sleeping `send_email` tool, no npx) | T077 |  |  | TODO |
-| V34 | Shape of session-start failures through `MultiServerMCPClient.session` (plain exception vs `ExceptionGroup`), and that state-based classification handles both | T071 |  |  | TODO |
+| V34 | Shape of session-start failures through `MultiServerMCPClient.session` (plain exception vs `ExceptionGroup`), and that state-based classification handles both | T071 | mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1 | Scratch probe: real `MultiServerMCPClient({...stdio...}).session("gmail")` + `list_tools()` under `fail_after(1.5)` for four local commands; then the real `send_gmail_message` (default client) with `sys.executable -c ...` as the server command. No npx, no network | Both shapes occur. A missing executable raises a plain `FileNotFoundError` (stdio_client's `OSError` path, before any task group). A process that exits at once, or that prints non-JSON and exits, raises `ExceptionGroup[ExceptionGroup[McpError('Connection closed')]]`. A server that never answers `initialize` raises a plain `TimeoutError` from `fail_after`. All are `Exception` subclasses, so `except Exception` catches them, and classification reads only `_AttemptState.phase` (still `start`). Through `send_gmail_message`: the exiting server gives START_FAILED, detail `McpError: Connection closed`, 2 session starts, `call_issued` False, 0.05 s. The hanging server gives START_FAILED, detail `no answer within 0.5 s`, 2 starts, 1.02 s in total. No child process was left behind (pgrep). Cancellation is a `BaseException` and is never caught. |
 | V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) | jinja2 3.1.6 `PackageLoader`, hatchling build backend (`packages = ["src/newsletter_digest"]`) | `render.ENVIRONMENT.get_template("reading_list_email.html.j2")` used by every scratch render; `uv build --wheel --out-dir <scratchpad>/T073_wheel`, then `python3 -I -m zipfile -l` on the wheel | Confirmed. The loader finds the template; the wheel lists `newsletter_digest/templates/reading_list_email.html.j2` (7,223 bytes) beside `reading_list.html.j2`. Packaging is the same as the page template (whole package directory), so no pyproject change. |
 | V36 | `str.encode("ascii", "xmlcharrefreplace")` emits one decimal reference per astral code point (no surrogate pairs); lone surrogates must be mapped first | T073 | CPython 3.13.5 | Probe: `"a\U0001f600b\U0001f469\u200d\U0001f4bb\u00e9\u65e5".encode("ascii", "xmlcharrefreplace")`; the same on `"\ud800x"`; `"\ud800".encode("utf-8")`; `unicodedata.normalize("NFKD", "a\ud800\u00e9")` | Confirmed. Output `a&#128512;b&#128105;&#8205;&#128187;&#233;&#26085;`: one decimal reference per code point, astral included, never a surrogate pair (a ZWJ sequence is one reference per code point). A lone surrogate becomes `&#55296;` (an invalid reference) and cannot be UTF-8 encoded, so `to_email_ascii` maps U+D800-U+DFFF to U+FFFD first (`&#65533;`). NFKD passes lone surrogates through unchanged. |
 | V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) | `tests/email_fixture.py` at dadcc2c; template and renderer of the T073 commit | Scratch script (synthetic fixtures only): per-item bytes = (render of `make_list(40)` minus `make_list(20)`) / 20 for one item kind, ASCII-encoded before wrapping; `render_email_html` wrapped to count renders per `render_email` call | Per item: newsletter-only 1,420 B (ED-10 estimate 1.0-1.3 KB; the fixture is at the model caps: 300-char summary, 200-char reason, 150-300-char URLs whose `&` become `&amp;` in the href); compact newsletter-only 1,119 B; fetched with 5 key points 3,638 B (estimate about 3.5 KB); CJK newsletter-only 5,083 B; CJK fetched 20,678 B; empty-list document 1,710 B. So about 65 plain items fit in 95,000 bytes (estimate 70-90). `size_300` unbudgeted 464,860 B; budgeted 94,592 B, 41 shown (10 must + 31 worth), 259 omitted (all 200 skim, then 59 worth), 9 renders (1 full + 8 search; estimate about 10). `unranked_300` 94,497 B, 52 shown, 9 renders. 100 items (10/40/50, 10 fetched): 94,682 B, 48 shown, 8 renders, 66 ms. `must_heavy`: 2 renders, compact, `over_budget=True` at 245,360 B. `cjk_heavy` (60): compact, 53,207 B, 5 shown. |
@@ -3844,3 +3844,125 @@ passed, 2 deselected, 2 xfailed. ruff check clean; pyrefly 0 errors. `ruff forma
 - Results: `tests/test_architecture.py`, `tests/test_flag_off_identity.py`,
   `tests/test_email_fixture.py` 399 passed; full suite 4183 passed, 2 deselected,
   2 xfailed. `ruff format`, `ruff check .`, `pyrefly check` clean.
+
+## T071 — gmail_mcp.py send helper: GMAIL_SEND_TOOL_MAP, OutgoingEmail, build_send_arguments, send_gmail_message, errors, redaction
+
+What was built: the ED-4 send path, appended at the end of
+`src/newsletter_digest/gmail_mcp.py` (one `# ---- Send path (ED-4)` section): every
+EP-5 name with the binding signatures, plus private `_AttemptState`, `_send_attempt`,
+`_list_all_tools`, `_schema_mismatch`, `_attempt_outcome`, `_reply_outcome`,
+`_message_problem`, `_exception_text` and `_one_line`.
+
+**Diff vs `e41b124` (EP-5 plan addition).** 410 added lines and 3 removed lines. The
+removed lines are all import lines that ruff isort merged:
+- `from collections.abc import AsyncGenerator, Callable` -> `... AsyncGenerator,
+  Awaitable, Callable, Iterable`
+- `from typing import Any` -> `from typing import Any, Literal`
+- `from newsletter_digest.config import GMAIL_MCP_PACKAGE, Settings` -> a wrapped
+  import that adds `EMAIL_ADDRESS_RE` and `MAX_EMAIL_RECIPIENTS`
+
+Purely added import lines: `from dataclasses import dataclass`, `from enum import
+StrEnum`, `import anyio`, `from mcp.types import PaginatedRequestParams`. An AST
+comparison of all 46 existing top-level definitions against `e41b124` found every
+source segment identical (`GMAIL_TOOL_MAP`, `GMAIL_ARG_MAP`, `filter_read_only`,
+`open_gmail_tools` and every read helper). The module docstring is unchanged too.
+Updating it ("read-only tool allowlist") would have been a modified line; it still
+holds for the agent path, and the send section has its own header comment.
+
+Decisions not covered by the spec / tradeoffs:
+- **Timeout recorded as state, not inferred from the exception.** Each `fail_after`
+  block sits in a narrow `try/except TimeoutError` that sets `state.timed_out` (and a
+  detail) and re-raises. The error is recorded at the call site, before it unwinds
+  through the session's task groups (which can wrap it in `ExceptionGroup`s).
+  Classification therefore reads only `state`: `phase` decides retry and ambiguity,
+  and `timed_out` picks TIMEOUT_AFTER_SEND over TRANSPORT_AFTER_SEND. A
+  `TimeoutError` raised by `call_tool` itself also counts as a timeout (the ED-4
+  table says "phase call, TimeoutError").
+- **Retry rule:** retry only when `phase == "start"` and no deterministic kind was
+  set, and only while `attempt < SEND_START_ATTEMPTS`. `factory(...)` is called
+  inside the attempt's `try`, so a factory that raises (for example the T077 conftest
+  guard, or a bad connection config) is a start failure: retried once, then
+  START_FAILED. Note for T077/T079/T080: the guard's AssertionError surfaces as
+  `GmailSendError(START_FAILED)` with 2 session starts, not as a test error
+  (compare learnings T059).
+- **`session_starts`** is the attempt number reached (1 or 2), or 0 for
+  INVALID_MESSAGE and not-on-PATH. A start whose `client.session()` enter fails
+  still counts.
+- **Detail formats (for T074 `failure_reason`):**
+  - INVALID_MESSAGE: fixed texts such as `no recipients`, `more than 10 recipients`,
+    `a recipient is not a bare email address`, `the subject is empty, too long or
+    not printable ASCII`, `the HTML body is not ASCII`, `the plain-text body has a
+    line over 900 characters`.
+  - START_FAILED: `Type: message` of the sole leaf of nested groups (for example
+    `McpError: Connection closed`), or `no answer within <start_timeout> s`; not on
+    PATH: `the server command is not on PATH` with `not_on_path=True`.
+  - TOOL_MISSING: `no tool named send_email is listed`.
+  - TOOL_SCHEMA_CHANGED: self-describing, `missing: htmlBody, mimeType` and/or
+    `new required: <keys>`, joined with `; `. ED-12's reason template already
+    contains `missing: <keys>`, so T074 should render `(<detail>)` and not prefix
+    `missing:` again. A new required key that this app does not send also counts
+    as a changed schema (ED-4: "required within them").
+  - REJECTED: the server text with its leading `Error:` removed (so ED-12's `Gmail
+    returned an error: <detail>` does not read `Error: Error: ...`); empty text gives
+    `the server gave no error text`.
+  - TIMEOUT_AFTER_SEND: `no reply within <send_timeout> s`.
+  - TRANSPORT_AFTER_SEND: the leaf exception class name only (`ConnectionError`,
+    not `ExceptionGroup`).
+  - UNKNOWN_REPLY: the reply text, or `an empty reply`.
+- **Redaction happens at construction.** `GmailSendError.__init__` always applies
+  `redact_addresses` + `_one_line` (whitespace collapsed, non-printable or non-ASCII
+  characters become `?`, clipped to 200). Call sites that know the recipients
+  redact server text with `extra=message.to` first. The processing is idempotent
+  (`<address>` holds no `@`), so the invariant holds for any constructor, including
+  tests. `redact_addresses` replaces `extra` strings longest first (empty ones
+  ignored: `re.sub("")` would match everywhere) before the regex pass.
+- **No exception chaining.** `GmailSendError` is raised outside the `except` block,
+  so `__cause__` and `__context__` are None and the raw exception (whose message may
+  echo an address) is not reachable from it. The raw failure is logged only at DEBUG:
+  `Gmail MCP send attempt N ended with <Type: message>`, redacted and clipped to 200,
+  with no traceback (`exc_info` could carry request text). A close error after a
+  reply is logged at DEBUG as a class name only. Tradeoff: less traceback for
+  debugging, in return for privacy.
+- **`GmailSendError.__init__(kind, detail, call_issued, session_starts,
+  not_on_path=False)`**: positional-or-keyword, in the EP-5 field order, so tests can
+  build one either way. `args` is the formatted message, so `copy`/`pickle` of the
+  error is not supported (not needed anywhere).
+- **Pagination** uses `list_tools(params=PaginatedRequestParams(cursor=...))`. The
+  `cursor=` overload is `@deprecated` in mcp 1.30 (V32). The first page passes
+  `params=None`. After 10 pages the list is used as is (DEBUG line), so a `send_email`
+  listed later gives TOOL_MISSING.
+- **Body line check** splits on CR LF, CR and LF only (`splitlines()` would also
+  split on `\x0b`, `\x0c` and `\x1c-\x1e`, which SMTP does not treat as line ends,
+  and so could hide a long line). The subject check is one regex,
+  `[\x20-\x7e]{1,150}` with fullmatch. The address check is `EMAIL_ADDRESS_RE`
+  fullmatch plus no `,`. The 64/254 length limits are not re-checked; config.py
+  enforces them and ED-4 does not list them.
+- **Logging** follows ED-15: INFO `Starting a separate Gmail MCP session to send the
+  email` once per attempt (so twice on a retry), WARNING `... (attempt 1/2);
+  retrying in %g s` (`2 s` with the default pause), and DEBUG lines for the tool-list
+  size, the attempt failure and the ignored close error. Args, subject and bodies are
+  never logged.
+- `client` is typed `Any` in `_send_attempt` (the fake and the real client share
+  only `session()`). `_default_send_client` is looked up as a module global when
+  `client_factory` is None, so patching `gmail_mcp._default_send_client` takes
+  effect.
+
+Checks run:
+- `uv run pytest tests/test_architecture.py -q`: 309 passed. ED-3 rules (a)-(f) pass
+  on the real tree. The `send_email` literal appears only in the
+  `GMAIL_SEND_TOOL_MAP` literal and in the `GMAIL_SEND_TOOL_MAP["send_email"]`
+  lookup inside `_send_attempt`; `call_tool` appears only in `_send_attempt`.
+- Scratch sanity run (scratchpad `t071_sanity.py`, not a test file) of every ED-4
+  branch against the T072 fakes:
+  - Results: success; `Error:` and `isError` replies give REJECTED; unknown reply;
+    start failure then success (2 sessions, `sleep(2.0)` once, 1 call); two start
+    failures (2 sessions, 0 calls); start timeout; not on PATH (0 sessions); tool
+    missing with `draft_email` offered (0 calls); schema changed; call timeout
+    (1 call, no second session); transport error, plain and group-wrapped; close
+    error after success; nextCursor paging; the seven defensive rejects (0
+    sessions); `_default_send_client` resolved at call time.
+  - Every recorded call had exactly the five keys and `to` as a list, and there was
+    at most one call per send.
+  - No address, subject or body text appeared at INFO or higher.
+- Full suite: 4183 passed, 2 deselected, 2 xfailed. `ruff format`, `ruff check .` and
+  `pyrefly check` are clean (0 errors). No test file was edited.

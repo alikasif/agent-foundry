@@ -11,19 +11,28 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
+import anyio
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 from lxml import etree
 from lxml import html as lxml_html
+from mcp.types import PaginatedRequestParams
 
-from newsletter_digest.config import GMAIL_MCP_PACKAGE, Settings
+from newsletter_digest.config import (
+    EMAIL_ADDRESS_RE,
+    GMAIL_MCP_PACKAGE,
+    MAX_EMAIL_RECIPIENTS,
+    Settings,
+)
 from newsletter_digest.models import EmailRef
 
 logger = logging.getLogger(__name__)
@@ -508,3 +517,401 @@ def _sole_leaf(exc: BaseException, stop: BaseException | None = None) -> BaseExc
             break
         exc = exc.exceptions[0]
     return exc
+
+
+# ---- Send path (ED-4). Separate from the read-only agent path above: nothing here
+# is reachable from open_gmail_tools or filter_read_only, and no LangChain tool is
+# ever built for the send tool (load_mcp_tools is never called on this path).
+
+# logical -> server tool name. Never merged into GMAIL_TOOL_MAP (agent allowlist).
+GMAIL_SEND_TOOL_MAP: dict[str, str] = {"send_email": "send_email"}
+# logical -> server argument name. The ONLY five keys ever sent (FR-056).
+GMAIL_SEND_ARG_MAP: dict[str, str] = {
+    "to": "to",
+    "subject": "subject",
+    "text_body": "body",
+    "html_body": "htmlBody",
+    "mime_type": "mimeType",
+}
+SEND_MIME_TYPE = "multipart/alternative"
+SEND_SUCCESS_RE = re.compile(
+    r"\s*Email sent successfully with ID:\s*([A-Za-z0-9_-]{1,64})\s*"
+)  # used with fullmatch
+SEND_START_TIMEOUT_S = 60.0
+SEND_START_ATTEMPTS = 2  # first start + one retry, start phase only
+SEND_START_RETRY_PAUSE_S = 2.0
+MAX_SEND_DETAIL_CHARS = 200
+_ADDRESS_LIKE_RE = re.compile(r"[^\s<>()\[\],;:\"']+@[^\s<>()\[\],;:\"']+")
+_ADDRESS_PLACEHOLDER = "<address>"
+_SUBJECT_RE = re.compile(r"[\x20-\x7e]{1,150}")  # ED-6: printable ASCII, <= 150
+_MAX_BODY_LINE_CHARS = 900  # ED-8
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+_NOT_PRINTABLE_RE = re.compile(r"[^\x20-\x7e]")
+_MAX_TOOL_PAGES = 10
+
+_Phase = Literal["start", "call", "done"]
+
+
+@dataclass(frozen=True)
+class OutgoingEmail:
+    """One digest email: validated bare addresses, ASCII subject and bodies."""
+
+    to: tuple[str, ...]  # validated bare addresses (ED-5)
+    subject: str  # printable ASCII, <= 150 chars (ED-6)
+    text_body: str  # ASCII plain part (ED-9)
+    html_body: str  # ASCII HTML part (ED-7, ED-8)
+
+
+class GmailSendErrorKind(StrEnum):
+    """Why a send failed; the last three leave it unknown whether mail went out."""
+
+    INVALID_MESSAGE = "invalid_message"  # pre-send, app check
+    START_FAILED = "start_failed"  # pre-send, after 1 or 2 starts
+    TOOL_MISSING = "tool_missing"  # pre-send
+    TOOL_SCHEMA_CHANGED = "tool_schema_changed"  # pre-send
+    REJECTED = "rejected"  # Error: reply, not sent
+    TIMEOUT_AFTER_SEND = "timeout_after_send"  # ambiguous
+    TRANSPORT_AFTER_SEND = "transport_after_send"  # ambiguous
+    UNKNOWN_REPLY = "unknown_reply"  # ambiguous
+
+
+_AMBIGUOUS_KINDS = frozenset(
+    {
+        GmailSendErrorKind.TIMEOUT_AFTER_SEND,
+        GmailSendErrorKind.TRANSPORT_AFTER_SEND,
+        GmailSendErrorKind.UNKNOWN_REPLY,
+    }
+)
+
+
+class GmailSendError(Exception):
+    """An expected send failure (ED-4).
+
+    ``detail`` is stored as one printable-ASCII line of at most
+    :data:`MAX_SEND_DETAIL_CHARS` characters with address-like text redacted.
+    ``call_issued`` is True only for ``REJECTED`` and the three ambiguous kinds;
+    ``session_starts`` counts the send sessions started (0, 1 or 2).
+    """
+
+    def __init__(
+        self,
+        kind: GmailSendErrorKind,
+        detail: str,
+        call_issued: bool,
+        session_starts: int,
+        not_on_path: bool = False,
+    ) -> None:
+        """Store the fields; ``detail`` is redacted and made one short line."""
+        self.kind = kind
+        self.detail = _one_line(redact_addresses(detail))
+        self.call_issued = call_issued
+        self.session_starts = session_starts
+        self.not_on_path = not_on_path
+        super().__init__(f"{kind.value}: {self.detail}")
+
+    @property
+    def ambiguous(self) -> bool:
+        """True when the send call was issued but its outcome is unknown."""
+        return self.kind in _AMBIGUOUS_KINDS
+
+
+@dataclass(frozen=True)
+class GmailSendReceipt:
+    """Gmail accepted the message."""
+
+    message_id: str  # [A-Za-z0-9_-]{1,64}
+    session_starts: int
+
+
+@dataclass
+class _AttemptState:
+    """How far one send attempt got; the only input to classification (ED-4)."""
+
+    phase: _Phase = "start"
+    reply: Any = None  # mcp.types.CallToolResult once the server answered
+    deterministic: GmailSendErrorKind | None = None
+    detail: str = ""
+    timed_out: bool = False
+    error: Exception | None = None
+
+
+def build_send_arguments(message: OutgoingEmail) -> dict[str, object]:
+    """Return exactly ``{to, subject, body, htmlBody, mimeType}`` for ``send_email``.
+
+    ``cc``, ``bcc``, ``threadId``, ``inReplyTo`` and ``attachments`` are never set
+    (attachments would make the server read local files). The message is checked
+    again here (defence in depth; config.py is the primary check).
+
+    Raises:
+        GmailSendError: ``INVALID_MESSAGE`` with a fixed detail that names no
+            value, before any session is started.
+    """
+    problem = _message_problem(message)
+    if problem:
+        raise GmailSendError(
+            GmailSendErrorKind.INVALID_MESSAGE,
+            problem,
+            call_issued=False,
+            session_starts=0,
+        )
+    values: dict[str, object] = {
+        "to": list(message.to),
+        "subject": message.subject,
+        "text_body": message.text_body,
+        "html_body": message.html_body,
+        "mime_type": SEND_MIME_TYPE,
+    }
+    return {GMAIL_SEND_ARG_MAP[key]: value for key, value in values.items()}
+
+
+async def send_gmail_message(
+    settings: Settings,
+    message: OutgoingEmail,
+    *,
+    send_timeout: float,
+    client_factory: Callable[[dict[str, Any]], Any] | None = None,
+    start_timeout: float = SEND_START_TIMEOUT_S,
+    retry_pause: float = SEND_START_RETRY_PAUSE_S,
+    sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+) -> GmailSendReceipt:
+    """Send ``message`` once through a new, separate Gmail MCP session.
+
+    The session is a new server process (never the agent's), opened only here.
+    The send tool is called at most once; only a failure before the call is
+    issued (the start phase) is retried, once, after ``sleep(retry_pause)``.
+    Each outcome is classified from how far the attempt got, never from the
+    exception's shape (ED-4 table). ``client_factory`` None means
+    :func:`_default_send_client`, looked up at call time.
+
+    Raises:
+        GmailSendError: for every expected failure; ``ambiguous`` tells whether
+            the message may have been sent anyway.
+    """
+    args = build_send_arguments(message)
+    if shutil.which(settings.gmail_mcp_command) is None:
+        raise GmailSendError(
+            GmailSendErrorKind.START_FAILED,
+            "the server command is not on PATH",
+            call_issued=False,
+            session_starts=0,
+            not_on_path=True,
+        )
+    factory = client_factory or _default_send_client
+    attempt = 1
+    while True:
+        logger.info("Starting a separate Gmail MCP session to send the email")
+        state = _AttemptState()
+        try:
+            await _send_attempt(
+                state,
+                factory(build_connections(settings)),
+                args,
+                start_timeout=start_timeout,
+                send_timeout=send_timeout,
+            )
+        except Exception as exc:  # classified from state below, never from exc
+            state.error = exc
+            logger.debug(
+                "Gmail MCP send attempt %d ended with %s",
+                attempt,
+                _one_line(redact_addresses(_exception_text(exc), message.to)),
+            )
+        start_failed = state.phase == "start" and state.deterministic is None
+        if not start_failed or attempt == SEND_START_ATTEMPTS:
+            return _attempt_outcome(state, attempt, message.to)
+        logger.warning(
+            "Gmail MCP send session failed to start (attempt %d/%d); retrying in %g s",
+            attempt,
+            SEND_START_ATTEMPTS,
+            retry_pause,
+        )
+        await sleep(retry_pause)
+        attempt += 1
+
+
+def redact_addresses(text: str, extra: Iterable[str] = ()) -> str:
+    """Replace address-like text and every ``extra`` string with ``<address>``.
+
+    ``extra`` strings (for example the configured recipients) are matched
+    case-insensitively, longest first; empty strings are ignored.
+    """
+    for value in sorted({value for value in extra if value}, key=len, reverse=True):
+        text = re.sub(re.escape(value), _ADDRESS_PLACEHOLDER, text, flags=re.I)
+    return _ADDRESS_LIKE_RE.sub(_ADDRESS_PLACEHOLDER, text)
+
+
+def _default_send_client(connections: dict[str, Any]) -> MultiServerMCPClient:
+    """Build the real MCP client; the only one constructed on the send path."""
+    return MultiServerMCPClient(connections)
+
+
+async def _send_attempt(
+    state: _AttemptState,
+    client: Any,
+    args: dict[str, object],
+    *,
+    start_timeout: float,
+    send_timeout: float,
+) -> None:
+    """Run one session: start, list, look up and check the tool, call it once.
+
+    Records progress in ``state`` (``phase`` turns ``"call"`` right before the
+    call is issued); the session is closed when this returns or raises.
+    """
+    async with AsyncExitStack() as stack:
+        try:
+            with anyio.fail_after(start_timeout):
+                session = await stack.enter_async_context(client.session(SERVER_NAME))
+                tools = await _list_all_tools(session)
+        except TimeoutError:
+            state.timed_out = True
+            state.detail = f"no answer within {start_timeout:g} s"
+            raise
+        logger.debug("Gmail MCP send session lists %d tools", len(tools))
+        wanted = GMAIL_SEND_TOOL_MAP["send_email"]
+        tool = next((tool for tool in tools if tool.name == wanted), None)
+        if tool is None:  # never fall back to another tool (FR-064)
+            state.deterministic = GmailSendErrorKind.TOOL_MISSING
+            state.detail = f"no tool named {wanted} is listed"
+            return
+        mismatch = _schema_mismatch(tool.inputSchema)
+        if mismatch:
+            state.deterministic = GmailSendErrorKind.TOOL_SCHEMA_CHANGED
+            state.detail = mismatch
+            return
+        state.phase = "call"  # from here on the call counts as issued
+        try:
+            with anyio.fail_after(send_timeout):
+                state.reply = await session.call_tool(tool.name, args)
+        except TimeoutError:
+            state.timed_out = True
+            state.detail = f"no reply within {send_timeout:g} s"
+            raise
+        state.phase = "done"
+
+
+async def _list_all_tools(session: Any) -> list[Any]:
+    """List the server's tools, following ``nextCursor`` for up to 10 pages."""
+    tools: list[Any] = []
+    params: PaginatedRequestParams | None = None
+    for _ in range(_MAX_TOOL_PAGES):
+        result = await session.list_tools(params=params)
+        tools.extend(result.tools)
+        if not result.nextCursor:
+            return tools
+        params = PaginatedRequestParams(cursor=result.nextCursor)
+    logger.debug("Gmail MCP tool list has more than %d pages", _MAX_TOOL_PAGES)
+    return tools
+
+
+def _schema_mismatch(schema: object) -> str:
+    """Describe how ``send_email``'s input schema differs from 1.1.11, or ``""``.
+
+    Every mapped argument must be a property, and every required key must be
+    one this app sends.
+    """
+    expected = set(GMAIL_SEND_ARG_MAP.values())
+    schema = schema if isinstance(schema, dict) else {}
+    properties = schema.get("properties")
+    offered = set(properties) if isinstance(properties, dict) else set()
+    required = schema.get("required")
+    needed = {str(key) for key in required} if isinstance(required, list) else set()
+    parts = []
+    if missing := sorted(expected - offered):
+        parts.append(f"missing: {', '.join(missing)}")
+    if unknown := sorted(needed - expected):
+        parts.append(f"new required: {', '.join(unknown)}")
+    return "; ".join(parts)
+
+
+def _attempt_outcome(
+    state: _AttemptState, session_starts: int, recipients: Iterable[str]
+) -> GmailSendReceipt:
+    """Turn the last attempt's state into a receipt or a :class:`GmailSendError`."""
+    if state.reply is not None:  # the reply decides, even if closing failed after it
+        if state.error is not None:
+            logger.debug(
+                "Ignored %s while closing the Gmail MCP send session",
+                type(_sole_leaf(state.error)).__name__,
+            )
+        return _reply_outcome(state.reply, session_starts, recipients)
+    if state.deterministic is not None:
+        raise GmailSendError(
+            state.deterministic,
+            state.detail,
+            call_issued=False,
+            session_starts=session_starts,
+        )
+    if state.phase == "call":
+        kind = (
+            GmailSendErrorKind.TIMEOUT_AFTER_SEND
+            if state.timed_out
+            else GmailSendErrorKind.TRANSPORT_AFTER_SEND
+        )
+        error = state.error
+        detail = state.detail or (type(_sole_leaf(error)).__name__ if error else "")
+        raise GmailSendError(
+            kind, detail, call_issued=True, session_starts=session_starts
+        )
+    detail = state.detail or (_exception_text(state.error) if state.error else "")
+    raise GmailSendError(
+        GmailSendErrorKind.START_FAILED,
+        redact_addresses(detail, recipients),
+        call_issued=False,
+        session_starts=session_starts,
+    )
+
+
+def _reply_outcome(
+    reply: Any, session_starts: int, recipients: Iterable[str]
+) -> GmailSendReceipt:
+    """Classify the server's answer to the one ``send_email`` call."""
+    text = tool_result_text(reply.content)
+    if reply.isError or _is_server_error(text):
+        detail = text.strip().removeprefix(SERVER_ERROR_PREFIX).strip()
+        raise GmailSendError(
+            GmailSendErrorKind.REJECTED,
+            redact_addresses(detail or "the server gave no error text", recipients),
+            call_issued=True,
+            session_starts=session_starts,
+        )
+    match = SEND_SUCCESS_RE.fullmatch(text)
+    if match:
+        return GmailSendReceipt(match.group(1), session_starts)
+    raise GmailSendError(
+        GmailSendErrorKind.UNKNOWN_REPLY,
+        redact_addresses(text or "an empty reply", recipients),
+        call_issued=True,
+        session_starts=session_starts,
+    )
+
+
+def _message_problem(message: OutgoingEmail) -> str:
+    """Return a fixed description of the first problem, or ``""`` (no values)."""
+    if not message.to:
+        return "no recipients"
+    if len(message.to) > MAX_EMAIL_RECIPIENTS:
+        return f"more than {MAX_EMAIL_RECIPIENTS} recipients"
+    if not all(EMAIL_ADDRESS_RE.fullmatch(a) and "," not in a for a in message.to):
+        return "a recipient is not a bare email address"
+    if not _SUBJECT_RE.fullmatch(message.subject):
+        return "the subject is empty, too long or not printable ASCII"
+    for label, body in (("plain-text", message.text_body), ("HTML", message.html_body)):
+        if not body.isascii():
+            return f"the {label} body is not ASCII"
+        if any(len(line) > _MAX_BODY_LINE_CHARS for line in _LINE_BREAK_RE.split(body)):
+            return f"the {label} body has a line over {_MAX_BODY_LINE_CHARS} characters"
+    return ""
+
+
+def _exception_text(exc: BaseException) -> str:
+    """``Type: message`` (or just ``Type``) of the sole leaf of nested groups."""
+    leaf = _sole_leaf(exc)
+    text = str(leaf).strip()
+    return f"{type(leaf).__name__}: {text}" if text else type(leaf).__name__
+
+
+def _one_line(text: str) -> str:
+    """Collapse whitespace, replace non-printable characters and clip to 200."""
+    line = _NOT_PRINTABLE_RE.sub("?", _WHITESPACE_RE.sub(" ", text)).strip()
+    return line[:MAX_SEND_DETAIL_CHARS]
