@@ -456,3 +456,7 @@
   groups, which can wrap it in nested `ExceptionGroup`s. A failing `client.session()`
   enter in the T072 fake logs `open#i` but no `close#i`, because nothing was opened.
   Count closes only for sessions that were entered.
+- (T074) `gmail_mcp.redact_addresses` also matches the package spec
+  `@gongrzhe/server-gmail-autoauth-mcp@1.1.11` (`x@y` shape). Redact only the variable
+  parts of a message (details, configured values) before inserting them into fixed
+  text, never the finished line, or the fixed hints read `npx <address> auth`.

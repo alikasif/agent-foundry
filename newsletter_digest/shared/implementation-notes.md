@@ -3966,3 +3966,91 @@ Checks run:
   - No address, subject or body text appeared at INFO or higher.
 - Full suite: 4183 passed, 2 deselected, 2 xfailed. `ruff format`, `ruff check .` and
   `pyrefly check` are clean (0 errors). No test file was edited.
+
+## T074 — email_delivery.py: subject builder, send orchestration, EmailOutcome, failure mapping and logging
+
+What was built: `src/newsletter_digest/email_delivery.py` (stub replaced) with the EP-5
+names `EmailOutcome`, `build_subject`, `failure_reason`, `send_reading_list_email` and
+the `redact_addresses` re-export (listed in `__all__`). Imports: `config`
+(`GMAIL_MCP_PACKAGE`, `Settings`), `email_render` (`EMAIL_HTML_BUDGET`,
+`EmailContent`, `render_email`), `gmail_mcp` (six `SEND_NAMES`: `GmailSendError`,
+`GmailSendErrorKind`, `GmailSendReceipt`, `OutgoingEmail`, `redact_addresses`,
+`send_gmail_message`), `models` (`ReadingList`), stdlib only otherwise (anyio is not
+needed: the function is `async` and awaits the sender).
+
+Deviation to review:
+- **Redaction is applied to the variable parts of a reason, not to the finished
+  text.** ED-12 says "every reason goes through `redact_addresses(text,
+  extra=settings.email_to)`". Done literally, that mangles three fixed ED-12 texts:
+  `@gongrzhe/server-gmail-autoauth-mcp@1.1.11` matches `_ADDRESS_LIKE_RE`, so the
+  TOOL_MISSING reason read `... points at <address>` and the permission reason
+  `re-run npx <address> auth` (found by the scratch run). `failure_reason` therefore
+  redacts `err.detail` and `settings.gmail_mcp_command` (with
+  `extra=settings.email_to`) and inserts them into fixed text that contains no
+  address. The package spec comes from `config.GMAIL_MCP_PACKAGE`. The render-failure
+  and unexpected-error reasons contain only an exception class name, which cannot
+  hold `@`. Consequence for T079/T080: a reason can contain `@` (the package spec).
+  Assert that the recipients or `@example` are absent, not a bare `@` (same pattern as
+  learnings T076).
+
+Decisions not covered by the spec:
+- **Reason cleaning:** whitespace collapsed with `str.split()`, clipped to 300, then
+  `rstrip(" .")`, so no trailing period or space. `GmailSendError.detail` is already
+  one line of at most 200 characters (T071), so clipping matters only for long
+  details inside the longer templates.
+- **Status from `err.ambiguous`** (TIMEOUT_AFTER_SEND, TRANSPORT_AFTER_SEND and
+  UNKNOWN_REPLY are `unknown`, the rest `failed`). This matches the ED-12 table row
+  for row; there is no second table in this module.
+- **ED-12 texts:** TOOL_SCHEMA_CHANGED renders `(<detail>)`, because the T071 detail
+  already reads `missing: ...` / `new required: ...`. START_FAILED keeps the literal
+  `after 2 attempts`, not `err.session_starts`, so the text matches ED-12 even for a
+  hand-built error. TIMEOUT_AFTER_SEND formats `settings.email_send_timeout` with
+  `:g` (`90`, `12.5`). TRANSPORT_AFTER_SEND uses the detail, which T071 makes the
+  leaf class name. REJECTED markers are checked case-insensitively on the (already
+  redacted) detail in ED-12 order: permission, recipient, rate, other.
+- **Unexpected exception from `sender`:** `unknown`, reason `unexpected error
+  (<ExcClass>)` (cli's wording for its own catch-all), `send_calls=0`,
+  `session_starts=0` (nothing is known; the status says the mail may be out), and
+  DEBUG logs the class name only, never the message, which could echo the arguments
+  or the body.
+- **Render failure:** `failed`, `could not build the email (<ExcClass>); nothing was
+  sent`, with `shown`, `omitted`, `send_calls` and `session_starts` 0. The exception
+  message is not logged at any level, because render errors can quote item text.
+- `recipients` is `len(settings.email_to)` in every outcome, including failures.
+- **Logging (ED-15):** INFO `Email body: <bytes> bytes HTML, <shown> of <total> items
+  (<omitted> omitted)` (`total` is `reading_list.article_count`; bytes are
+  `len(html.encode())`); WARNING `The email is <n> bytes, over the 95,000-byte budget;
+  Gmail may clip it`, logged after rendering and before the send; INFO `Sending the
+  digest email to <n> recipient(s)`, with `recipient(s)` written literally as in the
+  ED-15 table; DEBUG `Email recipients: a, b` and `Email subject: ...`; INFO `Gmail
+  accepted the digest email (id <id>)`; WARNING `Email delivery failed (<reason>)` or
+  `Email delivery outcome unknown (<reason>)`, for every non-sent outcome, the render
+  failure included. The body is never logged.
+- **Subject:** `Newsletter digest: last <window> (<end_date ISO>) - ...`, using the same
+  count and singular wording as `delivery.build_caption`. The ED-6 sanitiser is
+  followed by a `strip()` after the 150-character cut, so a cut cannot leave a
+  trailing space. A hostile `meta.window` (`1w\r\nBcc: x@evil.test`) becomes one line
+  (`last 1wBcc: x@evil.test (...)`). As ED-6 intends, that is harmless: it is a
+  single printable line in the subject field only.
+- `sender` / `renderer` are typed `Callable[..., Awaitable[GmailSendReceipt]]` /
+  `Callable[..., EmailContent]` (module aliases `Sender`, `Renderer`), so that test
+  fakes with keyword-only parameters type-check.
+- The HTML file is never opened: only `html_path.name` is used.
+
+Checks run:
+- Scratch sanity run (scratchpad `T074_sanity.py`, synthetic fixtures and the T072
+  fakes through the `client_factory` seam, `shutil.which` patched, offline):
+  - subjects: ranked, unranked, both empty states, one article, and hostile window
+    and titles;
+  - sends: a real success through `send_gmail_message`, an empty list emailed, the
+    four REJECTED classes, an unknown reply and a transport error;
+  - every `GmailSendErrorKind` built by hand: reasons, statuses, `send_calls` and
+    `session_starts`;
+  - an unexpected sender exception, a render failure and the over-budget warning;
+  - no recipient address at INFO or higher or in any reason, no item title in any log
+    record, and the HTML file's bytes and mtime unchanged with no other file created.
+- `tests/test_architecture.py`: 309 passed (the ED-2/ED-3 rules hold on the real tree).
+  Full suite: 4203 passed, 2 deselected, 2 xfailed. `ruff format`, `ruff check src/`
+  and `pyrefly check` are clean (0 errors). At run time, `ruff check .` reports F401
+  and F811 only in `tests/test_agent.py`, which another task (T081) is editing; that
+  file is not mine. No test file was edited.
