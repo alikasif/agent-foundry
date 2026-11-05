@@ -57,7 +57,7 @@
 | V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) | jinja2 3.1.6 `PackageLoader`, hatchling build backend (`packages = ["src/newsletter_digest"]`) | `render.ENVIRONMENT.get_template("reading_list_email.html.j2")` used by every scratch render; `uv build --wheel --out-dir <scratchpad>/T073_wheel`, then `python3 -I -m zipfile -l` on the wheel | Confirmed. The loader finds the template; the wheel lists `newsletter_digest/templates/reading_list_email.html.j2` (7,223 bytes) beside `reading_list.html.j2`. Packaging is the same as the page template (whole package directory), so no pyproject change. |
 | V36 | `str.encode("ascii", "xmlcharrefreplace")` emits one decimal reference per astral code point (no surrogate pairs); lone surrogates must be mapped first | T073 | CPython 3.13.5 | Probe: `"a\U0001f600b\U0001f469\u200d\U0001f4bb\u00e9\u65e5".encode("ascii", "xmlcharrefreplace")`; the same on `"\ud800x"`; `"\ud800".encode("utf-8")`; `unicodedata.normalize("NFKD", "a\ud800\u00e9")` | Confirmed. Output `a&#128512;b&#128105;&#8205;&#128187;&#233;&#26085;`: one decimal reference per code point, astral included, never a surrogate pair (a ZWJ sequence is one reference per code point). A lone surrogate becomes `&#55296;` (an invalid reference) and cannot be UTF-8 encoded, so `to_email_ascii` maps U+D800-U+DFFF to U+FFFD first (`&#65533;`). NFKD passes lone surrogates through unchanged. |
 | V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) | `tests/email_fixture.py` at dadcc2c; template and renderer of the T073 commit | Scratch script (synthetic fixtures only): per-item bytes = (render of `make_list(40)` minus `make_list(20)`) / 20 for one item kind, ASCII-encoded before wrapping; `render_email_html` wrapped to count renders per `render_email` call | Per item: newsletter-only 1,420 B (ED-10 estimate 1.0-1.3 KB; the fixture is at the model caps: 300-char summary, 200-char reason, 150-300-char URLs whose `&` become `&amp;` in the href); compact newsletter-only 1,119 B; fetched with 5 key points 3,638 B (estimate about 3.5 KB); CJK newsletter-only 5,083 B; CJK fetched 20,678 B; empty-list document 1,710 B. So about 65 plain items fit in 95,000 bytes (estimate 70-90). `size_300` unbudgeted 464,860 B; budgeted 94,592 B, 41 shown (10 must + 31 worth), 259 omitted (all 200 skim, then 59 worth), 9 renders (1 full + 8 search; estimate about 10). `unranked_300` 94,497 B, 52 shown, 9 renders. 100 items (10/40/50, 10 fetched): 94,682 B, 48 shown, 8 renders, 66 ms. `must_heavy`: 2 renders, compact, `over_budget=True` at 245,360 B. `cjk_heavy` (60): compact, 53,207 B, 5 shown. |
-| V38 | click 8.5: `--email` `is_flag` without `envvar` ignores env; three `anyio.run` calls in one process (`run_digest`, Telegram, email); `ctx.exit(3)` after both channels | T075 |  |  | TODO |
+| V38 | click 8.5: `--email` `is_flag` without `envvar` ignores env; three `anyio.run` calls in one process (`run_digest`, Telegram, email); `ctx.exit(3)` after both channels | T075 | click 8.5.0, anyio 4.15.1 (uv.lock) | Scratch pytest smoke `t075_smoke_test.py` (scratchpad, offline: sockets blocked, `gmail_mcp.shutil.which` patched, `gmail_mcp._default_send_client` = T072 fake factory, Telegram on `httpx.MockTransport` via `delivery.deliver_reading_list` partial, `cli.run_digest` = `FakeRunDigest`), CliRunner in-process; `cli.digest.make_context(...).params` and the option's `.envvar` | Confirmed. The `--email` option has `envvar is None`, the command sets no `auto_envvar_prefix`, so no env value can turn it on; the resolved default is `False`. One process runs `anyio.run(run_digest)`, the Telegram `anyio.run` and the email `anyio.run` in sequence without error (`--telegram --email`, all four success/failure combinations): both channels are attempted every time, the Telegram line precedes the `Email:` line, stdout is the HTML plus the PDF path, exit 0 only when both succeed, else 3 from the single merged `ctx.exit(3)` after both. Caveat: the email `anyio.run` was exercised with the fake send client only; the real-session nesting defect T077 found in T071 (V33) is not visible through fakes. |
 
 ## Task notes
 
@@ -4231,3 +4231,94 @@ Checks run:
   xfails). `ruff format` (own files), `ruff check .` clean; `pyrefly check` clean for
   these files (the one remaining error is in `tests/test_email_render.py`, T078's
   in-flight file).
+
+## T075 — cli.py wiring: --email flag, fail-fast env read, lazy email import, per-channel stderr lines, merged exit codes, Telegram returns bool
+
+Edited only `src/newsletter_digest/cli.py` (plus this section and the V38 row). No
+test file edited.
+
+What was built (ED-14, ED-16, EP-5):
+- `--email` (`is_flag=True`, no `envvar`) after `--telegram`, before `--log-level`, with
+  the ED-14 help text verbatim; `email: bool` follows `telegram` in `digest()`. The
+  digest docstring names `EMAIL_TO` and `EMAIL_SEND_TIMEOUT`; the module docstring's
+  exit-code block is the ED-14 table.
+- `Settings.build(..., email=email, email_env={n: os.environ.get(n) for n in
+  EMAIL_ENV_VARS} if email else None)`: no `EMAIL_*` read with the flag off; a bad
+  `EMAIL_TO`/`EMAIL_SEND_TIMEOUT` is a `ConfigError` -> `UsageError` -> exit 2 before
+  `run_digest`.
+- After `--open`: `delivered = True`, `&=` per requested channel (Telegram first),
+  then one `ctx.exit(EXIT_NOT_DELIVERED)`. Both channels are always attempted.
+- `_deliver_to_telegram` -> `bool`: `return` became `return True` and the `ctx.exit(3)`
+  became `return False`; nothing else changed. The T063 anchor lines
+  `pdf_path, reason = _run_delivery(reading_list, html_path, settings)` and
+  `from newsletter_digest.delivery import deliver_reading_list, redact` are verbatim.
+- `_deliver_by_email` prints exactly one ED-12 line (`markup=False`, `highlight=False`,
+  `soft_wrap=True`) and returns `outcome.delivered`. `_run_email_delivery` holds the
+  only email import, in its own `try` (learnings T054), and the `anyio.run` in a second
+  `try`.
+
+Deviations / decisions not covered by the spec:
+- **Return type of `_run_email_delivery` is a cli-private Protocol (`_EmailResult`), not
+  `EmailOutcome`.** EP-5 writes `-> EmailOutcome`, but cli has no `from __future__ import
+  annotations`, a string annotation needs the name in module scope for pyrefly, and an
+  `if TYPE_CHECKING:` import is module level and rejected by the ED-16 rule (T069 heads-up).
+  The Protocol lists the read-only properties cli uses (`status`, `recipients`,
+  `message_id`, `reason`, `shown`, `omitted`, `over_budget`, `delivered`);
+  `EmailOutcome` satisfies it structurally.
+- **Import-failure outcome is a cli-private frozen dataclass `_EmailImportFailed`.**
+  When the import fails, `EmailOutcome` is not available either, so cli cannot build one.
+  The fallback carries `reason=<ExcClass>`, `status="failed"`, `delivered=False` and zero
+  defaults, and gives the line `Email: FAILED (<ExcClass>). Saved: <html>. ...`. No
+  DEBUG traceback in this branch (no `redact_addresses` available; same as Telegram).
+- **The safety-net outcome is a real `EmailOutcome`** (`status="unknown"`, reason
+  `unexpected error (<ExcClass>)`, `recipients=len(settings.email_to)`, all counters 0),
+  the same shape `email_delivery` uses for an unexpected sender exception (T074). The
+  traceback is logged at DEBUG on `newsletter_digest.cli` as
+  `redact_addresses("".join(traceback.format_exception(exc)), extra=settings.email_to)`,
+  never with `exc_info=`.
+- **The import is wrapped over four lines** (`from newsletter_digest.email_delivery
+  import (EmailOutcome, redact_addresses, send_reading_list_email,)`). The one-line form in
+  the task text is 96 columns inside the function, so ruff wraps it. T083 mutant anchors
+  must match the wrapped text or use `from newsletter_digest.email_delivery import (`.
+- **The finished `Email:` line is not passed through `redact_addresses`.** The reason is
+  already redacted by `email_delivery` (variable parts only, learnings T074), the Gmail id
+  is `[A-Za-z0-9_-]{1,64}` (T071), and the HTML path is the user's own output path:
+  redacting the whole line would mangle a path with `@` in it and the package spec in the
+  fixed hints. A reason can legitimately contain `@`
+  (`@gongrzhe/server-gmail-autoauth-mcp@1.1.11`), so tests should assert that the
+  recipients / `@example` are absent, not a bare `@`.
+- **Sent-line counts:** `<shown> of <total>` uses `outcome.shown` and
+  `reading_list.article_count` (the same total as the ED-15 `Email body` log line).
+  `recipient`/`recipients` follows the count (1 -> singular).
+- `EXIT_NOT_DELIVERED`'s comment now names both channels (TD-11, ED-14); the value is
+  unchanged.
+
+Tradeoffs: the Protocol plus the fallback dataclass add about 35 lines that only exist
+because the ED-16 rule forbids naming `EmailOutcome` at module level. A plain tuple, the
+Telegram precedent, would need seven positional fields. A `-> Any` would drop type
+checking of the line formatting.
+
+Checks run:
+- `tests/test_cli*.py`, `tests/test_flag_off_identity.py`, `tests/test_architecture.py`,
+  `tests/test_wiring_fetch.py`, `tests/test_telegram*.py`, `tests/test_delivery*.py`:
+  1000 passed, 2 xfailed. `tests/test_cli.py` passes unchanged with the new flag (no
+  `ALL_OPTIONS` failure; T080 still appends `--email`). Full suite: 4549 passed,
+  2 deselected, 7 xfailed.
+- `uv run ruff format src/newsletter_digest/cli.py`, `ruff check src`: clean. `pyrefly
+  check`: 0 errors in `src/`. At run time, `ruff check .` and `pyrefly check` report
+  errors only in the untracked in-flight files `tests/test_gmail_mcp_send.py` (T077)
+  and `tests/test_email_render.py` (T078). Neither file is mine.
+- Scratch smoke (`t075_smoke_test.py`, 18 cases, offline, see V38): exit 0 with one
+  stdout line and `Email: sent to 3 recipients (Gmail id ...).`; singular for one
+  recipient; REJECTED -> exit 3 with the FAILED line and no traceback; a send timeout ->
+  exit 3 with the OUTCOME UNKNOWN line; an exploding `send_reading_list_email` ->
+  `unexpected error (RuntimeError)`, no address in stderr even at DEBUG; a failing import ->
+  `FAILED (ImportError)`; exit 2 with `run_digest` not called for blank, display-name and
+  invalid `EMAIL_TO` and for `EMAIL_SEND_TIMEOUT=x`; flag off with malformed `EMAIL_*`
+  env -> exit 0, no `Email:` line, neither email module in `sys.modules`; a run failure ->
+  exit 1, no session opened; the `--telegram --email` matrix (see V38); no PDF with
+  `--email` alone. A separate scratch call checked the omitted and over-budget suffixes.
+- Process note: I ran `uv run newsletter-digest --help` once from the project dir to check
+  the help text. cli's import-time `load_dotenv` may then have loaded a `.env` there, if
+  one exists. Nothing from it was printed or read by me. Run from an empty cwd instead
+  (`uv run --project <dir> ...`, learnings T022).

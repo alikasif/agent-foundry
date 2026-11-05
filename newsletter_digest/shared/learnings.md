@@ -468,3 +468,13 @@
   `CancelScope(deadline=...)` around the whole `async with` and move its deadline
   instead. Task-group-free fakes hide this; check every timeout path once against a
   real local FastMCP stdio server.
+- (T075) A lazy-import helper cannot return the lazily imported type: an `-> EmailOutcome`
+  annotation needs the name at module scope (pyrefly), and `if TYPE_CHECKING:` counts as
+  module level for the ED-16 rule. Type the result with a cli-private `Protocol` of
+  read-only `@property` members, which a frozen dataclass satisfies. The import-failure
+  branch needs its own small fallback object, because the real class failed to import
+  too. Also, one-line imports quoted in task text can exceed 88 columns once indented;
+  ruff wraps them, so mutant anchors must match the wrapped form.
+- (T075) Run the console script (`uv run newsletter-digest --help`) from an empty
+  scratch cwd with `uv run --project <dir>`, never from the project dir: cli runs
+  `load_dotenv` at import time, so it may load the developer's `.env` (learnings T022).

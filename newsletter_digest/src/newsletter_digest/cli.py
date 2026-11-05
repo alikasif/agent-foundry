@@ -2,16 +2,19 @@
 
 Parses options (CLI flag > env var > default), builds :class:`Settings`, runs the
 digest and writes the HTML reading list. With ``--telegram`` it then saves a PDF copy
-next to the HTML and sends it to the user's own Telegram chat.
+next to the HTML and sends it to the user's own Telegram chat. With ``--email`` it
+emails the reading list as HTML to ``EMAIL_TO`` through a separate, send-only Gmail MCP
+session.
 
 Exit codes:
-    0: success (including the empty and the unranked-fallback list); with
-       ``--telegram`` the PDF was also delivered.
-    1: runtime failure; no digest saved, nothing sent.
-    2: usage or config error (including missing or invalid Telegram variables with
-       ``--telegram``), before any work starts.
-    3: the digest is saved (the HTML, and the PDF when it was built), but Telegram
-       delivery failed or was skipped.
+    0: success (including the empty and the unranked-fallback list): the digest is
+       saved and every requested channel (``--telegram``, ``--email``) delivered.
+    1: runtime failure; no digest saved, nothing sent on any channel.
+    2: usage or config error, including a missing or invalid ``EMAIL_TO`` /
+       ``EMAIL_SEND_TIMEOUT`` with ``--email`` or Telegram variables with
+       ``--telegram``, before any work starts.
+    3: the digest is saved (the HTML, and the PDF when it was built), but at least
+       one requested channel failed, was skipped or has an unknown outcome.
 """
 
 import logging
@@ -20,8 +23,10 @@ import shutil
 import subprocess
 import traceback
 import webbrowser
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Protocol
 
 import anyio
 import click
@@ -32,6 +37,7 @@ from rich.logging import RichHandler
 from newsletter_digest.agent import run_digest
 from newsletter_digest.config import (
     DEFAULT_MAX_FETCH,
+    EMAIL_ENV_VARS,
     FETCH_ENV_VARS,
     LOG_LEVELS,
     MAX_MAX_EMAILS,
@@ -62,8 +68,48 @@ console = Console(stderr=True)
 
 CLI_LOG_LEVELS = LOG_LEVELS[:4]  # DEBUG, INFO, WARNING, ERROR
 
-# Exit code when the digest is saved but the Telegram delivery failed (TD-11).
+# Exit code when the digest is saved but a requested channel was not delivered
+# (TD-11, ED-14).
 EXIT_NOT_DELIVERED = 3
+
+
+class _EmailResult(Protocol):
+    """What cli reads from ``email_delivery.EmailOutcome``.
+
+    cli never names the email modules at module level (ED-16), so the outcome is
+    typed structurally.
+    """
+
+    @property
+    def status(self) -> str: ...
+    @property
+    def recipients(self) -> int: ...
+    @property
+    def message_id(self) -> str | None: ...
+    @property
+    def reason(self) -> str | None: ...
+    @property
+    def shown(self) -> int: ...
+    @property
+    def omitted(self) -> int: ...
+    @property
+    def over_budget(self) -> bool: ...
+    @property
+    def delivered(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class _EmailImportFailed:
+    """The email outcome when ``email_delivery`` itself could not be imported."""
+
+    reason: str
+    status: str = "failed"
+    recipients: int = 0
+    message_id: str | None = None
+    shown: int = 0
+    omitted: int = 0
+    over_budget: bool = False
+    delivered: bool = False
 
 
 def main() -> None:
@@ -166,6 +212,13 @@ def _setup_logging(log_level: str) -> logging.Logger:
     "chats are not end-to-end encrypted.",
 )
 @click.option(
+    "--email",
+    is_flag=True,
+    help="Also email the reading list as HTML to the addresses in EMAIL_TO (.env), "
+    "through the same Gmail MCP server and login (no SMTP, no PDF). The AI agent "
+    "never gets the send tool. Privacy: every recipient sees the others in To.",
+)
+@click.option(
     "--log-level",
     type=click.Choice(CLI_LOG_LEVELS, case_sensitive=False),
     default="INFO",
@@ -184,6 +237,7 @@ def digest(
     fetch_articles: bool,
     max_fetch: int,
     telegram: bool,
+    email: bool,
     log_level: str,
 ) -> None:
     """Turn a Gmail newsletter label into a ranked HTML reading list.
@@ -199,6 +253,9 @@ def digest(
 
     With --telegram, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are read from the
     environment (or .env) and checked before the run; without it they are never read.
+
+    With --email, EMAIL_TO and EMAIL_SEND_TIMEOUT are read from the environment (or
+    .env) and checked before the run; without it they are never read.
     """
     logger = _setup_logging(log_level)
     try:
@@ -225,6 +282,12 @@ def digest(
                 if telegram
                 else None
             ),
+            email=email,
+            email_env=(
+                {name: os.environ.get(name) for name in EMAIL_ENV_VARS}
+                if email
+                else None
+            ),
         )
     except ConfigError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -246,14 +309,19 @@ def digest(
     click.echo(str(path))
     if settings.open_browser:
         _open_in_browser(path.resolve())
+    delivered = True
     if settings.telegram:
-        _deliver_to_telegram(reading_list, path, settings)
+        delivered &= _deliver_to_telegram(reading_list, path, settings)
+    if settings.email:
+        delivered &= _deliver_by_email(reading_list, path, settings)
+    if not delivered:
+        click.get_current_context().exit(EXIT_NOT_DELIVERED)
 
 
 def _deliver_to_telegram(
     reading_list: ReadingList, html_path: Path, settings: Settings
-) -> None:
-    """Save and send the PDF copy; exit 3 (no traceback) when it is not delivered.
+) -> bool:
+    """Save and send the PDF copy; return True when it was delivered.
 
     The PDF path goes to stdout (line 2) whenever the file exists. stderr gets
     ``Sent <name> to Telegram.`` or one line saying why delivery failed and which
@@ -267,7 +335,7 @@ def _deliver_to_telegram(
             console.print(
                 f"Sent {pdf_path.name} to Telegram.", markup=False, highlight=False
             )
-            return
+            return True
         saved.append(str(pdf_path))
     console.print(
         f"Telegram delivery failed ({reason}). Saved: {', '.join(saved)}. "
@@ -276,7 +344,7 @@ def _deliver_to_telegram(
         highlight=False,
         soft_wrap=True,
     )
-    click.get_current_context().exit(EXIT_NOT_DELIVERED)
+    return False
 
 
 def _run_delivery(
@@ -305,6 +373,85 @@ def _run_delivery(
         line = " ".join(f"{type(exc).__name__}: {exc}".split()).rstrip(": .")
         return None, redact(line)
     return outcome.pdf_path, outcome.reason
+
+
+def _deliver_by_email(
+    reading_list: ReadingList, html_path: Path, settings: Settings
+) -> bool:
+    """Email the reading list; print one ``Email:`` line; True when Gmail accepted it.
+
+    No traceback is printed: every failure is one stderr line naming the saved HTML.
+    """
+    outcome = _run_email_delivery(reading_list, html_path, settings)
+    if outcome.delivered:
+        count = outcome.recipients
+        line = (
+            f"Email: sent to {count} recipient{'' if count == 1 else 's'} "
+            f"(Gmail id {outcome.message_id})."
+        )
+        if outcome.omitted > 0:
+            line += (
+                f" {outcome.shown} of {reading_list.article_count} items included; "
+                "the full list is in the saved HTML."
+            )
+        if outcome.over_budget:
+            line += " The email is over Gmail's size budget and may be clipped."
+    elif outcome.status == "failed":
+        line = (
+            f"Email: FAILED ({outcome.reason}). Saved: {html_path}. "
+            "See README > Email delivery."
+        )
+    else:
+        line = (
+            f"Email: OUTCOME UNKNOWN ({outcome.reason}); the email may have been "
+            "sent, check your Gmail Sent folder before re-running. "
+            f"Saved: {html_path}. See README > Email delivery."
+        )
+    console.print(line, markup=False, highlight=False, soft_wrap=True)
+    return outcome.delivered
+
+
+def _run_email_delivery(
+    reading_list: ReadingList, html_path: Path, settings: Settings
+) -> _EmailResult:
+    """Run the email delivery and return its outcome; never raises ``Exception``.
+
+    ``email_delivery`` (and with it ``email_render``) is imported only here, so a
+    run without ``--email`` never loads it (ED-16). A failed import is ``failed``
+    with only the class name (nothing can have been sent). Any other exception is
+    ``unknown`` (``unexpected error (<ExcClass>)``): it cannot be shown to have
+    happened before the send. Its traceback goes to DEBUG with addresses redacted.
+    """
+    try:
+        from newsletter_digest.email_delivery import (
+            EmailOutcome,
+            redact_addresses,
+            send_reading_list_email,
+        )
+    except Exception as exc:
+        return _EmailImportFailed(reason=type(exc).__name__)
+    try:
+        return anyio.run(
+            partial(send_reading_list_email, reading_list, html_path, settings)
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "Email delivery raised:\n%s",
+            redact_addresses(
+                "".join(traceback.format_exception(exc)), extra=settings.email_to
+            ),
+        )
+        return EmailOutcome(
+            status="unknown",
+            recipients=len(settings.email_to),
+            message_id=None,
+            reason=f"unexpected error ({type(exc).__name__})",
+            shown=0,
+            omitted=0,
+            over_budget=False,
+            send_calls=0,
+            session_starts=0,
+        )
 
 
 def _open_in_browser(path: Path) -> None:
