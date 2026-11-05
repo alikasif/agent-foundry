@@ -478,3 +478,13 @@
 - (T075) Run the console script (`uv run newsletter-digest --help`) from an empty
   scratch cwd with `uv run --project <dir>`, never from the project dir: cli runs
   `load_dotenv` at import time, so it may load the developer's `.env` (learnings T022).
+- (T078) A wrapper's "max line <= limit" invariant needs inputs where a whitespace run
+  holding a LF straddles the limit (`"a"*9 + " "*5 + "\nb"` at 10). Collapsed model text
+  never produces one, so fixture renderings all pass; only a mutant that survived
+  (whitespace-overflow branch loosened) showed the gap, and the new case failed on the
+  real `wrap_long_lines` too (implementation-notes T078 finding 1).
+- (T078) To compare an email rendering with its unwrapped form without duplicating the
+  template variables, monkeypatch `email_render.to_email_ascii` / `wrap_long_lines` with
+  pass-through recorders (they are looked up as module globals at call time); keep only
+  `to_email_ascii` calls whose input starts with `<!doctype`, because `email_link` calls
+  it too.

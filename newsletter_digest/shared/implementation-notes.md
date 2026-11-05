@@ -56,7 +56,7 @@
 | V34 | Shape of session-start failures through `MultiServerMCPClient.session` (plain exception vs `ExceptionGroup`), and that state-based classification handles both | T071 | mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1 | Scratch probe: real `MultiServerMCPClient({...stdio...}).session("gmail")` + `list_tools()` under `fail_after(1.5)` for four local commands; then the real `send_gmail_message` (default client) with `sys.executable -c ...` as the server command. No npx, no network | Both shapes occur. A missing executable raises a plain `FileNotFoundError` (stdio_client's `OSError` path, before any task group). A process that exits at once, or that prints non-JSON and exits, raises `ExceptionGroup[ExceptionGroup[McpError('Connection closed')]]`. A server that never answers `initialize` raises a plain `TimeoutError` from `fail_after`. All are `Exception` subclasses, so `except Exception` catches them, and classification reads only `_AttemptState.phase` (still `start`). Through `send_gmail_message`: the exiting server gives START_FAILED, detail `McpError: Connection closed`, 2 session starts, `call_issued` False, 0.05 s. The hanging server gives START_FAILED, detail `no answer within 0.5 s`, 2 starts, 1.02 s in total. No child process was left behind (pgrep). Cancellation is a `BaseException` and is never caught. |
 | V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) | jinja2 3.1.6 `PackageLoader`, hatchling build backend (`packages = ["src/newsletter_digest"]`) | `render.ENVIRONMENT.get_template("reading_list_email.html.j2")` used by every scratch render; `uv build --wheel --out-dir <scratchpad>/T073_wheel`, then `python3 -I -m zipfile -l` on the wheel | Confirmed. The loader finds the template; the wheel lists `newsletter_digest/templates/reading_list_email.html.j2` (7,223 bytes) beside `reading_list.html.j2`. Packaging is the same as the page template (whole package directory), so no pyproject change. |
 | V36 | `str.encode("ascii", "xmlcharrefreplace")` emits one decimal reference per astral code point (no surrogate pairs); lone surrogates must be mapped first | T073 | CPython 3.13.5 | Probe: `"a\U0001f600b\U0001f469\u200d\U0001f4bb\u00e9\u65e5".encode("ascii", "xmlcharrefreplace")`; the same on `"\ud800x"`; `"\ud800".encode("utf-8")`; `unicodedata.normalize("NFKD", "a\ud800\u00e9")` | Confirmed. Output `a&#128512;b&#128105;&#8205;&#128187;&#233;&#26085;`: one decimal reference per code point, astral included, never a surrogate pair (a ZWJ sequence is one reference per code point). A lone surrogate becomes `&#55296;` (an invalid reference) and cannot be UTF-8 encoded, so `to_email_ascii` maps U+D800-U+DFFF to U+FFFD first (`&#65533;`). NFKD passes lone surrogates through unchanged. |
-| V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) | `tests/email_fixture.py` at dadcc2c; template and renderer of the T073 commit | Scratch script (synthetic fixtures only): per-item bytes = (render of `make_list(40)` minus `make_list(20)`) / 20 for one item kind, ASCII-encoded before wrapping; `render_email_html` wrapped to count renders per `render_email` call | Per item: newsletter-only 1,420 B (ED-10 estimate 1.0-1.3 KB; the fixture is at the model caps: 300-char summary, 200-char reason, 150-300-char URLs whose `&` become `&amp;` in the href); compact newsletter-only 1,119 B; fetched with 5 key points 3,638 B (estimate about 3.5 KB); CJK newsletter-only 5,083 B; CJK fetched 20,678 B; empty-list document 1,710 B. So about 65 plain items fit in 95,000 bytes (estimate 70-90). `size_300` unbudgeted 464,860 B; budgeted 94,592 B, 41 shown (10 must + 31 worth), 259 omitted (all 200 skim, then 59 worth), 9 renders (1 full + 8 search; estimate about 10). `unranked_300` 94,497 B, 52 shown, 9 renders. 100 items (10/40/50, 10 fetched): 94,682 B, 48 shown, 8 renders, 66 ms. `must_heavy`: 2 renders, compact, `over_budget=True` at 245,360 B. `cjk_heavy` (60): compact, 53,207 B, 5 shown. |
+| V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) | `tests/email_fixture.py` at dadcc2c; template and renderer of the T073 commit | Scratch script (synthetic fixtures only): per-item bytes = (render of `make_list(40)` minus `make_list(20)`) / 20 for one item kind, ASCII-encoded before wrapping; `render_email_html` wrapped to count renders per `render_email` call | Per item: newsletter-only 1,420 B (ED-10 estimate 1.0-1.3 KB; the fixture is at the model caps: 300-char summary, 200-char reason, 150-300-char URLs whose `&` become `&amp;` in the href); compact newsletter-only 1,119 B; fetched with 5 key points 3,638 B (estimate about 3.5 KB); CJK newsletter-only 5,083 B; CJK fetched 20,678 B; empty-list document 1,710 B. So about 65 plain items fit in 95,000 bytes (estimate 70-90). `size_300` unbudgeted 464,860 B; budgeted 94,592 B, 41 shown (10 must + 31 worth), 259 omitted (all 200 skim, then 59 worth), 9 renders (1 full + 8 search; estimate about 10). `unranked_300` 94,497 B, 52 shown, 9 renders. 100 items (10/40/50, 10 fetched): 94,682 B, 48 shown, 8 renders, 66 ms. `must_heavy`: 2 renders, compact, `over_budget=True` at 245,360 B. `cjk_heavy` (60): compact, 53,207 B, 5 shown. **T078 re-measure** (same method, `tests/email_fixture.py` at dadcc2c, renderer at 6c15e04, `html_name=reading-list-2026-11-04.html`): identical per-item bytes (newsletter-only 1,420 / compact 1,119; fetched 3,638 / compact 2,019; CJK 5,083 / compact 3,509; CJK fetched 20,678 / compact 10,141; empty document 1,710). `size_300`: unbudgeted 464,860 B (asserted > 95,000 by measurement in `test_size_300`), final 94,592 B, 41 shown, 259 omitted, 9 renders, 108 ms; `unranked_300` 94,497 B, 52 shown, 9 renders; 100 items 94,682 B, 48 shown, 8 renders, 56 ms (NFR-E6 test asserts < 1 s); `must_heavy` 2 renders, compact + `over_budget` at 245,360 B; `cjk_heavy` (60) compact 53,207 B, 5 shown, 8 renders; golden (`standard_list`) 24,299 B, 1 render. |
 | V38 | click 8.5: `--email` `is_flag` without `envvar` ignores env; three `anyio.run` calls in one process (`run_digest`, Telegram, email); `ctx.exit(3)` after both channels | T075 | click 8.5.0, anyio 4.15.1 (uv.lock) | Scratch pytest smoke `t075_smoke_test.py` (scratchpad, offline: sockets blocked, `gmail_mcp.shutil.which` patched, `gmail_mcp._default_send_client` = T072 fake factory, Telegram on `httpx.MockTransport` via `delivery.deliver_reading_list` partial, `cli.run_digest` = `FakeRunDigest`), CliRunner in-process; `cli.digest.make_context(...).params` and the option's `.envvar` | Confirmed. The `--email` option has `envvar is None`, the command sets no `auto_envvar_prefix`, so no env value can turn it on; the resolved default is `False`. One process runs `anyio.run(run_digest)`, the Telegram `anyio.run` and the email `anyio.run` in sequence without error (`--telegram --email`, all four success/failure combinations): both channels are attempted every time, the Telegram line precedes the `Email:` line, stdout is the HTML plus the PDF path, exit 0 only when both succeed, else 3 from the single merged `ctx.exit(3)` after both. Caveat: the email `anyio.run` was exercised with the fake send client only; the real-session nesting defect T077 found in T071 (V33) is not visible through fakes. |
 
 ## Task notes
@@ -4322,3 +4322,69 @@ Checks run:
   the help text. cli's import-time `load_dotenv` may then have loaded a `.env` there, if
   one exists. Nothing from it was printed or read by me. Run from an empty cwd instead
   (`uv run --project <dir> ...`, learnings T022).
+
+## T078 — Email render tests: structure, golden, forbidden constructs, hostile input, ASCII and line length, size budget
+
+- Files: `tests/test_email_render.py` (new, 194 tests: 192 pass, 2 strict xfail), `tests/fixtures/email_ranked_golden.html`
+  (new, 24,299 bytes). No source, existing test file or other golden touched.
+- **Golden:** `render_email(standard_list(), html_name="reading-list-2026-11-04.html").html`
+  as ASCII bytes. Regenerate only with `uv run python -m tests.test_email_render` (the
+  module's `write_golden()`), from the project directory, when the email template changes
+  on purpose; review the diff and note it here. Reviewed after generation: ASCII only, max
+  line 880, hrefs only on reserved hosts (`*.example.com/.org/.net`, `papers.example.test`),
+  no `@`, no `script`/`alert`/`javascript`/`<img`/`onerror`, the only character references
+  are the fixture's `é ï ü —`. `test_golden_file_is_reviewed_safe_content` re-asserts this.
+- Decisions not covered by the spec:
+  - **Item-level checks parse with lxml**: an item row is the `td` that holds an `h3`;
+    title, `href`, paragraphs and `li` texts are compared with the model after whitespace
+    collapsing. "Complete" = title, `email_link(url)` as href, the Q3 display summary, the
+    exact ED-7 meta line (`sources · date · mentioned in N`), `Why:` unless compact, and the
+    5 key points for fetched items unless compact.
+  - **Visible-text equivalence** uses pass-through recorders on
+    `email_render.to_email_ascii` / `wrap_long_lines` to capture the raw template output and
+    the unwrapped ASCII document. Asserted per matrix case: unwrapped == an independent
+    test-side ED-8 encoder applied to raw; final == `wrap_long_lines(unwrapped, 880)`; the
+    two are equal with all whitespace removed; lxml text equal (modulo whitespace) to the
+    unwrapped document and to the sanitised raw document. `to_email_ascii` is also checked
+    against that oracle over every code point below U+3000 plus surrogates and astral ones.
+  - **Budget tests are measured, not hard-coded**: an independent `reduced(rl, k)` builds the
+    k-drop list; `size_300` asserts unbudgeted > 95,000, the exact dropped set
+    `== drop_order[:omitted]`, minimality (`k - 1` drops do not fit), and that the result
+    equals that stage's rendering. The stage test sweeps every budget boundary of the
+    standard (ranked and unranked) list through stages 1-4.
+  - Extra structure checks: every `body`/`td` sets background and colour, font sizes are
+    px only, `max-width:600px`, `color-scheme` light, `href=` always starts a line, no
+    `target`/`rel`, no bare `&` (every `&` starts a reference), no control characters but
+    TAB/LF, the file name only (Unix and Windows paths) in the omitted line and plain part.
+  - **ENVIRONMENT checks**: in-process (filters = jinja defaults + `safe_url`/`slug`,
+    globals/tests = defaults, a full state snapshot unchanged after email renders, page
+    bytes == `flag_off_ranked_golden.html`) and in a fresh `python -c` subprocess (email
+    module absent before, present after as a positive control, state and page bytes
+    unchanged across the import).
+  - Autouse guard: sockets and `shutil.which` raise (the render path needs neither).
+- **Findings** (behaviour contradicting the design):
+  1. **`wrap_long_lines` can exceed its limit (ED-8).** A whitespace token that contains a
+     LF is appended whole (`if "\n" in piece` branch), so the spaces before the LF can pass
+     `limit`: `wrap_long_lines("a"*9 + " "*5 + "\nb", 10)` gives a 14-char line, and
+     `render_email` of a hand-built item with summary `"w"*870 + " "*40 + "\nz"` gives a
+     910-char line (> `MAX_EMAIL_LINE_CHARS`). Not reachable through the pipeline, because
+     every model text field is whitespace-collapsed before a `ReadingItem` exists; but
+     `ReadingItem` itself does not collapse. Fix idea: when the part before the first LF
+     would overflow, replace the whole run by `"\n"` + the part after its last LF (or just
+     `"\n"`). Pinned by two `xfail(strict=True)` tests that start passing when fixed.
+  2. (Known, T073 flagged) compact mode runs only with every droppable item gone: on
+     `cjk_heavy` the result is 53,207 B with 5 shown while compact CJK items cost about
+     3.5 KB, so about 12 skim items would still fit. ED-10-literal; not asserted either way.
+  3. (Minor wording) the omitted line says "lower-priority items" for unranked lists too,
+     where items have no priority; and the footer reads `Generated 2026-11-04 07:45+01:00.`
+     (page format, with offset) where ED-7 sketches `Generated YYYY-MM-DD HH:MM.`. Tests
+     follow the template here.
+- Mutation check (scratch plugin `T078_mut/`, text mutants exec'd into `email_render` or
+  applied to the template source through the loader, golden test deselected so structural
+  tests do the killing): 56 mutants plus a no-op control; 56/56 killed after adding the
+  trailing-whitespace wrap case (the first run's one survivor), control survived.
+- V37: T078 re-measure appended to the row (identical to T073's numbers).
+- Results: `tests/test_email_render.py` 192 passed, 2 xfailed (finding 1); line and branch
+  coverage of `email_render.py` 100% (`uv run --with coverage`, no project dependency);
+  full suite 4549 passed, 2 deselected, 7 xfailed; `ruff format`, `ruff check .`,
+  `pyrefly check` clean.
