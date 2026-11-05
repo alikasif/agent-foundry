@@ -54,9 +54,9 @@
 | V32 | `mcp.ClientSession.list_tools(cursor=None)` / `ListToolsResult.nextCursor`, `Tool.inputSchema` (`properties`, `required`), `call_tool(name, arguments=None, read_timeout_seconds=None, ...)`, `CallToolResult.isError/.content`; `MultiServerMCPClient.session(name)` yields a raw `ClientSession` without loading tools | T071 |  |  | TODO |
 | V33 | `anyio.fail_after` around `ClientSession.call_tool` inside the session task groups raises `TimeoutError` at scope exit, the stdio subprocess is reaped within mcp's 2 s `PROCESS_TERMINATION_TIMEOUT` (local FastMCP sleeping `send_email` tool, no npx) | T077 |  |  | TODO |
 | V34 | Shape of session-start failures through `MultiServerMCPClient.session` (plain exception vs `ExceptionGroup`), and that state-based classification handles both | T071 |  |  | TODO |
-| V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) |  |  | TODO |
-| V36 | `str.encode("ascii", "xmlcharrefreplace")` emits one decimal reference per astral code point (no surrogate pairs); lone surrogates must be mapped first | T073 |  |  | TODO |
-| V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) |  |  | TODO |
+| V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) | jinja2 3.1.6 `PackageLoader`, hatchling build backend (`packages = ["src/newsletter_digest"]`) | `render.ENVIRONMENT.get_template("reading_list_email.html.j2")` used by every scratch render; `uv build --wheel --out-dir <scratchpad>/T073_wheel`, then `python3 -I -m zipfile -l` on the wheel | Confirmed. The loader finds the template; the wheel lists `newsletter_digest/templates/reading_list_email.html.j2` (7,223 bytes) beside `reading_list.html.j2`. Packaging is the same as the page template (whole package directory), so no pyproject change. |
+| V36 | `str.encode("ascii", "xmlcharrefreplace")` emits one decimal reference per astral code point (no surrogate pairs); lone surrogates must be mapped first | T073 | CPython 3.13.5 | Probe: `"a\U0001f600b\U0001f469\u200d\U0001f4bb\u00e9\u65e5".encode("ascii", "xmlcharrefreplace")`; the same on `"\ud800x"`; `"\ud800".encode("utf-8")`; `unicodedata.normalize("NFKD", "a\ud800\u00e9")` | Confirmed. Output `a&#128512;b&#128105;&#8205;&#128187;&#233;&#26085;`: one decimal reference per code point, astral included, never a surrogate pair (a ZWJ sequence is one reference per code point). A lone surrogate becomes `&#55296;` (an invalid reference) and cannot be UTF-8 encoded, so `to_email_ascii` maps U+D800-U+DFFF to U+FFFD first (`&#65533;`). NFKD passes lone surrogates through unchanged. |
+| V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) | `tests/email_fixture.py` at dadcc2c; template and renderer of the T073 commit | Scratch script (synthetic fixtures only): per-item bytes = (render of `make_list(40)` minus `make_list(20)`) / 20 for one item kind, ASCII-encoded before wrapping; `render_email_html` wrapped to count renders per `render_email` call | Per item: newsletter-only 1,420 B (ED-10 estimate 1.0-1.3 KB; the fixture is at the model caps: 300-char summary, 200-char reason, 150-300-char URLs whose `&` become `&amp;` in the href); compact newsletter-only 1,119 B; fetched with 5 key points 3,638 B (estimate about 3.5 KB); CJK newsletter-only 5,083 B; CJK fetched 20,678 B; empty-list document 1,710 B. So about 65 plain items fit in 95,000 bytes (estimate 70-90). `size_300` unbudgeted 464,860 B; budgeted 94,592 B, 41 shown (10 must + 31 worth), 259 omitted (all 200 skim, then 59 worth), 9 renders (1 full + 8 search; estimate about 10). `unranked_300` 94,497 B, 52 shown, 9 renders. 100 items (10/40/50, 10 fetched): 94,682 B, 48 shown, 8 renders, 66 ms. `must_heavy`: 2 renders, compact, `over_budget=True` at 245,360 B. `cjk_heavy` (60): compact, 53,207 B, 5 shown. |
 | V38 | click 8.5: `--email` `is_flag` without `envvar` ignores env; three `anyio.run` calls in one process (`run_digest`, Telegram, email); `ctx.exit(3)` after both channels | T075 |  |  | TODO |
 
 ## Task notes
@@ -3773,3 +3773,74 @@ passed, 2 deselected, 2 xfailed. ruff check clean; pyrefly 0 errors. `ruff forma
   covered by `test_config.py`).
 - Results: `tests/test_config_email.py` 372 passed; full suite 4183 passed, 2
   deselected, 2 xfailed. `ruff format`, `ruff check .`, `pyrefly check` clean.
+
+## T073 — email_render.py and reading_list_email.html.j2: ASCII-only inline-styled email HTML, 95 KB budget, compact mode, plain-text part
+
+- Files: `src/newsletter_digest/email_render.py` (stub replaced),
+  `src/newsletter_digest/templates/reading_list_email.html.j2` (new). `render.py`,
+  `reading_list.html.j2` and `models.py` unchanged (`git diff e41b124` empty);
+  `ENVIRONMENT` is only read (`get_template`), nothing is registered on it.
+- Imports: `render` (`ENVIRONMENT`, `safe_url`), `models` (`ReadingItem`,
+  `ReadingList`), `markupsafe.escape`, stdlib (`re`, `textwrap`, `unicodedata`,
+  `dataclasses`). `tests/test_architecture.py` green.
+- Decisions not covered by the spec:
+  - **Template text.** Header lines follow the ED-7 sketch with ASCII separators
+    (`start - end`, `failed - Articles: N`); the meta line uses ` &middot; ` as ED-7
+    says. The fetch line, the unranked note, the failed-emails note and the
+    fetch-skipped note reuse the page's wording. Items are `<tr><td>` rows with `<h3>`
+    titles, `<h2>` section headings `Must read (n)` / `Topic (n)`. Every `<td>` sets
+    background and colour; inner `<p>`/`<h*>` set colour (they inherit the cell
+    background). The page's priority pill is not shown (FR-059 does not list it).
+  - **Long-link note** is its own small muted `<p>` under the title, shown only when
+    `safe_url` accepts the URL but `email_link` does not (unsafe URLs stay plain text
+    without a note).
+  - **Empty state / headers use `total_articles`**, not the reduced list, so an
+    unranked list whose items were all dropped shows the header and omitted line, not
+    an empty-state sentence. The unranked note also keys on `total_articles`.
+  - **`html_name` is reduced to its last path component** (`/` and `\` both split) in
+    both parts, so even a caller passing a full path never shows a directory.
+  - **`wrap_long_lines` tag handling:** a tag is split into pieces at whitespace
+    outside quoted values (`"..."`/`'...'` kept whole); breaks go at the last
+    whitespace of the line (text or between attributes), else before a text run,
+    a character reference, `&` or the first piece of a tag. A later tag piece that
+    cannot be placed (or any tag piece longer than `limit`) raises `ValueError`. If
+    the quote-aware split does not reproduce the tag exactly, the tag is one piece.
+    Text runs over `limit` are pre-split into `limit`-sized chunks. Only whitespace is
+    ever added or turned into LF (checked: the documents with all whitespace removed
+    are equal before and after wrapping for standard, hostile, CJK and size_300).
+  - **Plain part:** the empty variant has the header line and the ED-11 sentence only
+    (no "open the HTML version" pointer). A ranked list with no Must-read items prints
+    the counts and the pointer without a `Must read:` heading. Titles: controls and
+    bidi removed, whitespace collapsed, NFKD, combining marks dropped, other
+    non-ASCII runs to `?`, cut to 197 + `...` when over 200. An item whose URL
+    `safe_url` rejects (or has none) gets no link line; `(link in the HTML version)` is
+    only for a safe URL that is non-ASCII or over 800 characters. Titles wrap at 76
+    with a 3-space hanging indent. The `... and N more in the HTML version.` line also
+    counts entries cut by the 8,000-byte cap.
+- Deviation / tradeoff to review:
+  - **Compact mode runs with every droppable item already dropped** (ED-10 stage 3,
+    literal). On `cjk_heavy` (5 fetched CJK Must-read items of about 20 KB each) the
+    compact result is 53 KB with all 55 skim items gone, although some would fit
+    again in compact mode. A second binary search in compact mode would keep more items
+    (about 8 more renders); not done because ED-10/DM10 fix the stage order. Flagged
+    for T085/T086.
+  - The binary search assumes size is monotonic in `k` (ED-10 argument). It held on
+    every fixture measured; if it ever failed, the result is still within budget,
+    only possibly not the smallest `k`.
+- Note for T078: the template source contains `| safe_url` (the page's filter), so a
+  `|safe` grep must be word-bounded (for example `re.search(r"\|\s*safe\b", src)`);
+  a plain `"| safe"` substring check would match `| safe_url`. The source contains no
+  `|safe`, no `autoescape false` and none of the FR-059 substrings (the header comment
+  avoids naming them).
+- Measurements (V35-V37 rows): see the email V-table. Scratch checks (synthetic
+  fixtures only, scratchpad `T073_check/`): ASCII and max line <= 880 on standard,
+  unranked, hostile (with and without a lone surrogate), both empty states, size_300,
+  unranked_300, must_heavy, cjk_heavy (60 and 200), small budgets (12,000 -> 3 shown,
+  2,000 -> compact + over_budget); lxml finds no forbidden element or attribute and
+  only http(s) hrefs on all of them; hostile `<script>` appears as `&lt;script&gt;`;
+  two hostile links (2,048 chars, 300 `&`) and the standard 900-char link render
+  unlinked with the note; badge count equals items with `mentioned_in > 1`; compact has
+  no `<li>` and no `Why:`; two renders are identical.
+- Results: `tests/test_architecture.py`, `tests/test_flag_off_identity.py`,
+  `tests/test_email_fixture.py` 399 passed; full suite 4183 passed, 2 deselected,
+  2 xfailed. `ruff format`, `ruff check .`, `pyrefly check` clean.

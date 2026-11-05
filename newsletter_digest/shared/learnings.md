@@ -443,3 +443,7 @@
   `@`-count reason; use `"@@"` for that. And a flag-on `safe_summary()` legitimately
   contains `@` (`gmail_mcp_args` is `@gongrzhe/...@1.1.11`): assert `@example` (or the
   addresses) is absent, never a bare `@`.
+- (T073) A template-source check for the `safe` filter must be word-bounded
+  (`re.search(r"\|\s*safe\b", src)`): `item.url | safe_url` contains the substring
+  `| safe`. Also keep the forbidden FR-059 words (`url(`, `<img` ...) out of Jinja
+  comments, because the check runs on the raw template source.

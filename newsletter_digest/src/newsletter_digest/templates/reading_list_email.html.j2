@@ -1,0 +1,125 @@
+{#- Email body of the reading list (ED-7), rendered by email_render.py through the
+    page's Jinja environment. Escaping is on and stays on: every value below is
+    HTML-escaped, and no filter here marks data as trusted markup.
+    Gmail-safe subset only: tables, inline style="" attributes (the strings are set
+    once below), fixed light colours with a background and a text colour on every
+    block, px font sizes, 600 px wide. No style block, scripts, security meta,
+    collapsible sections, form controls, pictures, stylesheets, ids, classes, data
+    attributes, event attributes or external resources.
+    Variables: reading_list, meta, must_read and by_topic (the reduced list),
+    total_articles (the full list), omitted, html_name, compact, linkable. -#}
+{% set S_PAGE = "margin:0;padding:0;background:#f7f6f2;color:#1d1d1b;" %}
+{% set S_WRAP = "padding:16px 8px;background:#f7f6f2;color:#1d1d1b;" %}
+{% set S_BOX = "max-width:600px;background:#ffffff;color:#1d1d1b;border:1px solid #e2e0d8;font-family:Arial,Helvetica,sans-serif;" %}
+{% set S_HEAD = "padding:16px;background:#ffffff;color:#1d1d1b;border-bottom:1px solid #e2e0d8;" %}
+{% set S_H1 = "margin:0 0 8px;font-size:22px;line-height:28px;color:#1d1d1b;" %}
+{% set S_STAT = "margin:0 0 4px;font-size:14px;line-height:20px;color:#5f5e58;" %}
+{% set S_NOTE = "margin:8px 0 0;padding:8px 12px;font-size:14px;line-height:20px;background:#fff6dc;color:#6b5300;" %}
+{% set S_SECTION = "padding:16px 16px 4px;background:#ffffff;color:#1d1d1b;" %}
+{% set S_H2 = "margin:0;font-size:18px;line-height:24px;color:#1d1d1b;" %}
+{% set S_H2_MUST = "margin:0;font-size:18px;line-height:24px;color:#9a2f12;" %}
+{% set S_ITEM = "padding:8px 16px 12px;background:#ffffff;color:#1d1d1b;font-size:15px;line-height:21px;border-bottom:1px solid #efeee9;" %}
+{% set S_TITLE = "margin:0;font-size:16px;line-height:22px;color:#1d1d1b;" %}
+{% set S_LINK = "color:#1f5fbf;text-decoration:none;" %}
+{% set S_TEXT = "margin:4px 0 0;color:#1d1d1b;" %}
+{% set S_POINTS = "margin:4px 0 0;padding:0 0 0 20px;color:#1d1d1b;" %}
+{% set S_META = "margin:4px 0 0;font-size:13px;line-height:18px;color:#5f5e58;" %}
+{% set S_WHY = "margin:4px 0 0;font-size:14px;line-height:20px;font-style:italic;color:#5f5e58;" %}
+{% set S_EMPTY = "padding:24px 16px;font-size:16px;line-height:22px;background:#ffffff;color:#5f5e58;" %}
+{% set S_CODE = "font-family:Consolas,Menlo,monospace;color:#1d1d1b;" %}
+{% set S_FOOT = "padding:12px 16px;font-size:13px;line-height:18px;background:#ffffff;color:#5f5e58;border-top:1px solid #e2e0d8;" %}
+{% macro email_item(item) %}
+{% set href = item.url | safe_url %}
+<tr><td style="{{ S_ITEM }}">
+<h3 style="{{ S_TITLE }}">
+{%- if href and item.id in linkable -%}
+<a
+href="{{ href }}" style="{{ S_LINK }}">{{ item.title }}</a>
+{%- else -%}
+{{ item.title }}
+{%- endif -%}
+</h3>
+{% if href and item.id not in linkable %}
+<p style="{{ S_META }}">(link too long for email; see the saved HTML)</p>
+{% endif %}
+{% if item.fetched %}
+<p style="{{ S_TEXT }}">{{ item.fetched.summary }}</p>
+{% if not compact %}
+<ul style="{{ S_POINTS }}">
+{% for point in item.fetched.key_points %}
+<li>{{ point }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+{% elif item.summary %}
+<p style="{{ S_TEXT }}">{{ item.summary }}</p>
+{% endif %}
+{% set meta_parts = [item.sources | join(", "), item.date, ("mentioned in " ~ item.mentioned_in) if item.mentioned_in > 1 else ""] | select | list %}
+{% if meta_parts %}
+<p style="{{ S_META }}">{% for part in meta_parts %}{% if not loop.first %} &middot; {% endif %}{{ part }}{% endfor %}</p>
+{% endif %}
+{% if item.reason and not compact %}
+<p style="{{ S_WHY }}">Why: {{ item.reason }}</p>
+{% endif %}
+</td></tr>
+{% endmacro %}
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Newsletter reading list - {{ meta.end_date.isoformat() }}</title></head>
+<body style="{{ S_PAGE }}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="{{ S_PAGE }}">
+<tr><td align="center" style="{{ S_WRAP }}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="{{ S_BOX }}">
+<tr><td style="{{ S_HEAD }}">
+<h1 style="{{ S_H1 }}">Newsletter reading list</h1>
+<p style="{{ S_STAT }}">Window {{ meta.window }} ({{ meta.days }} days): {{ meta.start_date.isoformat() }} - {{ meta.end_date.isoformat() }}</p>
+<p style="{{ S_STAT }}">Emails: {{ meta.emails_found }} found, {{ meta.emails_processed }} processed, {{ meta.emails_failed }} failed - Articles: {{ total_articles }}</p>
+{% if reading_list.fetch %}
+{% set f = reading_list.fetch %}
+<p style="{{ S_STAT }}">Article pages: {{ f.summarised }} fetched and summarised of {{ f.selected }} selected ({{ f.eligible }} eligible{% if f.excluded %}, {{ f.excluded }} skipped as non-article links{% endif %}) - {{ f.failed_total }} couldn't be fetched</p>
+{% if f.skipped_reason %}
+<p style="{{ S_NOTE }}">Article fetching was skipped: {{ f.skipped_reason }}.</p>
+{% endif %}
+{% endif %}
+{% if total_articles and not reading_list.ranked %}
+<p style="{{ S_NOTE }}">Ranking was not completed, so this list is unranked: articles are grouped by their suggested topic and there is no Must read section.</p>
+{% endif %}
+{% if meta.emails_failed > 0 %}
+<p style="{{ S_NOTE }}">{{ meta.emails_failed }} email{{ "s" if meta.emails_failed != 1 }} could not be read and {{ "were" if meta.emails_failed != 1 else "was" }} skipped.</p>
+{% endif %}
+{% if omitted > 0 %}
+<p style="{{ S_NOTE }}">{{ reading_list.article_count }} of {{ total_articles }} items are shown; {{ omitted }} lower-priority items were left out to fit Gmail's size limit. The full list is in {{ html_name }} on the computer that ran the digest.</p>
+{% endif %}
+</td></tr>
+{% if reading_list.ranked and must_read %}
+<tr><td style="{{ S_SECTION }}"><h2 style="{{ S_H2_MUST }}">Must read ({{ must_read | length }})</h2></td></tr>
+{% for item in must_read %}
+{{ email_item(item) }}
+{% endfor %}
+{% endif %}
+{% for topic, topic_items in by_topic %}
+<tr><td style="{{ S_SECTION }}"><h2 style="{{ S_H2 }}">{{ topic.value }} ({{ topic_items | length }})</h2></td></tr>
+{% for item in topic_items %}
+{{ email_item(item) }}
+{% endfor %}
+{% endfor %}
+{% if not total_articles %}
+<tr><td style="{{ S_EMPTY }}">
+{% if meta.emails_found == 0 %}
+<p style="margin:0;">No newsletter emails matched <code style="{{ S_CODE }}">{{ meta.query }}</code> in this window ({{ meta.start_date.isoformat() }} - {{ meta.end_date.isoformat() }}).</p>
+{% else %}
+<p style="margin:0;">No articles were found in the {{ meta.emails_found }} matching email{{ "s" if meta.emails_found != 1 }}.</p>
+{% endif %}
+</td></tr>
+{% endif %}
+<tr><td style="{{ S_FOOT }}">
+<p style="margin:0;">Generated {{ meta.generated_at.isoformat(sep=" ", timespec="minutes") }}.</p>
+{% if not reading_list.fetch %}
+<p style="margin:4px 0 0;">Summaries come from newsletter emails; links not fetched.</p>
+{% else %}
+<p style="margin:4px 0 0;">Items with key points were summarised from the linked article page; the others use the newsletter's summary.</p>
+{% endif %}
+</td></tr>
+</table></td></tr></table></body></html>
