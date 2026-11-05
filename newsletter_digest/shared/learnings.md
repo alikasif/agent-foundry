@@ -460,3 +460,11 @@
   `@gongrzhe/server-gmail-autoauth-mcp@1.1.11` (`x@y` shape). Redact only the variable
   parts of a message (details, configured values) before inserting them into fixed
   text, never the finished line, or the fixed hints read `npx <address> auth`.
+- (T077) Never enter an async context manager that opens anyio task groups (an MCP
+  `client.session()`, `stdio_client`) inside `with anyio.fail_after(...)` and keep it open
+  after that `with` ends (e.g. via `AsyncExitStack.enter_async_context`): leaving the
+  timeout scope while the inner scopes are still active raises `RuntimeError: Attempted
+  to exit a cancel scope that isn't the current tasks's current cancel scope`. Put one
+  `CancelScope(deadline=...)` around the whole `async with` and move its deadline
+  instead. Task-group-free fakes hide this; check every timeout path once against a
+  real local FastMCP stdio server.

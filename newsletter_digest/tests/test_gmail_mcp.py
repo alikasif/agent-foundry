@@ -10,7 +10,9 @@ FastMCP stdio server with the real ``MultiServerMCPClient`` (no npx, no Gmail).
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import logging
+import random
 import sys
 import textwrap
 from collections.abc import AsyncGenerator, Callable
@@ -42,6 +44,7 @@ from newsletter_digest.gmail_mcp import (
     tool_result_text,
 )
 from newsletter_digest.models import EmailRef
+from tests import email_fixture as ef
 
 README_POINTER = "See README: Gmail MCP setup."
 AUTH_COMMAND = "npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth"
@@ -1278,3 +1281,103 @@ def test_prepare_email_text_neutralises_embedded_delimiters(injection: str) -> N
     assert prepared.lower().count("<<<end email") == 1
     assert prepared.count("<<<EMAIL") == 1
     assert "[delimiter removed]" in prepared
+
+
+# ------------------------------------------- ED-3: no send tool on the agent path
+
+SUBSET_SEED = 20261104
+SUBSET_SAMPLE = 200
+OPTIONAL_SERVER_TOOLS = tuple(
+    name for name in ALL_SERVER_TOOLS if name not in ALLOWLIST
+)
+
+
+def sampled_tool_subsets(
+    *, required: tuple[str, ...], count: int
+) -> list[tuple[str, ...]]:
+    """Seeded subsets of the 19 server names that contain ``required``.
+
+    Always includes the smallest (``required`` only) and the largest subset; the
+    offered order is shuffled, since the server's list order must not matter.
+    """
+    rng = random.Random(SUBSET_SEED + len(required))
+    width = len(OPTIONAL_SERVER_TOOLS)
+    masks = [0, 2**width - 1, *rng.sample(range(1, 2**width - 1), count - 2)]
+    subsets: list[tuple[str, ...]] = []
+    for mask in masks:
+        chosen = [n for i, n in enumerate(OPTIONAL_SERVER_TOOLS) if mask >> i & 1]
+        names = [*required, *chosen]
+        rng.shuffle(names)
+        subsets.append(tuple(names))
+    return subsets
+
+
+def test_server_tool_names_match_the_email_fixture() -> None:
+    assert len(ALL_SERVER_TOOLS) == 19
+    assert set(ALL_SERVER_TOOLS) == set(ef.SERVER_TOOL_NAMES_1_1_11)
+    assert ef.WRITE_TOOL_NAMES <= set(ALL_SERVER_TOOLS)
+
+
+@pytest.mark.anyio
+async def test_open_gmail_tools_never_yields_a_send_tool_over_subsets(
+    settings: Settings,
+    npx_on_path: None,
+    fake_clients: tuple[list[FakeClient], Callable[..., Callable[..., FakeClient]]],
+) -> None:
+    created, make_factory = fake_clients
+    subsets = sampled_tool_subsets(required=tuple(ALLOWLIST), count=SUBSET_SAMPLE)
+    assert len(set(map(frozenset, subsets))) == SUBSET_SAMPLE
+    send_names = set(gmail_mcp.GMAIL_SEND_TOOL_MAP.values())
+    for names in subsets:
+        factory = make_factory(tool_names=names)
+        async with open_gmail_tools(settings, client_factory=factory) as tools:
+            assert set(tools) == {"search_emails", "read_email"}
+            yielded = {logical: tool.name for logical, tool in tools.items()}
+            assert yielded == {
+                "search_emails": "search_emails",
+                "read_email": "read_email",
+            }
+            assert not set(yielded.values()) & ef.WRITE_TOOL_NAMES
+            assert not set(yielded.values()) & send_names
+    assert len(created) == SUBSET_SAMPLE
+    assert all(client.closed == 1 for client in created)
+    assert all(client.fake_session.calls == [] for client in created)
+
+
+@pytest.mark.parametrize(
+    "kept",
+    [("search_emails",), ("read_email",), ()],
+    ids=["no-read", "no-search", "none"],
+)
+@pytest.mark.anyio
+async def test_open_gmail_tools_missing_allowlisted_tool_still_raises(
+    settings: Settings,
+    npx_on_path: None,
+    fake_clients: tuple[list[FakeClient], Callable[..., Callable[..., FakeClient]]],
+    kept: tuple[str, ...],
+) -> None:
+    created, make_factory = fake_clients
+    missing = sorted(ALLOWLIST - set(kept))
+    for names in sampled_tool_subsets(required=kept, count=20):
+        factory = make_factory(tool_names=names)
+        with pytest.raises(GmailMCPError, match=missing[0]):
+            async with open_gmail_tools(settings, client_factory=factory):
+                pytest.fail("the block must not run without the allowlisted tools")
+    assert all(client.closed == 1 for client in created)
+    assert all(client.fake_session.calls == [] for client in created)
+
+
+def test_read_and_send_tool_maps_are_disjoint() -> None:
+    read_names = set(GMAIL_TOOL_MAP.values())
+    send_names = set(gmail_mcp.GMAIL_SEND_TOOL_MAP.values())
+    assert read_names == {"search_emails", "read_email"}
+    assert send_names == {"send_email"}
+    assert read_names.isdisjoint(send_names)
+    assert read_names.isdisjoint(ef.WRITE_TOOL_NAMES)
+    assert set(GMAIL_TOOL_MAP).isdisjoint(gmail_mcp.GMAIL_SEND_TOOL_MAP)
+
+
+def test_filter_read_only_default_map_is_the_read_allowlist() -> None:
+    default = inspect.signature(filter_read_only).parameters["tool_map"].default
+    assert default is GMAIL_TOOL_MAP
+    assert default is not gmail_mcp.GMAIL_SEND_TOOL_MAP
