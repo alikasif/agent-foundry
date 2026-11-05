@@ -3578,3 +3578,65 @@ records them as done (for example "V24 DONE").
   `example.com`.
 - No test file edited (T076 owns `tests/test_config_email.py`); verified with a scratch
   script (`T070_sanity.py`, scratchpad only) and the full suite: 3653 passed, 2 xfailed.
+
+## T072 — Synthetic email fixtures and fake MCP send client (tests/email_fixture.py)
+
+- Files: `tests/email_fixture.py` (helper, not collected; API in its module docstring) and
+  `tests/test_email_fixture.py` (64 self-tests, offline: socket guard, `shutil.which`
+  patched, no npx). Imports only `newsletter_digest.models`, `mcp.types`, `anyio` and
+  stdlib, so it does not depend on T070/T071/T073 names (`OutgoingEmail`, `GmailSendError`
+  etc.). The fake speaks MCP (`list_tools`/`call_tool` with real `mcp.types`), which is the
+  decoupling seam ED-17 describes.
+- Source of the MCP constants: besides `verified_facts.md`, I re-read (as text, nothing run)
+  the already-probed 1.1.11 tarball in the session scratchpad after checking its sha256
+  (`ef33ac0e...035a`, same as verified_facts). `SERVER_TOOL_NAMES_1_1_11` is in the server's
+  ListTools order (`dist/index.js` 264-360, `send_email` first); the set equals
+  `test_gmail_mcp.ALL_SERVER_TOOLS` (checked by a test). `SEND_EMAIL_SCHEMA_1_1_11` is
+  `zodToJsonSchema(SendEmailSchema)` with the zod descriptions. **Not verified:** the
+  `additionalProperties: false` and `$schema` keys are what zod-to-json-schema emits by
+  default; they are not in verified_facts. They do not affect the ED-4 check (properties
+  superset of the five keys, required subset of them).
+- Decisions not in the spec:
+  - `make_list` with `ranked=True` needs `must + worth + skim == n`; with `ranked=False`
+    the three counts must be 0 (an unranked list has no tiers; priorities and reasons are
+    `None`, as in `assemble_reading_list`). `unranked_list(n)` is the shortcut.
+  - Item order follows the `store.assemble_reading_list` sort keys (Must read by order,
+    then topic, priority, order). Topics are round-robin over `Topic`. The `fetched` items
+    are the first `fetched` items in display order (Must read first). `fetch` is
+    `FetchStats` only when `fetched > 0`.
+  - Titles 40-110 chars, summaries exactly 300, reasons exactly 200, fetched summary 1,200
+    and 5 key points of exactly 240 ("at the model caps"); every 4th item has 2 sources,
+    every 7th 3. Seeds are per item (`SEED * 1000 + 2*index + non_ascii`), so item `i` is
+    the same text in every list size.
+  - `non_ascii=True` text is CJK/Japanese/Korean words plus astral emoji, sentences end
+    in `。` and are separated by one ASCII space (real CJK has no spaces; the spaceless
+    case is covered by the hostile 2,000-char word). URLs stay ASCII.
+  - `standard_list()` (12 items) also has one item without URL, one without summary, one
+    with `fetch_failure` (must not render), one with a 900-char URL (the >800 unlinked
+    branch) and one Latin-1/em-dash title, so the T078 golden covers those branches.
+  - `hostile_list()` has 14 items; a lone surrogate is opt-in
+    (`hostile_list(lone_surrogate=True)`) because such a string cannot be UTF-8 encoded
+    and would break any test that writes or parses the list outside `to_email_ascii`
+    (V36).
+  - Extra helpers: `size_300_list`, `must_heavy_list`, `cjk_heavy_list` (ED-10 configs),
+    `all_text`, `RECIPIENTS` (reserved domains), `SEND_ARGUMENT_KEYS`,
+    `FORBIDDEN_SEND_KEYS`, `empty_list(n)` (ranked=False, processed == found).
+  - Fake: `SessionScript` per session (enter/list/exit `Fault`s, `Reply` per tool name,
+    `page_size` pagination, `send_schema`, `tool_names`); `call_tool` records and logs
+    `call#i(name)` before the reply runs, so hang/raise replies still count as issued. A
+    tool that is not offered answers `Error: Unknown tool: <name>` like 1.1.11. With
+    `validate_send=True` (default) `send_email` answers a zod-like `Error: Invalid
+    arguments: ...` for a missing required key or wrong type (unknown keys are accepted,
+    as zod's default strip mode does); the message text is approximate. `close#i` is
+    logged before an exit fault is raised; a failed or hung enter logs only `open#i`. A
+    session beyond the script raises `AssertionError` on enter.
+- ED-3 feasibility (EP-9 risk): the self-test runs the real `open_gmail_tools`
+  (`load_mcp_tools`) over the factory, calls `search_emails` through the LangChain tool,
+  then opens a raw send session on the same factory. Log:
+  `open#1, list#1, call#1(search_emails), close#1, open#2, list#2, call#2(send_email),
+  close#2`. Note for T080: the ED-3 expected log omits `call#1(search_emails)`, but
+  `run_digest` always searches on session 1, so T080 should filter read calls or include
+  them. `load_mcp_tools` needed no session method beyond `list_tools`/`call_tool`.
+- Full suite: 3502 passed, 2 xfailed with `tests/test_architecture.py` ignored. That file
+  is T069's in-flight work (it had a failing self-test and E501s at the time); it scans
+  `src/` only, so these test files do not affect it.

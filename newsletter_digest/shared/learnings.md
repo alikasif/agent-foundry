@@ -429,3 +429,6 @@
   example and ED-17: `Bob <b@example.com>` and `a@example.com; b@example.org` contain a
   space. config.py checks display-name characters and `;` before whitespace; test the
   specific reasons for those inputs (see implementation-notes T070).
+- (T072) pyrefly infers `["must-read"] * k` as `list[str]`, so it is not assignable to
+  `list[Priority]` (a Literal alias), even with the annotation. Build the list in a
+  comprehension over a `tuple[tuple[Priority, int], ...]` instead.
