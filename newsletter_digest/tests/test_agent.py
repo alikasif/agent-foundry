@@ -15,10 +15,12 @@ Everything runs offline. Gmail is a fake ``gmail_opener`` whose raw
 import json
 import logging
 import re
+import socket
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,7 @@ from langgraph.errors import GraphRecursionError
 from pydantic import Field
 
 import newsletter_digest.agent as agent_mod
+from newsletter_digest import config, gmail_mcp
 from newsletter_digest.agent import (
     AGENT_NAME,
     READER_NAME,
@@ -66,6 +69,7 @@ from newsletter_digest.tools import (
     make_search_tool,
     make_store_tools,
 )
+from tests import email_fixture as ef
 
 pytestmark = pytest.mark.anyio
 
@@ -1182,3 +1186,462 @@ async def test_real_graph_recursion_limit_with_empty_store_raises(
 
     assert len(factory.main.replies) <= settings.recursion_limit
     assert gmail.closed == 1
+
+
+# ------------------------------ ED-3 agent isolation, --email on and off (T081)
+#
+# The real ``open_gmail_tools`` (``load_mcp_tools`` + ``filter_read_only``) runs over
+# the T072 fake MCP client offering all 19 tools of server 1.1.11, so the write
+# tools (send_email, draft_email, modify_email, delete_email, ...) really are on
+# offer. The real ``build_agent`` / deepagents graph runs with scripted models.
+
+ISOLATION_EMAIL_ID = "msg-alpha"
+ISOLATION_EMAIL_TO = "reader@example.com, Team.Lead@example.org,READER@example.com"
+ISOLATION_RECIPIENTS = ("reader@example.com", "Team.Lead@example.org")
+ISOLATION_TELEGRAM_ENV = dict(
+    zip(config.TELEGRAM_ENV_VARS, ("123456:" + "T" * 35, "424242"), strict=True)
+)
+GMAIL_READ_TOOLS = frozenset({"search_emails", "read_email"})
+SERVER_TOOLS = frozenset(ef.SERVER_TOOL_NAMES_1_1_11)
+#: Names the agent path must never see: the ED-3 write tools and every server tool
+#: other than the two allowlisted read tools.
+AGENT_FORBIDDEN_NAMES = ef.WRITE_TOOL_NAMES | (SERVER_TOOLS - GMAIL_READ_TOOLS)
+EXPECTED_MAIN_BOUND = MAIN_TOOLS | {"read_file", "task"}
+EXPECTED_READER_BOUND = set(READER_TOOLS) | {"read_file"}
+EXPECTED_SESSION_1_EVENTS = [
+    "open#1",
+    "list#1",
+    "call#1(search_emails)",
+    "call#1(read_email)",
+    "close#1",
+]
+LEAK_ARGS = {"to": [ef.RECIPIENTS[0]], "subject": "leak", "body": "leak"}
+ISOLATION_CASES = [
+    pytest.param(False, False, id="email-off-telegram-off"),
+    pytest.param(True, False, id="email-on-telegram-off"),
+    pytest.param(False, True, id="email-off-telegram-on"),
+    pytest.param(True, True, id="email-on-telegram-on"),
+]
+
+
+def isolation_settings(out_dir: Path, *, email: bool, telegram: bool) -> Settings:
+    """``Settings.build`` from synthetic values only (reserved-domain ``EMAIL_TO``).
+
+    ``email_env`` and ``telegram_env`` are always passed, so the flag-off cases
+    also prove that ``build`` ignores them.
+    """
+    return Settings.build(
+        api_key=API_KEY,
+        api_base=None,
+        model=MAIN_MODEL,
+        reader_model=READER_MODEL,
+        window="7d",
+        label="Newsletters",
+        query=None,
+        max_emails=10,
+        out_dir=out_dir,
+        open_browser=False,
+        log_level="INFO",
+        mcp_command=None,
+        mcp_args=None,
+        telegram=telegram,
+        telegram_env=ISOLATION_TELEGRAM_ENV,
+        email=email,
+        email_env={"EMAIL_TO": ISOLATION_EMAIL_TO},
+    )
+
+
+def session_1_script() -> ef.SessionScript:
+    """Session 1 offering all 19 server tools; search finds one readable email."""
+    return ef.read_script(
+        {
+            "search_emails": search_text([ISOLATION_EMAIL_ID]),
+            "read_email": email_body(ISOLATION_EMAIL_ID),
+        }
+    )
+
+
+def names_in(value: object, depth: int = 0) -> set[str]:
+    """Every ``name`` attribute and string dict key inside ``value``, recursively.
+
+    Containers (dict, list, tuple, set) are walked up to depth 6; any other
+    object contributes its ``name`` when that is a string (tools, middleware).
+    """
+    if depth > 6:
+        return set()
+    found: set[str] = set()
+    name = getattr(value, "name", None)
+    if isinstance(name, str):
+        found.add(name)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                found.add(key)
+            found |= names_in(item, depth + 1)
+    elif isinstance(value, list | tuple | set | frozenset):
+        for item in value:
+            found |= names_in(item, depth + 1)
+    return found
+
+
+def mentioned_tools(text: str) -> set[str]:
+    """Forbidden tool names that appear as whole words in ``text``."""
+    return {name for name in AGENT_FORBIDDEN_NAMES if re.search(rf"\b{name}\b", text)}
+
+
+class IsolationProbe:
+    """Records what the agent path is handed while the real graph runs.
+
+    ``agent_builder`` wraps the real ``build_agent``; ``make_store_tools``,
+    ``make_search_tool``, ``make_read_email_tool``, ``build_user_message`` and
+    ``create_deep_agent`` are wrapped in ``agent.py`` (the originals still run).
+    ``inject`` lists extra tools appended to the main agent's tools, used only by
+    the negative control that simulates a broken ``build_agent``.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing seen."""
+        self.seen: dict[str, set[str]] = {}
+        self.texts: list[str] = []
+        self.gmail_dicts: list[dict[str, BaseTool]] = []
+        self.inject: list[BaseTool] = []
+        self.default_send_client_calls = 0
+
+    def record(self, site: str, *values: object) -> None:
+        """Add the names found in ``values`` to the set of ``site``."""
+        names = self.seen.setdefault(site, set())
+        for value in values:
+            names |= names_in(value)
+
+    def agent_builder(
+        self,
+        settings: Settings,
+        gmail: dict[str, BaseTool],
+        store: ArticleStore,
+        *,
+        model_factory: ModelFactory,
+    ) -> DigestAgent:
+        """The real ``build_agent``, recording the Gmail tools it receives."""
+        self.gmail_dicts.append(dict(gmail))
+        self.record("build_agent", gmail)
+        return build_agent(settings, gmail, store, model_factory=model_factory)
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Wrap the agent-path factories in ``agent.py`` and guard the send client."""
+        real_store_tools = agent_mod.make_store_tools
+        real_search_tool = agent_mod.make_search_tool
+        real_read_tool = agent_mod.make_read_email_tool
+        real_user_message = agent_mod.build_user_message
+        real_create = agent_mod.create_deep_agent
+
+        def store_tools(store: ArticleStore) -> list[BaseTool]:
+            self.record("make_store_tools", store)
+            return real_store_tools(store)
+
+        def search_tool(store: ArticleStore, *, query: str = "") -> BaseTool:
+            self.record("make_search_tool", store, query)
+            return real_search_tool(store, query=query)
+
+        def read_tool(raw: BaseTool, store: ArticleStore, settings: Settings) -> Any:
+            self.record("make_read_email_tool", raw, store)
+            return real_read_tool(raw, store, settings)
+
+        def user_message(settings: Settings, n_emails: int) -> str:
+            text = real_user_message(settings, n_emails)
+            self.texts.append(text)
+            return text
+
+        def create(**kwargs: Any) -> Any:
+            kwargs["tools"] = [*kwargs["tools"], *self.inject]
+            self.record("create_deep_agent", kwargs["tools"], kwargs["subagents"])
+            self.texts.append(str(kwargs["system_prompt"]))
+            self.texts += [str(sub["system_prompt"]) for sub in kwargs["subagents"]]
+            self.texts += [str(sub["description"]) for sub in kwargs["subagents"]]
+            return real_create(**kwargs)
+
+        def default_send_client(connections: dict[str, Any]) -> Any:
+            self.default_send_client_calls += 1
+            raise AssertionError("real Gmail MCP send client built on the agent path")
+
+        monkeypatch.setattr(agent_mod, "make_store_tools", store_tools)
+        monkeypatch.setattr(agent_mod, "make_search_tool", search_tool)
+        monkeypatch.setattr(agent_mod, "make_read_email_tool", read_tool)
+        monkeypatch.setattr(agent_mod, "build_user_message", user_message)
+        monkeypatch.setattr(agent_mod, "create_deep_agent", create)
+        monkeypatch.setattr(gmail_mcp, "_default_send_client", default_send_client)
+
+
+def isolation_violations(
+    factory: ModelFactoryRecorder,
+    probe: IsolationProbe,
+    fake: ef.FakeSendFactory,
+) -> list[str]:
+    """Every ED-3 isolation breach of one run, one readable line each.
+
+    Empty means: the main agent and the reader were bound exactly today's tool
+    sets, no forbidden name reached any agent-path builder, prompt or model, the
+    only Gmail tools anywhere were ``search_emails`` and ``read_email``, exactly
+    one MCP session was opened and it only received read calls.
+    """
+    problems: list[str] = []
+    roles = (
+        ("main", factory.main.bound_names(), EXPECTED_MAIN_BOUND),
+        ("reader", factory.reader.bound_names(), EXPECTED_READER_BOUND),
+    )
+    for role, bound, expected in roles:
+        if bound != expected:
+            problems.append(
+                f"{role} bound {sorted(bound)}, expected {sorted(expected)}"
+            )
+        problems += [f"{role} bound {n}" for n in sorted(bound & AGENT_FORBIDDEN_NAMES)]
+        gmail = bound & SERVER_TOOLS
+        problems += [
+            f"{role} bound Gmail tool {n}" for n in sorted(gmail - GMAIL_READ_TOOLS)
+        ]
+    for site, names in sorted(probe.seen.items()):
+        problems += [f"{site} saw {n}" for n in sorted(names & AGENT_FORBIDDEN_NAMES)]
+    for gmail_dict in probe.gmail_dicts:
+        if set(gmail_dict) != GMAIL_READ_TOOLS:
+            problems.append(f"build_agent got Gmail keys {sorted(gmail_dict)}")
+    prompts = [*probe.texts, *factory.main.system_prompts]
+    prompts += factory.reader.system_prompts
+    for text in prompts:
+        problems += [f"prompt mentions {n}" for n in sorted(mentioned_tools(text))]
+    if fake.opened != 1:
+        problems.append(f"{fake.opened} MCP sessions opened on the agent path")
+    for name, _ in fake.calls:
+        if name not in GMAIL_READ_TOOLS:
+            problems.append(f"session 1 call_tool({name})")
+    if probe.default_send_client_calls:
+        problems.append("the real send client was built")
+    return problems
+
+
+def leaky_filter(leak: dict[str, BaseTool]) -> Callable[..., dict[str, BaseTool]]:
+    """A broken ``filter_read_only`` that also passes ``send_email`` through.
+
+    The leaked raw tool is stored in ``leak`` so a negative control can hand it on.
+    """
+    real_filter = gmail_mcp.filter_read_only
+
+    def filter_read_only(
+        tools: list[BaseTool], tool_map: dict[str, str] = gmail_mcp.GMAIL_TOOL_MAP
+    ) -> dict[str, BaseTool]:
+        exposed = real_filter(tools, tool_map)
+        leak.update({tool.name: tool for tool in tools if tool.name == "send_email"})
+        return {**exposed, **leak}
+
+    return filter_read_only
+
+
+def leaking_main_responder(messages: list[BaseMessage]) -> AIMessage:
+    """Main agent that also calls ``send_email`` once after finalising."""
+    step = sum(isinstance(message, AIMessage) for message in messages)
+    if step == 4:
+        return tool_call("send_email", dict(LEAK_ARGS), "main-leak")
+    return main_responder(messages)
+
+
+@pytest.fixture
+def isolation_probe(monkeypatch: pytest.MonkeyPatch) -> IsolationProbe:
+    """Offline guards plus an installed :class:`IsolationProbe`.
+
+    Sockets refuse to connect, ``shutil.which`` finds every command (no npx is
+    looked up or started) and the real send client cannot be built.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("socket used in an offline agent isolation test")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(gmail_mcp.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    probe = IsolationProbe()
+    probe.install(monkeypatch)
+    return probe
+
+
+async def run_isolated_graph(
+    settings: Settings,
+    fake: ef.FakeSendFactory,
+    factory: ModelFactoryRecorder,
+    probe: IsolationProbe,
+) -> ReadingList:
+    """``run_digest`` with the real ``open_gmail_tools`` over ``fake`` and the
+    real ``build_agent`` (via the probe); fails fast on a hang."""
+    opener = partial(gmail_mcp.open_gmail_tools, client_factory=fake)
+    with anyio.fail_after(GRAPH_TIMEOUT_S):
+        return await run_digest(
+            settings,
+            gmail_opener=opener,
+            model_factory=factory,
+            agent_builder=probe.agent_builder,
+        )
+
+
+@pytest.mark.parametrize(("email", "telegram"), ISOLATION_CASES)
+def test_isolation_settings_flags(tmp_path: Path, email: bool, telegram: bool) -> None:
+    settings = isolation_settings(tmp_path, email=email, telegram=telegram)
+
+    assert settings.email is email
+    assert settings.telegram is telegram
+    assert settings.email_to == (ISOLATION_RECIPIENTS if email else ())
+    assert settings.effective_query == QUERY
+    assert all(address not in repr(settings) for address in ISOLATION_RECIPIENTS)
+
+
+def test_session_1_script_offers_all_19_server_tools() -> None:
+    names = session_1_script().tool_names
+
+    assert names == ef.SERVER_TOOL_NAMES_1_1_11
+    assert len(set(names)) == 19
+    assert {"send_email", "draft_email", "modify_email", "delete_email"} <= set(names)
+    assert ef.WRITE_TOOL_NAMES <= set(names)
+
+
+@pytest.mark.parametrize(("email", "telegram"), ISOLATION_CASES)
+async def test_real_graph_allowlist_with_19_offered_tools(
+    tmp_path: Path, isolation_probe: IsolationProbe, email: bool, telegram: bool
+) -> None:
+    settings = isolation_settings(tmp_path, email=email, telegram=telegram)
+    fake = ef.fake_send_factory(session_1_script())
+    factory = ModelFactoryRecorder(main_responder)
+
+    result = await run_isolated_graph(settings, fake, factory, isolation_probe)
+
+    assert result.article_count == 2  # the graph really ran over session 1
+    assert factory.main.bound_names() == EXPECTED_MAIN_BOUND
+    assert factory.reader.bound_names() == EXPECTED_READER_BOUND
+    bound = factory.main.bound_names() | factory.reader.bound_names()
+    assert not bound & ef.WRITE_TOOL_NAMES
+    assert not bound & (SERVER_TOOLS - GMAIL_READ_TOOLS)
+    assert bound & SERVER_TOOLS == GMAIL_READ_TOOLS
+    assert isolation_violations(factory, isolation_probe, fake) == []
+
+
+@pytest.mark.parametrize(("email", "telegram"), ISOLATION_CASES)
+async def test_agent_path_never_sees_a_write_tool_object(
+    tmp_path: Path, isolation_probe: IsolationProbe, email: bool, telegram: bool
+) -> None:
+    settings = isolation_settings(tmp_path, email=email, telegram=telegram)
+    fake = ef.fake_send_factory(session_1_script())
+    factory = ModelFactoryRecorder(main_responder)
+
+    await run_isolated_graph(settings, fake, factory, isolation_probe)
+
+    [gmail] = isolation_probe.gmail_dicts
+    assert set(gmail) == GMAIL_READ_TOOLS
+    assert {tool.name for tool in gmail.values()} == GMAIL_READ_TOOLS
+    expected_sites = {
+        "build_agent",
+        "make_store_tools",
+        "make_search_tool",
+        "make_read_email_tool",
+        "create_deep_agent",
+    }
+    assert set(isolation_probe.seen) == expected_sites
+    for site, names in isolation_probe.seen.items():
+        assert not names & AGENT_FORBIDDEN_NAMES, site
+    assert isolation_probe.seen["make_read_email_tool"] & SERVER_TOOLS == {"read_email"}
+    assert len(isolation_probe.texts) == 4  # main + reader prompt, description, user
+    for text in [*isolation_probe.texts, *factory.main.system_prompts]:
+        assert mentioned_tools(text) == set()
+
+
+@pytest.mark.parametrize(("email", "telegram"), ISOLATION_CASES)
+async def test_agent_session_never_receives_a_send_call(
+    tmp_path: Path, isolation_probe: IsolationProbe, email: bool, telegram: bool
+) -> None:
+    settings = isolation_settings(tmp_path, email=email, telegram=telegram)
+    fake = ef.fake_send_factory(session_1_script())
+    factory = ModelFactoryRecorder(main_responder)
+
+    await run_isolated_graph(settings, fake, factory, isolation_probe)
+
+    assert fake.log.events == EXPECTED_SESSION_1_EVENTS
+    assert fake.opened == 1
+    assert len(fake.clients) == 1
+    assert fake.clients[0].connections == gmail_mcp.build_connections(settings)
+    assert [name for name, _ in fake.calls] == ["search_emails", "read_email"]
+    assert "call#1(send_email)" not in fake.log.events
+    assert isolation_probe.default_send_client_calls == 0
+
+
+async def test_isolation_checker_reports_a_leaky_read_only_filter(
+    tmp_path: Path,
+    isolation_probe: IsolationProbe,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control: a filter passing ``send_email`` through is reported."""
+    leak: dict[str, BaseTool] = {}
+    monkeypatch.setattr(gmail_mcp, "filter_read_only", leaky_filter(leak))
+    settings = isolation_settings(tmp_path, email=True, telegram=False)
+    fake = ef.fake_send_factory(session_1_script())
+    factory = ModelFactoryRecorder(main_responder)
+
+    await run_isolated_graph(settings, fake, factory, isolation_probe)
+
+    assert set(leak) == {"send_email"}
+    violations = isolation_violations(factory, isolation_probe, fake)
+    assert "build_agent saw send_email" in violations
+    assert any(v.startswith("build_agent got Gmail keys") for v in violations)
+    # build_agent itself still binds only today's sets (layer independence).
+    assert factory.main.bound_names() == EXPECTED_MAIN_BOUND
+    assert factory.reader.bound_names() == EXPECTED_READER_BOUND
+
+
+async def test_isolation_checker_reports_a_bound_and_called_send_tool(
+    tmp_path: Path,
+    isolation_probe: IsolationProbe,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control: a send tool handed to the main agent and called is
+    reported as bound, seen and called on session 1."""
+    leak: dict[str, BaseTool] = {}
+    monkeypatch.setattr(gmail_mcp, "filter_read_only", leaky_filter(leak))
+    original_builder = isolation_probe.agent_builder
+
+    def leaking_builder(
+        settings: Settings,
+        gmail: dict[str, BaseTool],
+        store: ArticleStore,
+        *,
+        model_factory: ModelFactory,
+    ) -> DigestAgent:
+        isolation_probe.inject = [gmail["send_email"]]
+        return original_builder(settings, gmail, store, model_factory=model_factory)
+
+    monkeypatch.setattr(isolation_probe, "agent_builder", leaking_builder)
+    settings = isolation_settings(tmp_path, email=True, telegram=True)
+    fake = ef.fake_send_factory(session_1_script())
+    factory = ModelFactoryRecorder(leaking_main_responder)
+
+    await run_isolated_graph(settings, fake, factory, isolation_probe)
+
+    violations = isolation_violations(factory, isolation_probe, fake)
+    assert "main bound send_email" in violations
+    assert "main bound Gmail tool send_email" in violations
+    assert "create_deep_agent saw send_email" in violations
+    assert "session 1 call_tool(send_email)" in violations
+    assert "call#1(send_email)" in fake.log.events
+    assert fake.calls[-1] == ("send_email", LEAK_ARGS)
+    assert not any(v.startswith("reader") for v in violations)
+
+
+def test_isolation_checker_detects_each_forbidden_name() -> None:
+    """Every write tool and non-allowlisted server tool counts as forbidden."""
+    assert ef.WRITE_TOOL_NAMES <= AGENT_FORBIDDEN_NAMES
+    assert AGENT_FORBIDDEN_NAMES == SERVER_TOOLS - GMAIL_READ_TOOLS
+    assert not AGENT_FORBIDDEN_NAMES & (EXPECTED_MAIN_BOUND | EXPECTED_READER_BOUND)
+    for name in sorted(AGENT_FORBIDDEN_NAMES):
+        assert mentioned_tools(f"call {name} now") == {name}
+        assert names_in(
+            {
+                "tools": [
+                    StructuredTool.from_function(
+                        func=lambda: "", name=name, description="x"
+                    )
+                ]
+            }
+        ) >= {name}

@@ -4054,3 +4054,76 @@ Checks run:
   and `pyrefly check` are clean (0 errors). At run time, `ruff check .` reports F401
   and F811 only in `tests/test_agent.py`, which another task (T081) is editing; that
   file is not mine. No test file was edited.
+
+## T081 — Agent isolation test: main agent and reader tool lists contain no write tool with --email on and off (19 offered tools)
+
+What was built: 20 new test cases (8 functions) appended to `tests/test_agent.py`.
+The diff is additions only (463 added, 0 removed lines; learnings T062). The new import
+lines are `import socket`, `from functools import partial`, `from newsletter_digest
+import config, gmail_mcp` and `from tests import email_fixture as ef`. Each is a new
+line, and no name was added to an existing import line.
+
+- **Harness.** The graph tests reuse `ModelFactoryRecorder`, `main_responder`,
+  `reader_responder`, `search_text`, `email_body` and `GRAPH_TIMEOUT_S`.
+  `run_real_graph` itself takes a `FakeGmail`, so I added a sibling,
+  `run_isolated_graph`. It calls `run_digest` with
+  `gmail_opener=partial(gmail_mcp.open_gmail_tools, client_factory=fake)`, so the real
+  `load_mcp_tools` and `filter_read_only` run over the T072 `FakeSendFactory`, whose
+  session 1 offers all 19 tool names of 1.1.11 (a test asserts this). The real
+  `build_agent` and the deepagents graph run with the scripted models.
+- **Settings** come from `Settings.build` with synthetic values. There are 4 cases:
+  email off/on x telegram off/on. The Telegram case was cheap, because `build` only
+  validates the env. `email_env` and `telegram_env` are passed in every case, so the
+  flag-off cases also show that `build` ignores them. `EMAIL_TO` is
+  `reader@example.com, Team.Lead@example.org,READER@example.com`, which gives 2
+  recipients after case-insensitive de-duplication.
+- **Single email (decision).** The fake's replies are keyed by tool name, not by
+  arguments, so session 1 finds only `msg-alpha`. The reader still runs once, so the
+  model is bound. I did not subclass the fake to answer `read_email` per argument.
+  The expected session-1 log is exact: `open#1, list#1, call#1(search_emails),
+  call#1(read_email), close#1`.
+- **`IsolationProbe`** wraps, through monkeypatch only, `agent.make_store_tools`,
+  `make_search_tool`, `make_read_email_tool`, `build_user_message` and
+  `create_deep_agent`. The originals still run. The `agent_builder` wraps the real
+  `build_agent`. The probe records every `name` attribute and every string dict key
+  that it finds (recursively) in what each site receives. It also records the prompt
+  texts (main and reader system prompts, the reader description, the user message).
+  It patches `gmail_mcp._default_send_client` with a counting guard, in addition to
+  the T077 conftest guard.
+- **`isolation_violations(...)`** is the checker. It returns one readable line per
+  breach:
+  - a bound set that differs from `MAIN_TOOLS | {read_file, task}` or
+    `READER_TOOLS | {read_file}`;
+  - any forbidden name, meaning `WRITE_TOOL_NAMES`, or any of the 19 server names
+    other than `search_emails` and `read_email`, that is bound, seen by a site, or
+    named as a whole word in a prompt (the agents' and deepagents' system prompts
+    included);
+  - Gmail keys other than the two read tools reaching `build_agent`;
+  - a session count other than 1;
+  - any non-read `call_tool` on session 1;
+  - a real send client being built.
+
+  The positive tests assert that the checker returns `[]` and also make the key
+  assertions directly, so a failure shows a clear diff.
+- **Negative controls** (no source edits):
+  1. `gmail_mcp.filter_read_only` is patched to pass `send_email` through. The checker
+     reports `build_agent saw send_email` and the bad Gmail key set. The bound sets
+     still equal today's sets, because `build_agent` picks `gmail["read_email"]` by
+     key. So the seen-object check, not the bound-name check, is what catches a
+     broken layer 1. This is the "layers are independent" property of ED-3.
+  2. Same leak, plus a builder that injects the leaked raw tool into the main
+     agent's tools, plus a main responder that calls `send_email` once after
+     finalising. The checker reports it as bound, seen by `create_deep_agent`, and
+     `session 1 call_tool(send_email)`, and the fake records the exact call.
+  - A pure test also checks that every one of the 17 forbidden names is detected by
+    the prompt scan and by the name walk.
+- **Findings:** none against ED-3, ED-17 or EP-1 (safety net 3). With email on or off,
+  and with telegram on or off, the bound names are exactly today's sets. No write-tool
+  name reaches any agent-path builder or prompt. Session 1 only ever receives
+  `search_emails` and `read_email`. No second session or send client is created by
+  `run_digest`.
+- Checks: the new tests give 20 passed (2.0 s). `tests/test_agent.py` gives 56 passed.
+  The full suite gives 4203 passed, 2 deselected and 2 xfailed. `ruff format`,
+  `ruff check .` and `pyrefly check` are clean (0 errors). Coverage of `agent.py` from
+  `test_agent.py` is 87%, measured with a throwaway `uv run --with pytest-cov`; no
+  dependency was added.
