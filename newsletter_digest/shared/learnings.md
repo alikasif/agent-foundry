@@ -432,3 +432,10 @@
 - (T072) pyrefly infers `["must-read"] * k` as `list[str]`, so it is not assignable to
   `list[Priority]` (a Literal alias), even with the annotation. Build the list in a
   comprehension over a `tuple[tuple[Priority, int], ...]` instead.
+- (T069) `EXPECTED_DELIVERY_EDGES` (the T063 positive detector) is built from
+  `ONLY_PROJECT_IMPORTS`. A new `ONLY_PROJECT_IMPORTS` entry for a not-yet-written
+  module therefore turns the positive test and most real-tree mutants red on the stub
+  tree. Filter the derived set (`if source in DELIVERY_MODULES`) until the code exists.
+- (T069) In synthetic `make_modules` trees, `from newsletter_digest import X` is an edge
+  to X only if X is a key of the tree. Otherwise it counts as a package-root import, and
+  importer/forbidden rules miss it. Add `"X": ""` to the case.

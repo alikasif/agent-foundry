@@ -3640,3 +3640,84 @@ records them as done (for example "V24 DONE").
 - Full suite: 3502 passed, 2 xfailed with `tests/test_architecture.py` ignored. That file
   is T069's in-flight work (it had a failing self-test and E501s at the time); it scans
   `src/` only, so these test files do not affect it.
+
+## T069 — Architecture guard rules first: ED-2 negative import rules and ED-3 find_send_capability_violations
+
+Edited only `tests/test_architecture.py` (shared notes and learnings appended). The rules
+pass on the real (T068 stub) tree and on a synthetic `FINAL_EMAIL_TREE` built from EP-5.
+`git diff e41b124 -- tests/test_architecture.py` is 1242 `+` lines and 3 `-` lines.
+
+Hunks changed in the existing file (EP-6 item 2):
+1. Module docstring: rule 9 (email delivery) appended after rule 8 (added lines only).
+2. `EMAIL_MODULES = ("email_delivery", "email_render")` added after `DELIVERY_MODULES`.
+   `NEW_MODULES` gains `*EMAIL_MODULES`. This is one of the 3 modified lines: the one-line
+   tuple went over 88 columns, so ruff reflowed it to one item per line.
+3. `EMAIL_BANNED` added after `DELIVERY_BANNED`. `FORBIDDEN_PROJECT_IMPORTS`,
+   `ONLY_PROJECT_IMPORTS` and `ALLOWED_IMPORTERS` each gain two entries, and
+   `LANGCHAIN_FREE` gains `*EMAIL_MODULES` (all added lines).
+4. Email constants block after `SECRET_OWNER`: `LAZY_ONLY_MODULES`, `SEND_NAMES`,
+   `WRITE_TOOL_NAMES` (13 names), `SEND_CAPABLE`, `NO_EMAIL_IMPORTERS` and others.
+5. `_lazy_only_targets`: `DELIVERY_MODULES` became `LAZY_ONLY_MODULES` in 2 lines (the
+   other 2 modified lines). With this, `find_eager_delivery_imports` covers both email
+   modules. Its message still ends "(TD-12)", left unchanged to keep the hunk small.
+6. New section "email delivery checkers (T069, ED-2/3)" before `_report`:
+   `find_imported_name_violations`, `find_lazy_email_import_violations`,
+   `find_send_capability_violations` and private helpers. All three are added to
+   `REAL_TREE_CHECKERS`.
+7. `_GMAIL_READ_SIDE`, `_GMAIL_SEND_SIDE`, `STUB_EMAIL_TREE`, `FINAL_EMAIL_TREE` and
+   `EMAIL_RULES` added after `FINAL_DELIVERY_TREE`.
+8. 58 `VIOLATION_CASES` and 33 `ALLOWED_CASES` appended at the end. Old ids are kept: a
+   scratch import of HEAD's copy shows the old lists (112 and 45) are exact prefixes. The
+   allowed cases include every rule in `EMAIL_RULES` × {stub tree, final tree}.
+9. `EXPECTED_DELIVERY_EDGES` (T063, positive) gains one line, `if source in
+   DELIVERY_MODULES`. It is built from `ONLY_PROJECT_IMPORTS`, so without the filter the
+   new email entries made the positive test and 10 T063 mutants demand email edges that
+   the stub tree does not have. T083 adds the email edges to the positive detector.
+10. `ONLY_IMPORTED_NAMES` gains `(email_render, render) -> {ENVIRONMENT, safe_url}` and
+    `(email_delivery, gmail_mcp) -> SEND_NAMES` (added lines).
+
+Decisions not covered by the spec:
+- Name limits: the only existing check was positive (`find_missing_delivery_wiring`).
+  The new negative `find_imported_name_violations` wraps the existing
+  `_imported_name_violations`, so the TD-2 limits (telegram/config, pdf/render) are now
+  also checked negatively on the real tree. "The names are actually used" stays with
+  T083.
+- ED-3 (c) vs ED-4: ED-4's `_send_attempt` looks up `GMAIL_SEND_TOOL_MAP["send_email"]`,
+  a string literal outside the dict literal. Read literally, (c) bans that, so the final
+  tree surfaced the conflict. Resolution: the `"send_email"` key of a
+  `GMAIL_SEND_TOOL_MAP[...]` subscript is allowed, but only on the send path (ED-3 layer
+  1: "a local string inside send_gmail_message"). A lookup outside it, or any other key,
+  is a violation.
+- `GMAIL_SEND_TOOL_MAP` must be exactly the literal `{"send_email": "send_email"}` at
+  module level of gmail_mcp. An extra entry, `dict(...)` or `**` merges are rejected
+  (FR-064, "only send_email may appear there").
+- Send path = `send_gmail_message` plus the module-level private (`_`-prefixed)
+  functions it reaches through direct `Name(...)` calls, transitively. A public helper
+  holding `call_tool` is a violation. `call_tool` is also banned as a Name, an import
+  alias or a code string (`getattr(s, "call_tool")`) outside the send path.
+- (a) also flags a star import from gmail_mcp outside the owners, and code strings equal
+  to a send name (`getattr(m, "SEND_MIME_TYPE")`). Docstrings and comments are skipped
+  (learnings T042).
+- (b) also flags send-name strings inside `open_gmail_tools`/`filter_read_only`, and a
+  `tool_map` default that is missing or anything other than the name `GMAIL_TOOL_MAP`
+  (positional and keyword-only forms are both handled).
+- "cli never imports email_render" is enforced twice: by `find_importer_violations` and
+  by `find_lazy_email_import_violations` (any nesting).
+
+Heads-up for T075 (cli): cli.py has no `from __future__ import annotations`, so a
+`_run_email_delivery(...) -> EmailOutcome` return annotation needs the name at import
+time. An `if TYPE_CHECKING:` import of `EmailOutcome` is module level (learnings T049),
+so `find_eager_delivery_imports` rejects it (ED-16: nothing at module level in cli names
+either email module). Use a string or `object` annotation, or a Protocol, rather than
+a module-level import. The rule is deliberately strict here and is not loosened.
+
+Tradeoffs: the synthetic final tree models EP-5 shapes and is not real code. T083 runs
+the real-tree mutants once T071-T075 exist. A scratch run against in-memory mutants of
+today's real tree checked that the rules fail: send map in `filter_read_only`,
+`tool_map` default `{}`, `draft_email` in `GMAIL_TOOL_MAP`, `call_tool` in
+`open_gmail_tools`, agent importing `send_gmail_message`, and module-level
+`email_delivery` in cli. Each was reported.
+
+Results: `uv run pytest -q tests/test_architecture.py`: 309 passed. Full suite: 3811
+passed, 2 deselected, 2 xfailed. ruff check clean; pyrefly 0 errors. `ruff format
+--check .` flags only a code block in `shared/designs.md` (not owned by this task).

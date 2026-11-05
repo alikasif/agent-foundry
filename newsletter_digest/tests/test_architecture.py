@@ -34,6 +34,14 @@ is imported or executed. The rules:
    `httpx.AsyncHTTPTransport` is built only in `telegram._default_transport` (netguard
    subclasses it); `telegram` passes no `verify=`; `cli` imports the delivery modules
    and fpdf only inside functions; and only `telegram` calls `SecretToken.reveal()`.
+9. Email delivery (ED-2, ED-3, ED-16): `email_delivery` and `email_render` import only
+   their listed project modules (and only the listed names of `gmail_mcp` and
+   `render`), never the agent, fetching or Telegram modules; `email_delivery` is
+   imported only by `cli`, inside `_deliver_by_email` or a function it calls, at
+   most once, and `email_render` only by `email_delivery`.
+   `find_send_capability_violations` keeps the send names, the Gmail write-tool name
+   literals and `call_tool` inside `gmail_mcp`'s send path and `email_delivery`, and
+   away from the agent's read-only tools.
 
 Each checker is a pure function over parsed modules, so the self-tests at the end feed
 it synthetic sources and prove that every rule can fail.
@@ -79,7 +87,16 @@ TIER_RANKS: dict[str, int] = {
 }
 
 DELIVERY_MODULES = ("delivery", "pdf", "telegram")
-NEW_MODULES = ("links", "netguard", "extract", "fetch", "enrich", *DELIVERY_MODULES)
+EMAIL_MODULES = ("email_delivery", "email_render")
+NEW_MODULES = (
+    "links",
+    "netguard",
+    "extract",
+    "fetch",
+    "enrich",
+    *DELIVERY_MODULES,
+    *EMAIL_MODULES,
+)
 GMAIL_SIDE = frozenset({"gmail_mcp", "tools", "store", "agent"})
 DELIVERY_BANNED = GMAIL_SIDE | {
     "fetch",
@@ -89,6 +106,22 @@ DELIVERY_BANNED = GMAIL_SIDE | {
     "llm",
     "prompts",
 }
+EMAIL_BANNED = frozenset(
+    {
+        "agent",
+        "tools",
+        "store",
+        "prompts",
+        "llm",
+        "fetch",
+        "enrich",
+        "netguard",
+        "extract",
+        "pdf",
+        "telegram",
+        "delivery",
+    }
+)
 FORBIDDEN_PROJECT_IMPORTS: dict[str, frozenset[str]] = {
     "enrich": GMAIL_SIDE,
     "fetch": GMAIL_SIDE | {"render"},
@@ -100,16 +133,22 @@ FORBIDDEN_PROJECT_IMPORTS: dict[str, frozenset[str]] = {
     "delivery": DELIVERY_BANNED,
     "pdf": DELIVERY_BANNED,
     "telegram": DELIVERY_BANNED,
+    "email_delivery": EMAIL_BANNED,
+    "email_render": EMAIL_BANNED,
 }
 ONLY_PROJECT_IMPORTS: dict[str, frozenset[str]] = {
     "telegram": frozenset({"config"}),
     "pdf": frozenset({"models", "render"}),
     "delivery": frozenset({"pdf", "telegram", "models", "config"}),
+    "email_delivery": frozenset({"gmail_mcp", "email_render", "models", "config"}),
+    "email_render": frozenset({"render", "models"}),
 }
 ALLOWED_IMPORTERS: dict[str, frozenset[str]] = {
     "delivery": frozenset({"cli"}),
     "pdf": frozenset({"delivery"}),
     "telegram": frozenset({"delivery"}),
+    "email_delivery": frozenset({"cli"}),
+    "email_render": frozenset({"email_delivery"}),
 }
 NO_PROJECT_IMPORTS = ("netguard", "extract", "links")
 STDLIB_ONLY = ("links",)
@@ -124,6 +163,7 @@ LANGCHAIN_FREE = (
     "render",
     "prompts",
     *DELIVERY_MODULES,
+    *EMAIL_MODULES,
 )
 LANGCHAIN_CORE_USERS_AMONG_NEW = frozenset({"enrich"})
 
@@ -188,6 +228,58 @@ TRANSPORT_SUBCLASS_OWNERS = frozenset({"netguard"})
 LAZY_IMPORTER = "cli"
 SECRET_REVEAL = "reveal"
 SECRET_OWNER = "telegram"
+
+# ---- Email delivery (ED-2, ED-3, ED-16; T069 negative rules)
+LAZY_ONLY_MODULES = (*DELIVERY_MODULES, *EMAIL_MODULES)
+EMAIL_DELIVERY_IMPORT = f"{PACKAGE}.email_delivery"
+EMAIL_RENDER_IMPORT = f"{PACKAGE}.email_render"
+LAZY_EMAIL_ENTRY = "_deliver_by_email"
+GMAIL_MODULE = "gmail_mcp"
+SEND_CAPABLE = frozenset({GMAIL_MODULE, "email_delivery"})
+SEND_NAMES = frozenset(
+    {
+        "GMAIL_SEND_TOOL_MAP",
+        "GMAIL_SEND_ARG_MAP",
+        "SEND_MIME_TYPE",
+        "OutgoingEmail",
+        "GmailSendError",
+        "GmailSendErrorKind",
+        "GmailSendReceipt",
+        "build_send_arguments",
+        "send_gmail_message",
+        "redact_addresses",
+        "_default_send_client",
+    }
+)
+WRITE_TOOL_NAMES = frozenset(
+    {
+        "send_email",
+        "draft_email",
+        "modify_email",
+        "delete_email",
+        "batch_modify_emails",
+        "batch_delete_emails",
+        "create_label",
+        "update_label",
+        "delete_label",
+        "get_or_create_label",
+        "create_filter",
+        "create_filter_from_template",
+        "delete_filter",
+    }
+)
+SEND_TOOL_MAP = "GMAIL_SEND_TOOL_MAP"
+SEND_TOOL_NAME = "send_email"
+SEND_ENTRY = "send_gmail_message"
+READ_TOOL_MAP = "GMAIL_TOOL_MAP"
+READ_SIDE_FUNCTIONS = ("open_gmail_tools", "filter_read_only")
+READ_FILTER = "filter_read_only"
+READ_FILTER_MAP_PARAMETER = "tool_map"
+CALL_TOOL = "call_tool"
+EMAIL_DELIVERY_BANNED_NAMES = frozenset(
+    {"open_gmail_tools", "filter_read_only", "load_mcp_tools"}
+)
+NO_EMAIL_IMPORTERS = frozenset({"agent", "tools", "prompts"})
 
 
 class ImportRef(NamedTuple):
@@ -441,9 +533,9 @@ def _lazy_only_targets(ref: ImportRef) -> list[str]:
     if _root(ref.target) == "fpdf":
         return [ref.target]
     if ref.target == PACKAGE:
-        return [f"{PACKAGE}.{n}" for n in ref.names if n in DELIVERY_MODULES]
+        return [f"{PACKAGE}.{n}" for n in ref.names if n in LAZY_ONLY_MODULES]
     parts = ref.target.split(".")
-    if parts[0] == PACKAGE and parts[1] in DELIVERY_MODULES:
+    if parts[0] == PACKAGE and parts[1] in LAZY_ONLY_MODULES:
         return [ref.target]
     return []
 
@@ -910,6 +1002,349 @@ def find_secret_reveal_violations(modules: Modules) -> list[str]:
     return violations
 
 
+# ------------------------------------------- email delivery checkers (T069, ED-2/3)
+
+
+def find_imported_name_violations(modules: Modules) -> list[str]:
+    """Report imports that take more than `ONLY_IMPORTED_NAMES` allows (negative).
+
+    Covers the TD-2 limits and the ED-2 ones: `email_render` takes only
+    `ENVIRONMENT` and `safe_url` from `render`, `email_delivery` only `SEND_NAMES`
+    from `gmail_mcp`. That the names are actually used is checked later (T083).
+    """
+    return _imported_name_violations(modules)
+
+
+def _loads(ref: ImportRef, dotted: str) -> bool:
+    """Return True if import `ref` loads module `dotted` (or something inside it)."""
+    return any(
+        target == dotted or target.startswith(f"{dotted}.")
+        for target in _lazy_only_targets(ref)
+    )
+
+
+def find_lazy_email_import_violations(modules: Modules) -> list[str]:
+    """Report cli imports of the email modules outside the `--email` path (ED-16).
+
+    cli never imports `email_render`. It imports `email_delivery` at most once
+    (T083 tightens this to exactly once), inside `_deliver_by_email` or a function
+    that `_deliver_by_email` calls directly.
+    """
+    cli = modules.get(LAZY_IMPORTER)
+    if cli is None:
+        return []
+    violations = [
+        f"cli.py:{ref.line}: cli imports {EMAIL_RENDER_IMPORT}; only email_delivery "
+        "may import it"
+        for ref in cli.imports
+        if _loads(ref, EMAIL_RENDER_IMPORT)
+    ]
+    refs = [ref for ref in cli.imports if _loads(ref, EMAIL_DELIVERY_IMPORT)]
+    if len(refs) > 1:
+        violations.append(
+            f"cli.py: {len(refs)} imports of {EMAIL_DELIVERY_IMPORT} "
+            f"(lines {[r.line for r in refs]}); at most one is allowed"
+        )
+    owners = _top_level_function_of_lines(cli)
+    entry_path = {LAZY_EMAIL_ENTRY} | _direct_callees(cli, LAZY_EMAIL_ENTRY)
+    for ref in refs:
+        owner = owners.get(ref.line)
+        if owner is not None and owner in entry_path:
+            continue
+        violations.append(
+            f"cli.py:{ref.line}: {EMAIL_DELIVERY_IMPORT} imported in "
+            f"{owner or '<module>'}, not in {LAZY_EMAIL_ENTRY} or a function it calls"
+        )
+    return violations
+
+
+def _top_level_function(
+    module: SourceModule, function: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Return module-level function `function` of `module`, or None."""
+    for stmt in module.tree.body:
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+            if stmt.name == function:
+                return stmt
+    return None
+
+
+def _node_identifiers(root: ast.AST) -> Iterator[tuple[str, int]]:
+    """Yield the names, attributes and imported names used anywhere under `root`."""
+    for node in ast.walk(root):
+        if isinstance(node, ast.Name):
+            yield node.id, node.lineno
+        elif isinstance(node, ast.Attribute):
+            yield node.attr, node.lineno
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            for alias in node.names:
+                yield alias.name.rsplit(".", 1)[-1], node.lineno
+                if alias.asname:
+                    yield alias.asname, node.lineno
+
+
+def _code_string_nodes(module: SourceModule, root: ast.AST) -> Iterator[ast.Constant]:
+    """Yield the string constants under `root`, skipping `module`'s docstrings."""
+    skip = _docstring_ids(module.tree)
+    for node in ast.walk(root):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) not in skip:
+                yield node
+
+
+def _parameter_default(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, parameter: str
+) -> ast.expr | None:
+    """Return the default expression of `parameter` (None if absent or no default)."""
+    args = function.args
+    positional = [*args.posonlyargs, *args.args]
+    padding: list[ast.expr | None] = [None] * (len(positional) - len(args.defaults))
+    defaults: list[ast.expr | None] = [*padding, *args.defaults]
+    pairs = [*zip(positional, defaults), *zip(args.kwonlyargs, args.kw_defaults)]
+    for arg, default in pairs:
+        if arg.arg == parameter:
+            return default
+    return None
+
+
+def _send_path_functions(module: SourceModule) -> set[str]:
+    """Return `send_gmail_message` plus the private helpers it reaches by calls."""
+    defined = {
+        stmt.name
+        for stmt in module.tree.body
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    if SEND_ENTRY not in defined:
+        return set()
+    path = {SEND_ENTRY}
+    pending = [SEND_ENTRY]
+    while pending:
+        for callee in _direct_callees(module, pending.pop()):
+            if callee.startswith("_") and callee in defined and callee not in path:
+                path.add(callee)
+                pending.append(callee)
+    return path
+
+
+def _send_path_nodes(module: SourceModule) -> set[int]:
+    """Return the ids of every node inside the send path of `module`."""
+    return {
+        node
+        for function in _send_path_functions(module)
+        for node in top_level_function_nodes(module, function)
+    }
+
+
+def _send_name_reference_violations(modules: Modules) -> list[str]:
+    """(a) Report send names taken from gmail_mcp outside gmail_mcp/email_delivery."""
+    gmail = f"{PACKAGE}.{GMAIL_MODULE}"
+    violations: list[str] = []
+    for name, module in modules.items():
+        if name in SEND_CAPABLE:
+            continue
+        for ref in module.imports:
+            if ref.target != gmail:
+                continue
+            violations.extend(
+                f"{name}.py:{ref.line}: {name} imports {item} from {GMAIL_MODULE}; "
+                "only gmail_mcp and email_delivery may use the send names"
+                for item in ref.names
+                if item in SEND_NAMES
+            )
+            if "*" in ref.names:
+                violations.append(
+                    f"{name}.py:{ref.line}: star import from {GMAIL_MODULE}"
+                )
+        for target, node in resolved_references(module):
+            head, _, attr = target.rpartition(".")
+            if isinstance(node, ast.Attribute) and head == gmail and attr in SEND_NAMES:
+                violations.append(
+                    f"{name}.py:{node.lineno}: {name} references "
+                    f"{GMAIL_MODULE}.{attr}; only gmail_mcp and email_delivery may"
+                )
+        violations.extend(
+            f"{name}.py:{node.lineno}: string {node.value!r} names a send name"
+            for node in _code_string_nodes(module, module.tree)
+            if node.value in SEND_NAMES
+        )
+    return violations
+
+
+def _read_side_violations(modules: Modules) -> list[str]:
+    """(b) Report send names in the agent's read-only path inside gmail_mcp."""
+    gmail = modules.get(GMAIL_MODULE)
+    if gmail is None:
+        return []
+    violations: list[str] = []
+    for function in READ_SIDE_FUNCTIONS:
+        node = _top_level_function(gmail, function)
+        if node is None:
+            continue
+        violations.extend(
+            f"gmail_mcp.py:{line}: {function} references {ident}; the read-only "
+            "agent path never touches the send side"
+            for ident, line in _node_identifiers(node)
+            if ident in SEND_NAMES
+        )
+        violations.extend(
+            f"gmail_mcp.py:{text.lineno}: {function} holds string {text.value!r}"
+            for text in _code_string_nodes(gmail, node)
+            if text.value in SEND_NAMES
+        )
+    read_filter = _top_level_function(gmail, READ_FILTER)
+    if read_filter is None:
+        return violations
+    default = _parameter_default(read_filter, READ_FILTER_MAP_PARAMETER)
+    if not (isinstance(default, ast.Name) and default.id == READ_TOOL_MAP):
+        shown = "missing" if default is None else ast.unparse(default)
+        violations.append(
+            f"gmail_mcp.py:{read_filter.lineno}: {READ_FILTER}'s "
+            f"{READ_FILTER_MAP_PARAMETER} default is {shown}, not {READ_TOOL_MAP}"
+        )
+    return violations
+
+
+def _send_tool_map_sites(gmail: SourceModule) -> tuple[list[str], set[int]]:
+    """Check the `GMAIL_SEND_TOOL_MAP` literal; return violations and allowed ids.
+
+    Allowed are the `"send_email"` key and value of the module-level dict literal
+    and the `GMAIL_SEND_TOOL_MAP["send_email"]` lookup inside the send path.
+    """
+    violations: list[str] = []
+    allowed: set[int] = set()
+    for stmt in gmail.tree.body:
+        if isinstance(stmt, ast.Assign):
+            targets, value = stmt.targets, stmt.value
+        elif isinstance(stmt, ast.AnnAssign):
+            targets, value = [stmt.target], stmt.value
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == SEND_TOOL_MAP for t in targets):
+            continue
+        items = [*value.keys, *value.values] if isinstance(value, ast.Dict) else []
+        exact = len(items) == 2 and all(
+            isinstance(item, ast.Constant) and item.value == SEND_TOOL_NAME
+            for item in items
+        )
+        if not exact:
+            violations.append(
+                f"gmail_mcp.py:{stmt.lineno}: {SEND_TOOL_MAP} must be the literal "
+                f"{{{SEND_TOOL_NAME!r}: {SEND_TOOL_NAME!r}}}"
+            )
+        allowed.update(
+            id(item)
+            for item in items
+            if isinstance(item, ast.Constant) and item.value == SEND_TOOL_NAME
+        )
+    send_path = _send_path_nodes(gmail)
+    allowed.update(
+        id(node.slice)
+        for node in ast.walk(gmail.tree)
+        if isinstance(node, ast.Subscript)
+        and id(node) in send_path
+        and isinstance(node.value, ast.Name)
+        and node.value.id == SEND_TOOL_MAP
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value == SEND_TOOL_NAME
+    )
+    return violations, allowed
+
+
+def _write_tool_literal_violations(modules: Modules) -> list[str]:
+    """(c) Report Gmail write-tool names as code strings outside the send map."""
+    violations: list[str] = []
+    allowed: set[int] = set()
+    if GMAIL_MODULE in modules:
+        violations, allowed = _send_tool_map_sites(modules[GMAIL_MODULE])
+    for name, module in modules.items():
+        violations.extend(
+            f"{name}.py:{node.lineno}: string {node.value!r} names a Gmail write tool "
+            f"outside {SEND_TOOL_MAP}"
+            for node in _code_string_nodes(module, module.tree)
+            if node.value in WRITE_TOOL_NAMES
+            and not (name == GMAIL_MODULE and id(node) in allowed)
+        )
+    return violations
+
+
+def _call_tool_violations(modules: Modules) -> list[str]:
+    """(d) Report `call_tool` outside `send_gmail_message` and its private helpers."""
+    violations: list[str] = []
+    for name, module in modules.items():
+        allowed = _send_path_nodes(module) if name == GMAIL_MODULE else set()
+        where = f"outside {GMAIL_MODULE}.{SEND_ENTRY} and its private helpers"
+        violations.extend(
+            f"{name}.py:{node.lineno}: references {CALL_TOOL} {where}"
+            for node in ast.walk(module.tree)
+            if (
+                (isinstance(node, ast.Attribute) and node.attr == CALL_TOOL)
+                or (isinstance(node, ast.Name) and node.id == CALL_TOOL)
+            )
+            and id(node) not in allowed
+        )
+        violations.extend(
+            f"{name}.py:{node.lineno}: imports {CALL_TOOL} {where}"
+            for node in ast.walk(module.tree)
+            if isinstance(node, ast.Import | ast.ImportFrom)
+            and any(
+                CALL_TOOL in (alias.name.rsplit(".", 1)[-1], alias.asname)
+                for alias in node.names
+            )
+        )
+        violations.extend(
+            f"{name}.py:{node.lineno}: string {CALL_TOOL!r} {where}"
+            for node in _code_string_nodes(module, module.tree)
+            if node.value == CALL_TOOL
+        )
+    return violations
+
+
+def _email_delivery_read_side_violations(modules: Modules) -> list[str]:
+    """(e) Report the agent's tool loaders referenced from email_delivery."""
+    module = modules.get("email_delivery")
+    if module is None:
+        return []
+    found = [*_node_identifiers(module.tree)]
+    found += [(n.value, n.lineno) for n in _code_string_nodes(module, module.tree)]
+    return [
+        f"email_delivery.py:{line}: email_delivery references {ident}; it sends "
+        "only through gmail_mcp.send_gmail_message"
+        for ident, line in found
+        if ident in EMAIL_DELIVERY_BANNED_NAMES
+    ]
+
+
+def _agent_email_import_violations(modules: Modules) -> list[str]:
+    """(f) Report agent, tools or prompts importing an email module."""
+    return [
+        f"{edge.source}.py:{edge.line}: {edge.source} -> {edge.target}: the agent "
+        "side never imports the email modules"
+        for edge in all_edges(modules)
+        if edge.source in NO_EMAIL_IMPORTERS and edge.target in EMAIL_MODULES
+    ]
+
+
+def find_send_capability_violations(modules: Modules) -> list[str]:
+    """Report send capability outside gmail_mcp's send path (ED-3 layer 4).
+
+    (a) the send names come from gmail_mcp only into gmail_mcp and email_delivery;
+    (b) `open_gmail_tools` and `filter_read_only` use no send name and the filter's
+    `tool_map` default is `GMAIL_TOOL_MAP`; (c) a Gmail write-tool name is a code
+    string only in the `GMAIL_SEND_TOOL_MAP` literal (and its `"send_email"` lookup
+    on the send path); (d) `call_tool` only in `send_gmail_message` and its private
+    helpers; (e) email_delivery never touches the agent's tool loaders; (f) agent,
+    tools and prompts never import an email module.
+    """
+    return [
+        *_send_name_reference_violations(modules),
+        *_read_side_violations(modules),
+        *_write_tool_literal_violations(modules),
+        *_call_tool_violations(modules),
+        *_email_delivery_read_side_violations(modules),
+        *_agent_email_import_violations(modules),
+    ]
+
+
 def _report(violations: list[str]) -> str:
     """Format violations as one offending edge or site per line."""
     return "architecture violations:\n  " + "\n  ".join(violations)
@@ -946,6 +1381,9 @@ REAL_TREE_CHECKERS: list[Checker] = [
     find_fpdf_violations,
     find_eager_delivery_imports,
     find_secret_reveal_violations,
+    find_imported_name_violations,
+    find_lazy_email_import_violations,
+    find_send_capability_violations,
 ]
 
 
@@ -1074,6 +1512,284 @@ FINAL_DELIVERY_TREE: dict[str, str] = {
         """,
 }
 """A synthetic tree shaped like the TP-5 contracts, which every new rule must allow."""
+
+_GMAIL_READ_SIDE = """
+        from contextlib import AsyncExitStack, asynccontextmanager
+
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools
+
+        from newsletter_digest.config import GMAIL_MCP_PACKAGE, Settings
+        from newsletter_digest.models import EmailRef
+
+        SERVER_NAME = "gmail"
+        GMAIL_TOOL_MAP: dict[str, str] = {
+            "search_emails": "search_emails",
+            "read_email": "read_email",
+        }
+
+        def build_connections(settings: Settings) -> dict[str, dict[str, object]]:
+            return {SERVER_NAME: {"command": settings.gmail_mcp_command}}
+
+        def filter_read_only(tools, tool_map: dict[str, str] = GMAIL_TOOL_MAP):
+            '''Default-deny allowlist; never send_email or draft_email.'''
+            offered = {tool.name: tool for tool in tools}
+            return {logical: offered[server] for logical, server in tool_map.items()}
+
+        @asynccontextmanager
+        async def open_gmail_tools(settings, *, client_factory=MultiServerMCPClient):
+            '''Read-only tools for the agent; no call_tool here.'''
+            client = client_factory(build_connections(settings))
+            async with AsyncExitStack() as stack:
+                session = await stack.enter_async_context(client.session(SERVER_NAME))
+                tools = await load_mcp_tools(session, server_name=SERVER_NAME)
+                yield filter_read_only(tools)
+        """
+
+_GMAIL_SEND_SIDE = """
+        import shutil
+        from dataclasses import dataclass
+        from enum import StrEnum
+
+        import anyio
+
+        from newsletter_digest.config import EMAIL_ADDRESS_RE, MAX_EMAIL_RECIPIENTS
+
+        # logical -> server tool name. Never merged into GMAIL_TOOL_MAP.
+        GMAIL_SEND_TOOL_MAP: dict[str, str] = {"send_email": "send_email"}
+        GMAIL_SEND_ARG_MAP: dict[str, str] = {
+            "to": "to",
+            "subject": "subject",
+            "text_body": "body",
+            "html_body": "htmlBody",
+            "mime_type": "mimeType",
+        }
+        SEND_MIME_TYPE = "multipart/alternative"
+
+        @dataclass(frozen=True)
+        class OutgoingEmail:
+            to: tuple[str, ...]
+            subject: str
+            text_body: str
+            html_body: str
+
+        class GmailSendErrorKind(StrEnum):
+            INVALID_MESSAGE = "invalid_message"
+            START_FAILED = "start_failed"
+            TOOL_MISSING = "tool_missing"
+
+        class GmailSendError(Exception):
+            '''Never retried once call_tool was issued.'''
+
+        @dataclass(frozen=True)
+        class GmailSendReceipt:
+            message_id: str
+            session_starts: int
+
+        def build_send_arguments(message: OutgoingEmail) -> dict[str, object]:
+            if not message.to or len(message.to) > MAX_EMAIL_RECIPIENTS:
+                raise GmailSendError(GmailSendErrorKind.INVALID_MESSAGE)
+            if not all(EMAIL_ADDRESS_RE.fullmatch(a) for a in message.to):
+                raise GmailSendError(GmailSendErrorKind.INVALID_MESSAGE)
+            values = {
+                "to": list(message.to),
+                "subject": message.subject,
+                "text_body": message.text_body,
+                "html_body": message.html_body,
+                "mime_type": SEND_MIME_TYPE,
+            }
+            return {GMAIL_SEND_ARG_MAP[key]: value for key, value in values.items()}
+
+        def redact_addresses(text: str, extra=()) -> str:
+            return text
+
+        def _default_send_client(connections) -> MultiServerMCPClient:
+            return MultiServerMCPClient(connections)
+
+        async def _list_all_tools(session):
+            result = await session.list_tools(cursor=None)
+            return list(result.tools)
+
+        async def _send_attempt(state, settings, args, factory, start_timeout, timeout):
+            client = factory(build_connections(settings))
+            async with AsyncExitStack() as stack:
+                with anyio.fail_after(start_timeout):
+                    opened = client.session(SERVER_NAME)
+                    session = await stack.enter_async_context(opened)
+                    tools = await _list_all_tools(session)
+                wanted = GMAIL_SEND_TOOL_MAP["send_email"]
+                tool = next((t for t in tools if t.name == wanted), None)
+                if tool is None:
+                    state.deterministic = GmailSendErrorKind.TOOL_MISSING
+                    return
+                state.phase = "call"
+                with anyio.fail_after(timeout):
+                    state.reply = await session.call_tool(tool.name, args)
+                state.phase = "done"
+
+        async def send_gmail_message(
+            settings: Settings,
+            message: OutgoingEmail,
+            *,
+            send_timeout: float,
+            client_factory=None,
+            start_timeout: float = 60.0,
+            retry_pause: float = 2.0,
+            sleep=anyio.sleep,
+        ) -> GmailSendReceipt:
+            args = build_send_arguments(message)
+            if shutil.which(settings.gmail_mcp_command) is None:
+                raise GmailSendError(GmailSendErrorKind.START_FAILED)
+            factory = client_factory or _default_send_client
+            state = object()
+            await _send_attempt(
+                state, settings, args, factory, start_timeout, send_timeout
+            )
+            return GmailSendReceipt(state.reply, 1)
+        """
+
+STUB_EMAIL_TREE: dict[str, str] = {
+    "cli": (
+        "from newsletter_digest.agent import run_digest\n"
+        "from newsletter_digest.gmail_mcp import GmailMCPError\n"
+    ),
+    "agent": "from newsletter_digest.gmail_mcp import open_gmail_tools\n",
+    "tools": "from newsletter_digest.gmail_mcp import read_email_text\n",
+    "prompts": "",
+    "config": "",
+    "models": "",
+    "render": "",
+    "gmail_mcp": _GMAIL_READ_SIDE,
+    "email_render": (
+        '"""Allowed project imports: render (ENVIRONMENT, safe_url only), models."""\n'
+    ),
+    "email_delivery": (
+        '"""Allowed project imports: gmail_mcp (send names only), email_render,\n'
+        'models and config. Only cli imports it, lazily."""\n'
+    ),
+}
+"""The T068 docstring-only email stubs beside today's read-only gmail_mcp shape."""
+
+FINAL_EMAIL_TREE: dict[str, str] = {
+    "cli": """
+        from functools import partial
+
+        import anyio
+        from newsletter_digest.agent import run_digest
+        from newsletter_digest.config import EMAIL_ENV_VARS, Settings
+        from newsletter_digest.gmail_mcp import GmailMCPError
+
+        def _deliver_to_telegram(reading_list, html_path, settings: Settings) -> bool:
+            pdf_path, reason = _run_delivery(reading_list, html_path, settings)
+            return reason is None
+
+        def _run_delivery(reading_list, html_path, settings: Settings):
+            try:
+                from newsletter_digest.delivery import deliver_reading_list, redact
+            except Exception as exc:
+                return None, type(exc).__name__
+            run = partial(deliver_reading_list, reading_list, html_path, settings)
+            outcome = anyio.run(run)
+            return outcome.pdf_path, redact(outcome.reason or "")
+
+        def _deliver_by_email(reading_list, html_path, settings: Settings) -> bool:
+            '''Print one Email: line; never call_tool or send_email directly.'''
+            outcome = _run_email_delivery(reading_list, html_path, settings)
+            print(f"Email: {outcome.status}")
+            return outcome.delivered
+
+        def _run_email_delivery(reading_list, html_path, settings: Settings):
+            try:
+                from newsletter_digest.email_delivery import (
+                    EmailOutcome,
+                    redact_addresses,
+                    send_reading_list_email,
+                )
+            except Exception as exc:
+                return type(exc).__name__
+            run = partial(send_reading_list_email, reading_list, html_path, settings)
+            try:
+                return anyio.run(run)
+            except Exception as exc:
+                return EmailOutcome(reason=redact_addresses(type(exc).__name__))
+        """,
+    "agent": "from newsletter_digest.gmail_mcp import open_gmail_tools\n",
+    "tools": (
+        "from newsletter_digest.gmail_mcp import read_email_text, search_email_refs\n"
+    ),
+    "prompts": '"""The agent never sends email (no send_email tool)."""\n',
+    "config": "",
+    "models": "",
+    "render": "ENVIRONMENT = object()\ndef safe_url(url: str) -> str | None: ...\n",
+    "gmail_mcp": _GMAIL_READ_SIDE + _GMAIL_SEND_SIDE,
+    "email_render": """
+        from newsletter_digest.models import ReadingList
+        from newsletter_digest.render import ENVIRONMENT, safe_url
+
+        EMAIL_TEMPLATE_NAME = "reading_list_email.html.j2"
+
+        def email_link(url: str | None) -> str | None:
+            return safe_url(url) if url else None
+
+        def render_email(rl: ReadingList, *, html_name: str, budget: int = 95_000):
+            template = ENVIRONMENT.get_template(EMAIL_TEMPLATE_NAME)
+            return template.render(rl=rl, html_name=html_name)
+        """,
+    "email_delivery": """
+        '''Sends through gmail_mcp.send_gmail_message, never load_mcp_tools.'''
+        from pathlib import Path
+
+        from newsletter_digest.config import Settings
+        from newsletter_digest.email_render import render_email
+        from newsletter_digest.gmail_mcp import (
+            GmailSendError,
+            GmailSendErrorKind,
+            GmailSendReceipt,
+            OutgoingEmail,
+            redact_addresses,
+            send_gmail_message,
+        )
+        from newsletter_digest.models import ReadingList
+
+        __all__ = ["EmailOutcome", "redact_addresses", "send_reading_list_email"]
+
+        def failure_reason(err: GmailSendError, settings: Settings) -> str:
+            if err.kind is GmailSendErrorKind.START_FAILED:
+                return "the Gmail MCP server did not start"
+            return redact_addresses(err.detail, extra=settings.email_to)
+
+        async def send_reading_list_email(
+            reading_list: ReadingList,
+            html_path: Path,
+            settings: Settings,
+            *,
+            sender=send_gmail_message,
+            renderer=render_email,
+        ):
+            content = renderer(reading_list, html_name=html_path.name)
+            message = OutgoingEmail(settings.email_to, "s", content.text, content.html)
+            receipt: GmailSendReceipt = await sender(
+                settings, message, send_timeout=settings.email_send_timeout
+            )
+            return receipt.message_id
+        """,
+}
+"""A synthetic tree shaped like the EP-5 email contracts; every rule must allow it."""
+
+EMAIL_RULES: tuple[Checker, ...] = (
+    find_forbidden_project_imports,
+    find_only_project_import_violations,
+    find_importer_violations,
+    find_imported_name_violations,
+    find_eager_delivery_imports,
+    find_lazy_email_import_violations,
+    find_send_capability_violations,
+    find_gmail_parameters,
+    find_langchain_imports,
+    find_layer_violations,
+    find_cycles,
+)
+"""The rules T069 adds or extends; each must allow both email trees."""
 
 
 VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
@@ -1700,6 +2416,444 @@ VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
         },
         "delivery.py:2: string 'reveal'",
     ),
+    # ---- Email delivery (ED-2, ED-3, ED-16; T069)
+    (
+        find_forbidden_project_imports,
+        {"email_delivery": "from newsletter_digest.telegram import redact\n"},
+        "email_delivery -> telegram is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {
+            "email_delivery": (
+                "def f() -> None:\n    from newsletter_digest import agent\n"
+            ),
+            "agent": "",
+        },
+        "email_delivery.py:2: email_delivery -> agent is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {"email_delivery": "from .delivery import deliver_reading_list\n"},
+        "email_delivery -> delivery is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {"email_render": "from newsletter_digest.pdf import build_pdf\n"},
+        "email_render -> pdf is banned",
+    ),
+    (
+        find_forbidden_project_imports,
+        {"email_render": "import newsletter_digest.fetch\n"},
+        "email_render -> fetch is banned",
+    ),
+    (
+        find_only_project_import_violations,
+        {"email_delivery": "from newsletter_digest.telegram import redact\n"},
+        "email_delivery -> telegram: email_delivery may import only config, "
+        "email_render, gmail_mcp, models",
+    ),
+    (
+        find_only_project_import_violations,
+        {"email_render": "from newsletter_digest.gmail_mcp import redact_addresses\n"},
+        "email_render -> gmail_mcp: email_render may import only models, render",
+    ),
+    (
+        find_only_project_import_violations,
+        {"email_render": "from newsletter_digest.config import Settings\n"},
+        "email_render -> config: email_render may import only models, render",
+    ),
+    (
+        find_layer_violations,
+        {"email_render": "from newsletter_digest import gmail_mcp\n", "gmail_mcp": ""},
+        "email_render (tier 4) -> gmail_mcp (tier 4)",
+    ),
+    (
+        find_importer_violations,
+        {"tools": "from newsletter_digest.email_delivery import redact_addresses\n"},
+        "tools -> email_delivery: only cli may import email_delivery",
+    ),
+    (
+        find_importer_violations,
+        {
+            "cli": "def f() -> None:\n    from newsletter_digest import email_render\n",
+            "email_render": "",
+        },
+        "cli.py:2: cli -> email_render: only email_delivery may import email_render",
+    ),
+    (
+        find_importer_violations,
+        {"prompts": "from .email_render import to_email_ascii\n"},
+        "prompts -> email_render: only email_delivery may import email_render",
+    ),
+    (
+        find_imported_name_violations,
+        {"email_render": "from newsletter_digest.render import ENVIRONMENT, slug\n"},
+        "email_render takes slug from render; only ENVIRONMENT, safe_url",
+    ),
+    (
+        find_imported_name_violations,
+        {"email_render": "from newsletter_digest import render\n"},
+        "email_render.py:1: imports the render module",
+    ),
+    (
+        find_imported_name_violations,
+        {
+            "email_delivery": (
+                "from newsletter_digest.gmail_mcp import open_gmail_tools\n"
+            )
+        },
+        "email_delivery takes open_gmail_tools from gmail_mcp",
+    ),
+    (
+        find_imported_name_violations,
+        {"email_delivery": "import newsletter_digest.gmail_mcp as g\n"},
+        "email_delivery takes <module> from gmail_mcp",
+    ),
+    (
+        find_imported_name_violations,
+        {"telegram": "from newsletter_digest.config import SecretToken, Settings\n"},
+        "telegram takes Settings from config; only SecretToken",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "from newsletter_digest.email_delivery import redact_addresses\n"},
+        f"cli.py:1: module-level import of {EMAIL_DELIVERY_IMPORT}",
+    ),
+    (
+        find_eager_delivery_imports,
+        {"cli": "from newsletter_digest import email_render\n"},
+        f"cli.py:1: module-level import of {EMAIL_RENDER_IMPORT}",
+    ),
+    (
+        find_eager_delivery_imports,
+        {
+            "cli": (
+                "from typing import TYPE_CHECKING\n"
+                "if TYPE_CHECKING:\n"
+                "    from newsletter_digest.email_delivery import EmailOutcome\n"
+            )
+        },
+        f"cli.py:3: module-level import of {EMAIL_DELIVERY_IMPORT}",
+    ),
+    (
+        find_lazy_email_import_violations,
+        {"cli": "import newsletter_digest.email_delivery\n"},
+        "cli.py:1: newsletter_digest.email_delivery imported in <module>, not in "
+        "_deliver_by_email",
+    ),
+    (
+        find_lazy_email_import_violations,
+        {
+            "cli": (
+                "def _deliver_by_email() -> None:\n"
+                "    _run_email_delivery()\n"
+                "def _run_email_delivery() -> None:\n"
+                "    from newsletter_digest.email_delivery import EmailOutcome\n"
+                "    from newsletter_digest.email_delivery import redact_addresses\n"
+            )
+        },
+        f"cli.py: 2 imports of {EMAIL_DELIVERY_IMPORT} (lines [4, 5])",
+    ),
+    (
+        find_lazy_email_import_violations,
+        {
+            "cli": (
+                "def _deliver_by_email() -> None:\n"
+                "    from newsletter_digest import email_delivery\n"
+                "def _report() -> None:\n"
+                "    from newsletter_digest.email_delivery import redact_addresses\n"
+            )
+        },
+        "cli.py:4: newsletter_digest.email_delivery imported in _report, not in "
+        "_deliver_by_email or a function it calls",
+    ),
+    (
+        find_lazy_email_import_violations,
+        {
+            "cli": (
+                "def _deliver_by_email() -> None:\n"
+                "    _run_email_delivery()\n"
+                "def _run_email_delivery() -> None:\n"
+                "    _load()\n"
+                "def _load() -> None:\n"
+                "    from newsletter_digest.email_delivery import EmailOutcome\n"
+            )
+        },
+        "cli.py:6: newsletter_digest.email_delivery imported in _load",
+    ),
+    (
+        find_lazy_email_import_violations,
+        {
+            "cli": (
+                "def _deliver_by_email() -> None:\n"
+                "    from newsletter_digest.email_render import render_email\n"
+            )
+        },
+        f"cli.py:2: cli imports {EMAIL_RENDER_IMPORT}; only email_delivery",
+    ),
+    (
+        find_send_capability_violations,
+        {"agent": "from newsletter_digest.gmail_mcp import send_gmail_message\n"},
+        "agent.py:1: agent imports send_gmail_message from gmail_mcp",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "tools": (
+                "from newsletter_digest import gmail_mcp\n"
+                "x = gmail_mcp.GMAIL_SEND_TOOL_MAP\n"
+            )
+        },
+        "tools.py:2: tools references gmail_mcp.GMAIL_SEND_TOOL_MAP",
+    ),
+    (
+        find_send_capability_violations,
+        {"cli": "def f() -> None:\n    from .gmail_mcp import redact_addresses\n"},
+        "cli.py:2: cli imports redact_addresses from gmail_mcp",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_render": (
+                "import newsletter_digest.gmail_mcp as g\nE = g.OutgoingEmail\n"
+            )
+        },
+        "email_render.py:2: email_render references gmail_mcp.OutgoingEmail",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "prompts": (
+                "def f(m: object) -> object:\n    return getattr(m, 'SEND_MIME_TYPE')\n"
+            )
+        },
+        "prompts.py:2: string 'SEND_MIME_TYPE' names a send name",
+    ),
+    (
+        find_send_capability_violations,
+        {"enrich": "from newsletter_digest.gmail_mcp import *\n"},
+        "enrich.py:1: star import from gmail_mcp",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "GMAIL_TOOL_MAP = {}\n"
+                "GMAIL_SEND_TOOL_MAP = {'send_email': 'send_email'}\n"
+                "async def open_gmail_tools(settings: object):\n"
+                "    both = {**GMAIL_TOOL_MAP, **GMAIL_SEND_TOOL_MAP}\n"
+                "    yield filter_read_only([], both)\n"
+            )
+        },
+        "gmail_mcp.py:4: open_gmail_tools references GMAIL_SEND_TOOL_MAP",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "def filter_read_only(tools, tool_map=GMAIL_SEND_TOOL_MAP):\n"
+                "    return {}\n"
+            )
+        },
+        "filter_read_only's tool_map default is GMAIL_SEND_TOOL_MAP, not "
+        "GMAIL_TOOL_MAP",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "def filter_read_only(tools, tool_map):\n    return {}\n"},
+        "gmail_mcp.py:1: filter_read_only's tool_map default is missing",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "def filter_read_only(tools, tool_map=GMAIL_TOOL_MAP):\n"
+                "    send_gmail_message(None, None)\n"
+            )
+        },
+        "gmail_mcp.py:2: filter_read_only references send_gmail_message",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "async def open_gmail_tools(settings: object):\n"
+                "    yield globals()['build_send_arguments']\n"
+            )
+        },
+        "gmail_mcp.py:2: open_gmail_tools holds string 'build_send_arguments'",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "FALLBACK = 'draft_email'\n"},
+        "gmail_mcp.py:1: string 'draft_email' names a Gmail write tool outside "
+        "GMAIL_SEND_TOOL_MAP",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "GMAIL_SEND_TOOL_MAP = {'send_email': 'draft_email'}\n"},
+        "string 'draft_email' names a Gmail write tool",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "GMAIL_SEND_TOOL_MAP: dict[str, str] = {\n"
+                "    'send_email': 'send_email',\n"
+                "    'draft': 'draft_email',\n"
+                "}\n"
+            )
+        },
+        "gmail_mcp.py:1: GMAIL_SEND_TOOL_MAP must be the literal "
+        "{'send_email': 'send_email'}",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "GMAIL_SEND_TOOL_MAP = dict(send_email='send_email')\n"},
+        "GMAIL_SEND_TOOL_MAP must be the literal",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "GMAIL_TOOL_MAP = {'read_email': 'read_email', "
+                "'send_email': 'send_email'}\n"
+            )
+        },
+        "gmail_mcp.py:1: string 'send_email' names a Gmail write tool",
+    ),
+    (
+        find_send_capability_violations,
+        {"tools": "SEND = {'send_email': 'send_email'}\n"},
+        "tools.py:1: string 'send_email' names a Gmail write tool",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "async def open_gmail_tools(settings: object):\n"
+                "    yield GMAIL_SEND_TOOL_MAP['send_email']\n"
+            )
+        },
+        "gmail_mcp.py:2: string 'send_email' names a Gmail write tool",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "async def send_gmail_message(session: object) -> None:\n"
+                "    await session.call_tool(GMAIL_SEND_TOOL_MAP['draft_email'], {})\n"
+            )
+        },
+        "gmail_mcp.py:2: string 'draft_email' names a Gmail write tool",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "async def open_gmail_tools(session: object):\n"
+                "    yield await session.call_tool('search_emails', {})\n"
+            )
+        },
+        "gmail_mcp.py:2: references call_tool outside gmail_mcp.send_gmail_message",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "agent": (
+                "async def f(session: object) -> None:\n"
+                "    await session.call_tool('x')\n"
+            )
+        },
+        "agent.py:2: references call_tool outside",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "async def send_gmail_message(session: object) -> None:\n"
+                "    await issue_call(session)\n"
+                "async def issue_call(session: object) -> None:\n"
+                "    await session.call_tool('x', {})\n"
+            )
+        },
+        "gmail_mcp.py:4: references call_tool outside",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "async def send_gmail_message(session: object) -> None:\n"
+                "    return None\n"
+                "async def _orphan(session: object) -> None:\n"
+                "    await session.call_tool('x', {})\n"
+            )
+        },
+        "gmail_mcp.py:4: references call_tool outside",
+    ),
+    (
+        find_send_capability_violations,
+        {"tools": "def f(s: object) -> object:\n    return getattr(s, 'call_tool')\n"},
+        "tools.py:2: string 'call_tool' outside",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "from langchain_mcp_adapters.tools import load_mcp_tools\n"},
+        "email_delivery.py:1: email_delivery references load_mcp_tools",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_delivery": (
+                "from newsletter_digest.gmail_mcp import open_gmail_tools\n"
+            )
+        },
+        "email_delivery.py:1: email_delivery references open_gmail_tools",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_delivery": (
+                "from newsletter_digest import gmail_mcp\n"
+                "f = gmail_mcp.filter_read_only\n"
+            )
+        },
+        "email_delivery.py:2: email_delivery references filter_read_only",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "agent": "from newsletter_digest import email_delivery\n",
+            "email_delivery": "",
+        },
+        "agent -> email_delivery: the agent side never imports the email modules",
+    ),
+    (
+        find_send_capability_violations,
+        {"tools": "def f() -> None:\n    import newsletter_digest.email_delivery\n"},
+        "tools.py:2: tools -> email_delivery: the agent side never imports",
+    ),
+    (
+        find_send_capability_violations,
+        {"prompts": "from .email_render import render_email\n"},
+        "prompts -> email_render: the agent side never imports",
+    ),
+    (
+        find_gmail_parameters,
+        {"email_delivery": "async def f(gmail_session: object) -> None: ...\n"},
+        "email_delivery.py:1: parameter 'gmail_session'",
+    ),
+    (
+        find_langchain_imports,
+        {"email_render": "from langchain_core.messages import M\n"},
+        "LangChain-free email_render imports langchain_core.messages",
+    ),
+    (
+        find_langchain_imports,
+        {"email_delivery": "import mcp.types\n"},
+        "LangChain-free email_delivery imports mcp.types",
+    ),
 ]
 
 
@@ -1860,6 +3014,85 @@ ALLOWED_CASES: list[tuple[Checker, dict[str, str]]] = [
             ),
         },
     ),
+    # ---- Email delivery (ED-2, ED-3, ED-16; T069): stub and final trees
+    *(
+        (checker, dict(tree))
+        for checker in EMAIL_RULES
+        for tree in (STUB_EMAIL_TREE, FINAL_EMAIL_TREE)
+    ),
+    (find_imported_name_violations, dict(STUB_DELIVERY_TREE)),
+    (find_imported_name_violations, dict(FINAL_DELIVERY_TREE)),
+    (
+        find_imported_name_violations,
+        {"email_render": "from newsletter_digest.render import ENVIRONMENT\n"},
+    ),
+    (
+        find_lazy_email_import_violations,
+        {
+            "cli": (
+                "def _deliver_by_email() -> bool:\n"
+                "    from newsletter_digest.email_delivery import redact_addresses\n"
+                "    return bool(redact_addresses('x'))\n"
+            )
+        },
+    ),
+    (find_lazy_email_import_violations, dict(FINAL_DELIVERY_TREE)),
+    (
+        find_eager_delivery_imports,
+        {
+            "cli": (
+                "class C:\n"
+                "    def m(self) -> None:\n"
+                "        from newsletter_digest import email_delivery\n"
+            )
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "agent": '"""Never send_email or draft_email; no call_tool here."""\n',
+            "email_delivery": (
+                '"""Never load_mcp_tools, open_gmail_tools or filter_read_only."""\n'
+                "# no call_tool and no send_email literal outside gmail_mcp\n"
+            ),
+            "cli": "LABELS = ('send_email_count', 'see send_email docs')\n",
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "cli": (
+                "def _run_email_delivery() -> str:\n"
+                "    from newsletter_digest.email_delivery import redact_addresses\n"
+                "    return redact_addresses('x')\n"
+            )
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "GMAIL_SEND_TOOL_MAP = {'send_email': 'send_email'}\n"
+                "async def send_gmail_message(session: object) -> None:\n"
+                "    await _send_attempt(session)\n"
+                "async def _send_attempt(session: object) -> None:\n"
+                "    await _issue_call(session, GMAIL_SEND_TOOL_MAP['send_email'])\n"
+                "async def _issue_call(session: object, name: str) -> None:\n"
+                "    call = session.call_tool\n"
+                "    await call(name, {})\n"
+            )
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "def filter_read_only(tools, *, tool_map=GMAIL_TOOL_MAP):\n"
+                "    return {}\n"
+            ),
+        },
+    ),
+    (find_send_capability_violations, {"gmail_mcp": "", "email_delivery": ""}),
 ]
 
 
@@ -1900,6 +3133,7 @@ EXPECTED_DELIVERY_EDGES = frozenset(
         *(
             (source, target)
             for source, deps in ONLY_PROJECT_IMPORTS.items()
+            if source in DELIVERY_MODULES
             for target in deps
         ),
     }
@@ -1909,6 +3143,9 @@ EXPECTED_DELIVERY_EDGES = frozenset(
 ONLY_IMPORTED_NAMES: dict[tuple[str, str], frozenset[str]] = {
     ("telegram", "config"): frozenset({"SecretToken"}),
     ("pdf", "render"): frozenset({"safe_url"}),
+    # ED-2 (T069): checked negatively by find_imported_name_violations
+    ("email_render", "render"): frozenset({"ENVIRONMENT", "safe_url"}),
+    ("email_delivery", "gmail_mcp"): SEND_NAMES,
 }
 """TD-2 name limits: telegram takes only `SecretToken`, pdf only `render.safe_url`."""
 
