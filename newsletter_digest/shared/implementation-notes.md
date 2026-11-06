@@ -5110,3 +5110,41 @@ commit checked uses the Sonnet trailer (1ca246e, e41b124).
    - For T085 M-3: the exact text of any `Error:` reply you see.
 7. Never paste tokens, credentials or `.env` contents into a terminal log, an issue or
    a chat.
+
+## T088 — Execution summary and amendment wrap-up for email delivery
+
+Docs only. No source, test, README or design file was changed. `.env` and `out/` were
+never read or touched.
+
+- Appended `## Email delivery (--email) (T068-T088), 2026-11-04` to
+  `shared/execution_summary.md` (append only; the earlier bytes were compared with a copy
+  taken before the edit and are identical). Content came from the T068-T087 notes,
+  `reviews/T085_review.md`, `reviews/T086_arch_review.md`, `learnings.md` and
+  `git log e41b124..HEAD`.
+- **Decision (task to commit mapping).** The task list has no commit field, so each task's
+  commit was taken from the commit subject (T068 2e530fa, T069 949bd5f, T070 2c034d8, T071
+  1924f7f with fix 1ca246e, T072 dadcc2c, T073 6c15e04 with fix 694753e, T074 87910bd, T075
+  dab825d with fix 694753e, T076 f08ee91, T077 70ca9e1, T078 907aa86, T079 764da34, T080
+  607b029, T081 d6430cf, T082 a23ec41, T083 b44a874, T084 ffdb579, T085 89cae43, T086
+  0d2b1b3, T087 094a9c8). T070's subject has no task id; it was matched by content.
+  T088's own hash cannot be written into a file it is committed with, so the summary says
+  "this commit".
+- **README cross-check (acceptance 34): no mismatch.** Compared README > Email delivery >
+  "Trying it end to end", "Exit codes and stderr lines" and "Exit codes" with
+  `cli._deliver_by_email` and the exit logic in `cli.digest`. The success line
+  (`Email: sent to <n> recipient(s) (Gmail id <id>).`), the size-budget suffixes, the
+  FAILED and OUTCOME UNKNOWN lines and exit codes 0, 2 and 3 match the code. T084 stays
+  `done`; nothing was routed as review_feedback. The README steps are a subset of the
+  T087 manual steps (dark mode, large window, ED-21 questions), which the summary lists in
+  full.
+- **Decision (open items kept open).** T065 finding 2 (`emoji=False` on the Telegram
+  lines), T085 M-1, M-3 and N-1..N-4, T086 M1-M4 and I1-I7, the design corrections C1-C10
+  and the `shared/designs.md` ruff-format drift are recorded as open and not fixed,
+  because this task is docs only. The Opus trailer on 2c034d8 and 949bd5f is reported and
+  history is not rewritten.
+- **Note on a T073/T075 fix remark.** The 694753e notes say `shared/designs.md` "existed
+  before this work". T087 shows the format drift came in with fa28154 (the pre-amendment
+  file checks clean). The summary follows T087.
+- **Tradeoff.** `task_list.json` had uncommitted status updates (T068-T087 `done`) from
+  earlier tasks. They are committed with T088 because the task requires the file in this
+  commit; T088 is the only status this task set.
