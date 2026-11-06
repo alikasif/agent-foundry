@@ -488,3 +488,11 @@
   pass-through recorders (they are looked up as module globals at call time); keep only
   `to_email_ascii` calls whose input starts with `<!doctype`, because `email_link` calls
   it too.
+- (T079) A keyword default such as `retry_pause=SEND_START_RETRY_PAUSE_S` is bound when
+  the function is defined, so patching the module constant does nothing. To skip a real
+  pause on a default-seam path, use
+  `monkeypatch.setitem(fn.__kwdefaults__, "retry_pause", 0.0)`. Callers that captured
+  `fn` as their own default (`sender=send_gmail_message`) see it too.
+- (T079) In "no address at any level" log checks, exempt the DEBUG `Email recipients:`
+  record explicitly (ED-15 allows it). The first draft failed on it, because the check
+  ran on every record.

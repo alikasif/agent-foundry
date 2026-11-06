@@ -4501,3 +4501,87 @@ Checks run:
   `tests/test_gmail_mcp_send.py`: 583 passed.
 - `ruff format` and `ruff check .` are clean on my files, and `pyrefly check` reports
   0 errors.
+
+## T079 — Email delivery tests: subject variants and header injection, outcome mapping, redaction, logging, no PDF
+
+File: `tests/test_email_delivery.py` (new, 193 tests). No existing test file and no
+source file edited. Seams only: `sender` / `renderer` of `send_reading_list_email`,
+plus the real `send_gmail_message` over the T072 fakes (`client_factory`) for the
+end-to-end group. Autouse socket guard and patched `gmail_mcp.shutil.which`, as in
+`test_gmail_mcp_send.py`.
+
+Decisions not covered by the spec / tradeoffs:
+- **Header injection.** ED-6's `x@evil.io` is written `x@evil.example` (EP-8 reserved
+  domains). The subject is checked with one full-match regex
+  (`Newsletter digest: last <window> (<end>) - <count> article(s), <must> must-read |
+  unranked | no articles found`), with `window` equal to the sanitised forced window and
+  the counts equal to the list's. So the whole subject is determined by window, date and
+  counts, and no title can be in it. On top of that, each title (printable part >= 10
+  chars) and each newsletter name is checked to be absent. One more test rewrites every
+  title, summary, source, reason, URL and the query (and start date and email counts):
+  the subject does not change.
+- **Reasons without the constructor's cleanup.** `GmailSendError.__init__` already
+  redacts and one-lines `detail`. To test `failure_reason`'s own redaction and
+  whitespace handling, `raw_detail_error` overwrites `err.detail` after construction
+  (the attribute is a plain field). Case-insensitive `extra` matching uses
+  `email_to=("Reader@Example.COM",)` against `rEADER@eXAMPLE.com`.
+- **Address checks** look for each recipient (lower-cased) and the reserved-domain
+  fragments `@example.`, `@inbox.test`, `@evil.`, never a bare `@` (the package hint
+  `@gongrzhe/...@1.1.11` is allowed, T074 note). The DEBUG `Email recipients:` record is
+  the only one allowed to hold addresses. The subject appears only in the DEBUG `Email
+  subject:` record. Body markers appear in no record at any level, and no
+  `email_delivery` record has `exc_info`.
+- **Every `GmailSendErrorKind`** is parametrised with the exact ED-12 reason, the
+  status, `send_calls`, `session_starts` and the one WARNING line. A guard test asserts
+  that the cases cover `set(GmailSendErrorKind)`. FR-065: every marker is tried as is,
+  upper-cased and case-swapped, for each class, plus class-precedence pairs
+  (permission > recipient > rate > other).
+- **Default sender path.** The conftest guard surfaces as START_FAILED (`AssertionError:
+  real Gmail MCP send client constructed in tests`, 2 starts, 0 calls). The default
+  `retry_pause` is bound when the function is defined, so the test sets it to 0 with
+  `monkeypatch.setitem(send_gmail_message.__kwdefaults__, "retry_pause", 0.0)` to avoid
+  a real 2 s wait. A second test patches `gmail_mcp._default_send_client` with the fake
+  factory and gets a success through the fully default seams.
+- **No delivery/pdf/telegram import.** A subprocess (cwd = project) imports
+  `email_delivery` and runs a full send with a fake sender. Then none of delivery, pdf,
+  telegram, fpdf, agent, tools, store, llm, fetch, enrich, netguard, extract or cli is in
+  `sys.modules`. Positive control (learnings T062): after `import
+  newsletter_digest.delivery`, delivery, pdf, telegram and fpdf appear. The child's
+  `newsletter_digest.__file__` lies under this tree's `src/`.
+- **HTML untouched:** fixed bytes and a fixed `st_mtime_ns` (set with `os.utime`) are
+  unchanged, and the directory holds only the HTML, with no `*.pdf`, across sent, failed,
+  unknown, unexpected and render-failure runs. A non-existent `html_path` still sends
+  (only `.name` is used) and creates nothing.
+- **Cancellation:** a hanging sender under an outer `move_on_after` is cancelled and
+  not swallowed (`except Exception` does not catch it). This is not in ED-12, but it
+  follows from "nothing expected is raised" without hiding cancellation.
+
+Findings (none contradict the design):
+- ED-6 by design keeps the text of a hostile window as one printable line, so the
+  subject reads `last 1wBcc: x@evil.example (...)`. That is harmless, because it is the
+  subject value only, and `meta.window` comes from `window_to_days`, but it holds an
+  address-like string. The subject is logged only at DEBUG.
+- For addresses that config accepts, `failure_reason`'s `extra=settings.email_to` pass
+  adds nothing that the regex does not already catch. It replaces the exact string
+  first, so a command `/home/reader@example.com/bin/npx` reads
+  `'/home/<address>/bin/npx'`, not `'<address>'`.
+- The over-budget WARNING always names `95,000`, even when a test renderer uses a
+  smaller `budget`. That is correct for production, where `render_email` runs with the
+  default budget.
+
+Checks run:
+- Mutation check (scratchpad `T079_mut/`, a `-p` plugin exec'ing the mutated
+  `email_delivery.py` into the module, learnings T056; source untouched): 34 mutants,
+  all killed. Among them: no sanitiser, no 150 cut, title in the subject, no detail or
+  command redaction, status from `call_issued`, unexpected error as failed, `send_calls`
+  always 1, body logged at DEBUG, recipients or subject at INFO, rate or recipient class
+  checked before permission, case-sensitive markers, no clip, period kept, no whitespace
+  collapse, budget fields dropped, full-path `html_name`, fixed send timeout, HTML
+  touched, PDF written, one recipient, the timeout taken from the detail or printed
+  without `:g`, empty list not emailed, generic not-on-path text, wrong singular, render
+  or sender message leaked, starts dropped, no over-budget warning, unranked as ranked.
+  The anchors were checked present, and the identity mutant gives 193 passed.
+- Coverage (`uv run --with coverage`, branch): `email_delivery.py` 100%.
+- `uv run pytest -q`: 4838 passed, 2 deselected, 4 xfailed. `ruff format` and `ruff
+  check` are clean on my file, and `pyrefly check` reports 0 errors. `ruff check .`
+  reports 4 E501 only in `tests/test_cli_email.py` (T080, in flight, not mine).
