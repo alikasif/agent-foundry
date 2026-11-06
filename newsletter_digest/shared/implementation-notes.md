@@ -4684,3 +4684,78 @@ Checks run:
 - `uv run pytest -q`: 4840 passed, 2 deselected, 4 xfailed (with the T071 fix's
   in-flight `gmail_mcp.py` edits in the tree). `ruff format`, `ruff check .` and
   `pyrefly check` are clean (0 errors).
+
+## T082 — Flag-off identity for --email: subprocess no-email-module tests, --email alone loads no fpdf, in-process tripwires
+
+Files: `tests/test_flag_off_identity.py` only (26 new tests, 52 in the file now). The diff
+is `+`-only: 4 new import lines (`import shutil`, `import socket`, `import types`, `from
+tests import email_fixture as ef`; no existing import line changed, learnings T062) and an
+appended section. Existing tests and the goldens are unchanged.
+
+What was built (ED-16 items 2-4):
+- **Subprocess tests** (5 child runs, about 3 s each). One child script is written to
+  `tmp_path` and run with `sys.executable`, `cwd=tmp_path`. `COV_*`/`COVERAGE_*`, the tool
+  prefixes and also `EMAIL_*` are dropped from the child env. Each child reports
+  `newsletter_digest.__file__` (checked to be this tree's `src/`), `find_dotenv() == ""`,
+  the watched modules before cli, before the run (after the fakes are installed), after
+  the run and after a positive-control import. The modes are:
+  - no flags, run three times (no `EMAIL_*`, malformed, valid): no email module loaded;
+  - `--telegram` only, with `telegram._default_transport` replaced by an
+    `httpx.MockTransport` (one `sendDocument` recorded, 2 stdout lines): no email module;
+  - `--email` only, with `gmail_mcp._default_send_client` replaced by
+    `email_fixture.fake_send_factory(send_script())` and `shutil.which` faked: no `fpdf`,
+    `PIL`, `pdf`, `delivery` or `telegram` loaded, no PDF, one stdout line, the `Email:
+    sent to 3 recipients` line, and fake events `open#1, list#1, call#1(send_email),
+    close#1` with the five keys and `to` == the recipients.
+  The positive controls import `email_delivery` (none/telegram modes) or `delivery`
+  (email mode) after the run. In email mode the child also checks that both email
+  modules were loaded by the run, so the email path really ran.
+- **In-process tests:**
+  - tripwires on `cli._deliver_by_email`, `cli._run_email_delivery`,
+    `gmail_mcp.send_gmail_message`, `gmail_mcp._default_send_client`,
+    `email_delivery.send_reading_list_email`, `shutil.which` and the `sender` default (see
+    the finding below); the flag-off run exits 0 with none of them called (no `EMAIL_*`,
+    malformed and valid env);
+  - a positive control with `--email`: call-through spies see one call each and the fake
+    sees one `send_email`;
+  - six env cases (malformed `not an address`/`x`, blank, display name, 11 addresses,
+    timeout 9999, valid) leave a flag-off run at exit 0. In each case the HTML equals the
+    golden, `email`/`email_to`/`email_send_timeout` stay at their defaults, the
+    `safe_summary()` keys equal the golden, the values do not appear in the output, and
+    there is no `Email`/`EMAIL` in stderr. The same check also runs at `Settings.build`
+    level;
+  - a `cli.os` proxy (learnings T060) records no `EMAIL*` lookup with the flag off. As a
+    positive control, with `--email` the proxy records both names;
+  - the HTML equals `flag_off_ranked_golden.html` with and without `--email`, and the out
+    dir then holds only that file.
+- Offline: a socket guard (connect, create_connection, getaddrinfo) in every in-process
+  email test and in every child. The conftest guard stays in force; only `--email` tests
+  replace `_default_send_client` with the fake.
+
+Findings / deviations:
+- **ED-16 item 3's tripwire on `gmail_mcp.send_gmail_message` cannot see the delivery
+  path.** `email_delivery.send_reading_list_email(..., sender=send_gmail_message)` binds
+  the function as a default at import, so replacing the `gmail_mcp` attribute does not
+  change what a run would call. The tripwire is installed as specified, and the `sender`
+  default is also tripwired through `monkeypatch.setitem(fn.__kwdefaults__, "sender",
+  wire)`. `test_email_sender_default_is_the_send_helper` asserts that default `is
+  gmail_mcp.send_gmail_message`, so the two are the same function. This is not a code
+  defect. The send client is resolved at call time, as ED-17 requires, so the
+  `_default_send_client` tripwire is reachable too.
+- No behaviour contradicting ED-16 found.
+- ED-16 says "a monkeypatched `os.environ` mapping". The proxy is scoped to `cli.os` (T060
+  pattern), so the real `os.environ` stays untouched; `config.py` does not use `os` at all.
+
+Checks:
+- Mutation check on scratch copies of `src/` + `tests/` (`PYTHONPATH` to the copy; the
+  child's `package_file` check proves the copy was used; no source touched). Control: 26
+  passed. Killed: module-level `import newsletter_digest.email_delivery` in cli (4
+  failures), module-level `import newsletter_digest.delivery` in cli (1), `if
+  settings.email:` -> `if True:` (15), the `email_env` read made unconditional (1),
+  `email_delivery` importing `pdf` (1), `delivery` importing `email_render` (1),
+  `safe_summary`'s `if self.email:` -> `if True:` (12). Survived (equivalent):
+  `Settings.build(email=True)` as a default, because cli always passes `email=`.
+- `uv run pytest -q`: 4840 passed, 2 deselected, 4 xfailed. One earlier full run had 1
+  failure, in T080's untracked in-flight `tests/test_cli_email.py`
+  (`test_unexpected_sender_exception_is_outcome_unknown`). It passed alone, after this file,
+  and on the rerun. `ruff format`, `ruff check .`, `pyrefly check`: clean (0 errors).

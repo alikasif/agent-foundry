@@ -503,3 +503,11 @@
   2 s retry pause), patch `email_delivery.send_reading_list_email` with
   `partial(original, sender=fast)`, where `fast` calls the real `send_gmail_message`
   with 0.05 s timeouts and a recording `sleep`. cli's lazy import picks it up.
+- (T082) On this machine `env` on the agent shell's PATH is `~/.local/bin/env` (uv's
+  shell snippet), not coreutils. `env X=1 cmd` silently runs nothing and exits 0, so a
+  mutation runner prints no results. Always write `/usr/bin/env` (compare T067).
+- (T082) A function used as a parameter default (`sender=send_gmail_message`) is bound
+  when the module is imported. A tripwire on the module attribute then cannot see calls
+  made through that default. Tripwire the default with `monkeypatch.setitem(fn.__kwdefaults__,
+  "sender", wire)` (read `__kwdefaults__` before tripwiring `fn` itself), and assert the
+  default `is` the helper.
