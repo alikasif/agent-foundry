@@ -4388,3 +4388,26 @@ Checks run:
   coverage of `email_render.py` 100% (`uv run --with coverage`, no project dependency);
   full suite 4549 passed, 2 deselected, 7 xfailed; `ruff format`, `ruff check .`,
   `pyrefly check` clean.
+
+## T084 — README: Email delivery section, read-only rewording, EMAIL_TO, scope statement, Gmail limits, exit codes, troubleshooting
+
+- Documented from the code (config.py, email_delivery.py, email_render.py, cli.py), not
+  only ED-18: EMAIL_TO messages and rules, the 10-recipient cap, EMAIL_SEND_TIMEOUT 10-600
+  (default 90), the 95,000-byte budget, skim-first then worth-reading drop, compact mode,
+  800-character link cutoff, the three `Email:` stderr forms, exit 0/2/3.
+- Added sections `## Email delivery` (EMAIL_TO, Security model, OAuth scope, What is in
+  the email, Gmail limits, loop warning, Exit codes and stderr lines, Troubleshooting
+  email, Trying it end to end). The cli/config messages link to `README > Email delivery`.
+- Reworded read-only claims: overview, Gmail troubleshooting row, Safety model (agent
+  read-only; separate deterministic send session with `--email`), gmail_mcp.py table row.
+- `--email-dry-run` is not documented (not implemented).
+- Decision: the Sending-limits link points at Google's consumer page
+  (support.google.com/mail/answer/22839) with no number asserted.
+- Decision: "Do not email the digest into your own search" is its own subsection; the
+  subject always begins `Newsletter digest:`, so `-subject:"Newsletter digest"` works.
+- Troubleshooting rows quote the real reason texts from `failure_reason`. The cold-npx
+  note reflects the code's 2 start attempts of 60 s each.
+- `.env.example` EMAIL block matches the README (EMAIL_TO, EMAIL_SEND_TIMEOUT 10-600,
+  default 90, max 10 recipients); no mismatch to route to T070.
+- Not verified live: the OAuth scope claim is from the design/verified facts; the first
+  real send confirms it (stated in the README).

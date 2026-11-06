@@ -12,11 +12,14 @@ Optionally (`--fetch-articles`, off by default) it also fetches the linked pages
 top items and summarises them; see
 [Fetching article pages](#fetching-article-pages---fetch-articles). Optionally
 (`--telegram`) it also sends a PDF copy to your own Telegram chat; see
-[Telegram delivery](#telegram-delivery).
+[Telegram delivery](#telegram-delivery). Optionally (`--email`) it also emails the
+reading list to addresses you choose; see [Email delivery](#email-delivery).
 
 Under the hood a LangChain deep agent searches Gmail through a Gmail MCP server
-(read-only tools only), reads each email with a reader subagent, and ranks the
-collected articles with an OpenRouter model.
+(the agent gets read-only tools only), reads each email with a reader subagent, and
+ranks the collected articles with an OpenRouter model. Only with `--email` does the
+app's own delivery code (not the agent) call the server's send tool, in a separate
+step after the HTML is written; see [Email delivery](#email-delivery).
 
 ## Requirements
 
@@ -125,7 +128,7 @@ To upgrade:
 | `Could not start the Gmail MCP server ...` or `Gmail search failed ...` | The keys file is missing or misplaced, or the token expired or was revoked. Check `~/.gmail-mcp/gcp-oauth.keys.json`, then re-run `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth`. |
 | Browser shows `Access blocked: <app name> has not completed the Google verification process` / `Error 403: access_denied` during `auth` | The account you signed in with is not a test user of the OAuth app. In the Cloud console open **Google Auth Platform > Audience > Test users**, click **Add users**, add that exact account, save, then re-run `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth` and choose that account on the picker. |
 | Token expires after about a week | An OAuth app in **Testing** mode issues refresh tokens that expire after 7 days. Re-run the `auth` command, or publish the app to production in the consent screen. |
-| `The Gmail MCP server does not offer the required read-only tool(s) ...` | `GMAIL_MCP_ARGS` does not point at `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, or a different server version renamed `search_emails` / `read_email`. |
+| `The Gmail MCP server does not offer the required read-only tool(s) ...` | `GMAIL_MCP_ARGS` does not point at `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, or a different server version renamed `search_emails` / `read_email` (the two tools the agent's read-only session uses). Problems with the send tool used by `--email` are listed under [Troubleshooting email](#troubleshooting-email). |
 | `Could not parse the Gmail MCP search_emails output` | The server's output format changed. The tool was verified against server version 1.1.11. |
 | Startup fails and the working directory has `gcp-oauth.keys.json` | Remove it from the working directory (see step 2). |
 
@@ -177,10 +180,13 @@ is already set in your shell wins over the same variable in `.env`.
 | `NEWSLETTER_FETCH_LLM_INTERVAL` | `3.1` if the reader model name ends in `:free`, otherwise `0` | Minimum seconds between the starts of summary calls, 0 to 60. An explicit value, including `0`, wins. Environment only. |
 | `TELEGRAM_BOT_TOKEN` | none (required with `--telegram`) | Bot token from @BotFather. Read only when `--telegram` is given; never printed or logged. Environment only. See [Telegram setup](#telegram-setup). |
 | `TELEGRAM_CHAT_ID` | none (required with `--telegram`) | Your own numeric chat ID (a positive integer). Read only when `--telegram` is given. Environment only. |
+| `EMAIL_TO` | none (required with `--email`) | Comma-separated bare addresses to email the digest to: at most 10, duplicates removed. Read only when `--email` is given. Environment only. See [EMAIL_TO](#email_to). |
+| `EMAIL_SEND_TIMEOUT` | `90` | Seconds to wait for Gmail to accept the send, 10 to 600. Read only when `--email` is given. Environment only. |
 
 Blank values count as unset. The two `TELEGRAM_*` variables are ignored unless
 `--telegram` is given; with it, a missing, blank or malformed value exits with code 2
-before any Gmail or model work. The fetch variables are validated on every run, even with
+before any Gmail or model work. `EMAIL_TO` and `EMAIL_SEND_TIMEOUT` are likewise read
+and validated only with `--email`, with the same exit code 2 and timing. The fetch variables are validated on every run, even with
 fetching off; an invalid value exits with code 2. `GMAIL_OAUTH_PATH`, `GMAIL_CREDENTIALS_PATH`, proxy
 variables and `NODE_EXTRA_CA_CERTS` are forwarded to the MCP server if set (see
 [Gmail MCP setup](#gmail-mcp-setup)).
@@ -204,6 +210,7 @@ uv run newsletter-digest [OPTIONS]
 | `--fetch-articles` | `NEWSLETTER_FETCH_ARTICLES` | off | Also fetch the linked pages of must-read and worth-reading items and summarise them. See [Privacy](#privacy). |
 | `--max-fetch INTEGER` | `NEWSLETTER_MAX_FETCH` | `15` | Maximum number of article pages to fetch, 1 to 50. Only used with `--fetch-articles`. |
 | `--telegram` | none (flag only) | off | Also save a PDF copy next to the HTML and send it to your own Telegram chat. Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. See [Telegram delivery](#telegram-delivery) and [Privacy](#privacy). |
+| `--email` | none (flag only) | off | Also email the reading list (HTML plus a short plain-text part) to the addresses in `EMAIL_TO`, through the same Gmail MCP server and login. No SMTP, no PDF. Combines with `--telegram`. See [Email delivery](#email-delivery) and [Privacy](#privacy). |
 | `--log-level [debug\|info\|warning\|error]` | none | `INFO` | Logging verbosity. `DEBUG` also prints tracebacks on failure. |
 | `-h`, `--help` | none | none | Show help and exit. |
 
@@ -228,12 +235,13 @@ one-line hint with the file path is printed to stderr; the exit code is unchange
 | --- | --- |
 | `0` | Success, including an empty result and an unranked fallback list. |
 | `1` | Runtime failure: Gmail MCP launch, auth or search error, or an agent failure. Re-run with `--log-level DEBUG` for the traceback. |
-| `2` | Usage or configuration error: missing `OPENROUTER_API_KEY` or model, invalid window, `--max-emails` out of range, unparsable `GMAIL_MCP_ARGS`. With `--telegram`: `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` missing, blank or malformed (checked before any work starts). |
-| `3` | Only with `--telegram`: the digest was written (HTML, and the PDF when it was built) but the PDF was not delivered to Telegram. A one-line reason on stderr says why; see [Troubleshooting Telegram](#troubleshooting-telegram). |
+| `2` | Usage or configuration error: missing `OPENROUTER_API_KEY` or model, invalid window, `--max-emails` out of range, unparsable `GMAIL_MCP_ARGS`. With `--telegram`: `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` missing, blank or malformed. With `--email`: `EMAIL_TO` or `EMAIL_SEND_TIMEOUT` missing or invalid. Both are checked before any work starts. |
+| `3` | Only with `--telegram` and/or `--email`: the digest was written (HTML, and the PDF when it was built) but at least one requested channel did not deliver it, or the email outcome is unknown. A one-line reason per channel on stderr says why; see [Troubleshooting Telegram](#troubleshooting-telegram) and [Troubleshooting email](#troubleshooting-email). |
 
 Logs, the summary line (`<n> articles from <processed> of <found> emails`) and warnings go
 to stderr. stdout carries only the paths of the written files: the HTML path, and with
-`--telegram` the PDF path on a second line whenever the PDF file exists.
+`--telegram` the PDF path on a second line whenever the PDF file exists. `--email` adds
+no stdout line; its result is one `Email:` line on stderr.
 
 ## Usage
 
@@ -527,18 +535,188 @@ With a real bot and your chat ID in `.env`:
    exit code is 3 and that stderr names the cause. Restore the correct value afterwards.
    Never paste the token into the terminal, an issue or a log.
 
+## Email delivery
+
+With `--email`, the tool also emails the reading list to the addresses you list in
+`EMAIL_TO`. The message is one HTML email plus a short plain-text part. It is sent through
+the same pinned Gmail MCP server and the same login as the search: no SMTP, no new
+credentials, no PDF. The HTML file is written first and is never changed by this step.
+Without the flag nothing email-related is loaded, read or sent, and the HTML output is
+unchanged. It combines with `--telegram`: both channels are attempted.
+
+```bash
+uv run newsletter-digest --window 1w --email
+uv run newsletter-digest --window 1w --telegram --email
+```
+
+### EMAIL_TO
+
+Put the recipients in `.env` (they are never taken from the command line):
+
+```text
+EMAIL_TO=you@example.com
+# several recipients
+EMAIL_TO=you@example.com,colleague@example.org
+# optional: seconds to wait for Gmail to accept the send (10-600, default 90)
+EMAIL_SEND_TIMEOUT=90
+```
+
+- Comma-separated **bare** addresses, at most **10**. Duplicates are removed (compared
+  without regard to case); spaces around a comma and a trailing comma are fine.
+- Rejected, with exit code 2 before any Gmail or model work: display names and angle
+  brackets (`Bob <bob@example.org>`), semicolons as separators, spaces inside an address,
+  non-ASCII addresses, CR/LF or other control characters, an entry that is not a plain
+  `name@domain.tld` address, and more than 10 unique addresses. The message names the
+  offending entry (shortened to 32 characters) and says why.
+- `EMAIL_TO` and `EMAIL_SEND_TIMEOUT` are read only with `--email`. A missing or blank
+  `EMAIL_TO`, or an `EMAIL_SEND_TIMEOUT` outside 10 to 600, exits with code 2.
+- Every recipient is in the To line and sees the others. There is no Cc, Bcc or
+  attachment.
+
+### Security model
+
+- The AI agent still has only `search_emails` and `read_email`, behind the same
+  default-deny allowlist. It never sees `send_email`.
+- The app's own deterministic delivery code calls `send_email` in a **separate, later,
+  short-lived** Gmail MCP session, after the HTML is written and the agent session has
+  ended. The recipients come from `EMAIL_TO`, and the subject is a fixed template built
+  from counts only (see below).
+- No other Gmail write tool (draft, modify, delete, label, filter) is used by anything.
+- The Gmail session the agent uses stays read-only; the send session is never given to a
+  model.
+
+### OAuth scope
+
+The server's `auth` command requests the `gmail.modify` and `gmail.settings.basic`
+scopes. `gmail.modify` already permits sending, so for a token made as described in
+[Gmail MCP setup](#gmail-mcp-setup) no scope change and no re-authorisation is expected.
+The Gmail MCP token must permit sending: if it was created with a read-only scope, the
+send fails with a permission error and you re-run the auth:
+
+```bash
+npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth
+```
+
+The first real send is what confirms the token has the scope; nothing checks it earlier.
+
+### What is in the email
+
+- **Subject** (counts only, printable ASCII, never a title or any model text):
+  `Newsletter digest: last 1w (2026-11-04) - 24 articles, 5 must-read`. An unranked list
+  reads `... - 24 articles, unranked`; an empty one `... - no articles found`. Empty lists
+  are emailed too.
+- **Body:** the window and counts header, the Must read section first, then the topic
+  groups. Each item has its title as a link, the summary (the fetched-page summary and
+  key points when `--fetch-articles` produced them), newsletter names, date, "mentioned
+  in N" when several newsletters carried it, and the "Why" line from ranking. Notes appear
+  for an unranked list, for emails that could not be read, and for items left out by the
+  size budget.
+- **Left out:** the full "Read here" page text, the mark-read checkboxes and the other
+  interactive parts of the HTML page. There are no images, scripts or external resources.
+  The saved HTML stays the complete version.
+
+### Gmail limits
+
+- **Clipping.** Gmail clips messages larger than about 102 KB and hides the rest behind
+  "View entire message". The tool keeps the HTML within a **95,000-byte** budget.
+- **What is dropped to fit.** Lower-priority items go first, a whole item at a time:
+  skim-first items (and unprioritised ones), then worth-reading items. **Must read items
+  are never dropped.** An unranked list drops items from the end. The email then shows a
+  line such as `20 of 60 items are shown; 40 lower-priority items were left out ...` that
+  names the saved HTML, and the stderr line reports it.
+- **Compact mode.** If dropping every droppable item is still not enough, key points and
+  "Why" lines are removed from the remaining items. If that is still over budget, the
+  email is sent anyway and stderr says it is over Gmail's size budget and may be clipped.
+- **Long links.** A link longer than about 800 characters is shown unlinked, with a note
+  to use the saved HTML.
+- **Non-ASCII text** (accents, quotes, CJK) is sent as numeric character references, so
+  the message is plain ASCII on the wire; it renders the same in the mail client.
+- **Sending limits.** Gmail limits how many messages and recipients an account may send
+  per day. See Google's page, [Gmail sending limits](https://support.google.com/mail/answer/22839),
+  for the current figures; this tool asserts no number.
+
+### Do not email the digest into your own search
+
+If the digest is sent to the mailbox that the run reads, a broad `--query` or label can
+pick the digest up on the next run. The subject always starts with `Newsletter digest:`.
+Add `-subject:"Newsletter digest"` to a custom query, for example
+`--query 'from:(news@example.com) -subject:"Newsletter digest"'`, or keep the label filter
+narrow.
+
+### Exit codes and stderr lines
+
+Exit codes are in [Exit codes](#exit-codes). With `--email` the tool prints exactly one
+`Email:` line to stderr:
+
+| Outcome | stderr | Exit code |
+| --- | --- | --- |
+| Gmail accepted it | `Email: sent to <n> recipient(s) (Gmail id <id>).` Then, if the budget dropped items, `<shown> of <total> items included; the full list is in the saved HTML.` and, if still over budget, `The email is over Gmail's size budget and may be clipped.` | 0 |
+| Nothing was sent | `Email: FAILED (<reason>). Saved: <html path>. See README > Email delivery.` | 3 |
+| Ambiguous | `Email: OUTCOME UNKNOWN (<reason>); the email may have been sent, check your Gmail Sent folder before re-running. Saved: <html path>. See README > Email delivery.` | 3 |
+
+- A bad `EMAIL_TO` or `EMAIL_SEND_TIMEOUT` is a usage error: exit 2, nothing is read from
+  Gmail.
+- With `--telegram --email`, both channels are attempted whatever the other one does. The
+  exit code is 3 if either fails (or the email is unknown), and stderr has one line per
+  channel (`Sent ... to Telegram.` or `Telegram delivery failed ...`, and `Email: ...`).
+- **OUTCOME UNKNOWN** means the send was issued (or may have been) and the result is not
+  known, for example the connection dropped or the server did not reply in time. The tool
+  does **not** retry a send automatically, because a retry could mail every recipient
+  twice. Open the **Sent** folder of the Gmail account first. Re-run only if the digest
+  is not there.
+
+### Troubleshooting email
+
+| Symptom (in the `Email:` line) | Fix |
+| --- | --- |
+| `Gmail refused the send (permission or login problem ...); re-run npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth` | The token is missing, expired, revoked or lacks the send permission. Re-run the `auth` command (see [OAuth scope](#oauth-scope)). |
+| `Gmail rejected a recipient address (...); check EMAIL_TO` | An address in `EMAIL_TO` is not accepted by Gmail. Fix the typo or remove it. |
+| `Gmail rate or sending limit reached (...); try again later` | You hit Gmail's sending limits (see [Gmail limits](#gmail-limits)). Wait and re-run. |
+| `'npx' not found on PATH; install Node.js >= 18 ...` | Install Node.js 18+ or set `GMAIL_MCP_COMMAND`. |
+| `could not start the Gmail MCP server after 2 attempts (...)` | Check Node.js, `GMAIL_MCP_COMMAND` and `GMAIL_MCP_ARGS`. A cold `npx` cache downloads the package on first start and can be slow; the start is tried twice (60 s each), so re-run once the download finished. |
+| `the Gmail MCP server offers no send_email tool` or `the Gmail MCP server's send_email arguments differ from version 1.1.11 (...)` | `GMAIL_MCP_ARGS` does not point at the pinned `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, or another version changed the tool. Nothing was sent. See [Pinned server version](#pinned-server-version). |
+| `Email: OUTCOME UNKNOWN (no reply from the Gmail MCP server within <n> s after the send was issued)` | Gmail may have accepted it. Check **Sent** before re-running. If sends are just slow, raise `EMAIL_SEND_TIMEOUT` (up to 600). |
+| `Email: OUTCOME UNKNOWN (the Gmail MCP connection failed after the send was issued ...)` or `(unexpected error ...)` or `(unrecognised reply from send_email ...)` | Same: check **Sent** first, then re-run only if the digest is missing. |
+| `the email failed this app's own checks (...); nothing was sent` / `could not build the email (...)` | A bug or an unexpected value in the data; the HTML is still saved. Re-run with `--log-level DEBUG` and report it. |
+
+Error text from the server is shortened and has any address replaced before it is shown.
+
+### Trying it end to end
+
+This is a manual check with a real Gmail login; it is not part of the automated tests.
+
+1. Put your own address in `.env`: `EMAIL_TO=you@example.com`.
+2. Run `uv run newsletter-digest --window 1w --max-emails 5 --email`.
+3. Check stdout: one line, the `.html` path. Check that stderr ends with
+   `Email: sent to 1 recipient (Gmail id ...).` and that the exit code is 0 (`echo $?`).
+4. In Gmail, open the message (Inbox, and a copy in Sent): the subject starts with
+   `Newsletter digest:`, Must read comes first, the links open, and there is no
+   "View entire message" clipping at the bottom. Check it on your phone too.
+5. If the send fails with a permission error, re-run the `auth` command from
+   [OAuth scope](#oauth-scope) and try again; this first send is what confirms the token.
+6. Failure check: put `EMAIL_TO=not-an-address` in `.env`, re-run, and confirm exit code 2
+   with a message that names the entry. Restore the correct value afterwards.
+
 ## Safety model
 
-The tool is designed so that a run can read your newsletters and nothing else.
+The tool is designed so that the AI agent can read your newsletters and nothing else.
+Without `--email` no run writes to Gmail at all.
 
-- **Read-only allowlist, enforced client-side.** The MCP server offers 19 tools,
-  including ones that send, modify, label and delete mail. `gmail_mcp.py` keeps only
-  `search_emails` and `read_email` and discards the rest (default-deny). The model never
-  sees the other tools. If an allowlisted tool is missing, the run stops with an error.
+- **The agent's tools are read-only: allowlist, enforced client-side.** The MCP server
+  offers 19 tools, including ones that send, modify, label and delete mail.
+  `gmail_mcp.py` keeps only `search_emails` and `read_email` for the agent and discards
+  the rest (default-deny). The model never sees the other tools. If an allowlisted tool
+  is missing, the run stops with an error. This does not change with `--email`.
+- **Sending is a separate, deterministic step (only with `--email`).** After the HTML is
+  written, the app's own delivery code opens a second, short-lived Gmail MCP session and
+  calls only `send_email`, with recipients from `EMAIL_TO` and a fixed, counts-only
+  subject. No model is involved and no other write tool (draft, modify, delete, label,
+  filter) is used by anything. See [Email delivery](#email-delivery).
 - **The OAuth scope is not the guard.** The token you create in step 3 comes from the
   server's own consent flow, and its scopes include send and modify access. The allowlist
-  in this tool is the only thing preventing writes. Anyone who runs the MCP server
-  directly, or changes the allowlist, has that access. Treat `~/.gmail-mcp/` accordingly.
+  in this tool is the only thing keeping the agent from writing. Anyone who runs the MCP
+  server directly, or changes the allowlist, has that access. Treat `~/.gmail-mcp/`
+  accordingly.
 - **Reads are limited to the search results.** The reader can only open email ids that
   came from this run's search; any other id is refused without calling Gmail.
 - **Credentials stay with the server.** Tokens and keys live in `~/.gmail-mcp/` and are
@@ -558,8 +736,9 @@ The tool is designed so that a run can read your newsletters and nothing else.
   guaranteed against a determined attacker. What bounds the damage is the tool surface: a
   hostile newsletter could at worst distort the summaries, titles, links or ranking in
   your reading list. It cannot send mail, modify Gmail or reach other tools, because
-  those are not available to the model. Treat links in the list as you would any link
-  from an unknown sender.
+  those are not available to the model (the send tool belongs to the delivery code, not
+  to the agent). Treat links in the list as you would any link from an unknown
+  sender.
 - **The HTML output is escaped.** All dynamic content is HTML-escaped, links are limited to
   `http` and `https`, and the page has a Content-Security-Policy that blocks external
   resources and permits only its own inline script.
@@ -613,8 +792,16 @@ The tool is designed so that a run can read your newsletters and nothing else.
   end-to-end encrypted, so Telegram can read them. The bot token and chat ID are read only
   with the flag, are not printed, and are scrubbed from log and error output. The PDF is
   also kept in the output directory. Leave the flag off to send nothing.
+- **With `--email`, the reading list leaves your machine by email.** The message has
+  titles, summaries, links, newsletter names, dates and the Gmail query or label (the
+  same derived data as the HTML, without fetched page text beyond the summaries). It
+  goes through Gmail to every address in `EMAIL_TO`; every recipient sees all the others
+  in the To line. Email is not end-to-end encrypted, and a copy stays in your Sent
+  folder. The subject has counts only. Recipient addresses are never logged at the
+  default level and are redacted from error output (they appear only at `DEBUG`).
 - The tool keeps no database or history. The only persisted state is the HTML file (plus
-  the PDF with `--telegram`) and the mark-read flags in your browser.
+  the PDF with `--telegram`) and the mark-read flags in your browser. The email is kept
+  by Gmail, not by this tool.
 
 ## Development
 
@@ -633,13 +820,14 @@ Source lives in `src/newsletter_digest/`:
 | --- | --- |
 | `cli.py` | `newsletter-digest` command, exit codes, logging |
 | `config.py` | `Settings`, window parsing, Gmail query building |
-| `gmail_mcp.py` | MCP connection, read-only allowlist, email text preparation |
+| `gmail_mcp.py` | MCP connection, the agent's read-only allowlist, email text preparation, and (for `--email` only) the separate `send_email` session |
 | `tools.py` | Agent tools: `search_emails`, `read_email` wrapper, `record_articles`, `list_collected`, `finalize_reading_list` |
 | `agent.py`, `prompts.py`, `llm.py` | Deep agent assembly, prompts, model factory |
 | `models.py`, `store.py` | Pydantic models, in-memory article store and de-duplication |
 | `render.py`, `templates/` | HTML reading list rendering |
 | `pdf.py`, `fonts/` | PDF builder (fpdf2) and the bundled DejaVu fonts |
 | `delivery.py`, `telegram.py` | `--telegram`: PDF write, size check, caption and the Telegram client (loaded only with the flag) |
+| `email_delivery.py`, `email_render.py`, `templates/reading_list_email.html.j2` | `--email`: subject, send orchestration and failure mapping; Gmail-safe email HTML and plain part with the size budget; the email template (loaded only with the flag) |
 | `links.py` | Link classification (article, tracker, unsubscribe, social, ...) |
 | `netguard.py` | URL policy and guarded transport that refuses non-public addresses |
 | `fetch.py` | `PageFetcher`: capped, classified page downloads |
