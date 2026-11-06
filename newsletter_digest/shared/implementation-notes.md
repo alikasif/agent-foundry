@@ -4891,3 +4891,45 @@ Only the positive checker catches these 11 mutants:
   T080 and T082 files and `tests/test_flag_off_identity.py`.
 - `uv run ruff format` (own file) and `uv run ruff check .`: clean.
 - `uv run pyrefly check` (and on the file explicitly): 0 errors.
+
+## T073 / T075 review fixes — `wrap_long_lines` whitespace runs with LF (T078 finding 1, T086 M5); `emoji=False` on the `Email:` line (T085 M-2)
+
+- **T073, `email_render.wrap_long_lines`:** the old code added a whitespace token that
+  held a LF in one piece. The blanks before the first LF could then push the current line
+  past `limit`, and a blank-only line inside the run (or the run's tail) could itself be
+  longer than `limit`. Now the run is split at its LFs. The head keeps its blanks only if
+  `column + len(head) <= limit`, and each later line keeps its blanks only if
+  `len(line) <= limit`. Otherwise those blanks are dropped. Every LF is kept, and the
+  column becomes the length of the kept tail. This is the ED-8 rule T086 asked for: "a
+  run that holds a LF never leaves blanks past the limit". The docstring now says so.
+  - Visible text is unchanged. Only blanks next to a LF that is already there are
+    dropped, so the text with all whitespace removed is the same, and HTML whitespace
+    collapsing gives the same rendering. A quoted attribute value is a single tag piece,
+    never a whitespace token, so values are still never split. Running the wrapper twice
+    gives the same result (each kept line fits).
+  - Tradeoff: I dropped too-long blanks instead of re-wrapping them. Re-wrapping would
+    only add more blank lines, and it would need a rule for where a blank-only line may
+    break.
+  - The golden (`tests/fixtures/email_ranked_golden.html`) is byte-identical. The template
+    never makes a run whose blanks overflow (max line 880 before and after).
+- **Tests:** I removed the two `xfail(strict=True)` markers and the now-unused
+  `WHITESPACE_LF_FINDING` constant from `tests/test_email_render.py`. Nothing else
+  changed there. Both tests pass.
+- **T075, `cli._deliver_by_email`:** the `Email:` line is printed with
+  `markup=False, highlight=False, emoji=False, soft_wrap=True`, so `:smile:`-style codes
+  in server text (REJECTED / UNKNOWN_REPLY reasons) or in the HTML path stay verbatim and
+  ASCII. I added one test to `tests/test_cli_email.py` (additive only),
+  `test_emoji_codes_in_server_text_are_printed_verbatim`. Its server error is
+  `:warning: Mail service :smile: hiccup`, and it asserts that the exact FAILED line is
+  ASCII. Before the fix it failed: Rich printed the codes as emoji.
+- **Not changed (out of scope for this dispatch):** the Telegram stderr lines in
+  `_deliver_to_telegram` (and the report lines) still leave Rich emoji replacement on.
+  T085 suggested adding `emoji=False` there too, and T065 finding 2 is still open. The
+  Telegram test files must not be touched, so this is left for a separate task.
+- **Verification:** full suite 4933 passed, 2 deselected, 2 xfailed (before: 4930 passed,
+  4 xfailed; +2 former xfails, +1 new test). `tests/test_architecture.py` passes (part
+  of the full suite, and in the targeted run with `test_email_render.py` and
+  `test_cli_email.py`: 661 passed). `uv run ruff check .` is clean, `uv run pyrefly
+  check` shows 0 errors, and `ruff format` was run on the touched files.
+  `ruff format --check .` reports only `shared/designs.md`, which existed before this
+  work and was not touched.

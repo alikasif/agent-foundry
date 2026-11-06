@@ -308,7 +308,9 @@ def wrap_long_lines(text: str, limit: int) -> str:
     runs, text runs and single ``&``. A token that would pass ``limit`` breaks the
     line at the last whitespace of the line (in text or between attributes),
     otherwise just before the token when that is text context. Text runs longer
-    than ``limit`` are split into ``limit``-sized chunks.
+    than ``limit`` are split into ``limit``-sized chunks. A whitespace run that
+    holds a LF keeps every LF but drops the blanks of any of its lines that would
+    pass ``limit``.
 
     Raises:
         ValueError: if a piece of a tag is longer than ``limit`` or cannot be
@@ -320,8 +322,13 @@ def wrap_long_lines(text: str, limit: int) -> str:
     for piece, space, breakable in _wrap_tokens(text, limit):
         if space:
             if "\n" in piece:
-                out.append(piece)
-                column = len(piece) - piece.rfind("\n") - 1
+                # Each line of the run keeps its blanks only where they fit; the
+                # LFs themselves are the breaks, so dropped blanks change nothing.
+                head, *rest = piece.split("\n")
+                lines = [head if column + len(head) <= limit else ""]
+                lines += [line if len(line) <= limit else "" for line in rest]
+                out.append("\n".join(lines))
+                column = len(lines[-1])
                 last_space = None
             elif column + len(piece) > limit:
                 out.append("\n")

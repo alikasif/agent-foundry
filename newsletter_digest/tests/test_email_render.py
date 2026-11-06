@@ -1074,18 +1074,10 @@ def test_wrap_long_lines_invariants(text: str, limit: int) -> None:
     assert wrap_long_lines(wrapped, limit) == wrapped
 
 
-WHITESPACE_LF_FINDING = (
-    "T078 finding 1: a whitespace run that contains LF is appended whole, so the "
-    "spaces before the LF can push the line past the limit (ED-8 violated)"
-)
-
-
-@pytest.mark.xfail(strict=True, reason=WHITESPACE_LF_FINDING)
 def test_wrap_long_lines_whitespace_run_with_lf_stays_within_limit() -> None:
     assert max_line(wrap_long_lines("a" * 9 + " " * 5 + "\nb", 10)) <= 10
 
 
-@pytest.mark.xfail(strict=True, reason=WHITESPACE_LF_FINDING)
 def test_render_email_line_limit_with_unnormalised_whitespace() -> None:
     # Not reachable through the pipeline (models collapse whitespace in every text
     # field before a ReadingItem is built), but ReadingItem itself does not.

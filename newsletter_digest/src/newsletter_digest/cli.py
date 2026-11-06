@@ -407,7 +407,7 @@ def _deliver_by_email(
             "sent, check your Gmail Sent folder before re-running. "
             f"Saved: {html_path}. See README > Email delivery."
         )
-    console.print(line, markup=False, highlight=False, soft_wrap=True)
+    console.print(line, markup=False, highlight=False, emoji=False, soft_wrap=True)
     return outcome.delivered
 
 

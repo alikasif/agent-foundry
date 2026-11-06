@@ -836,6 +836,24 @@ def test_failure_matrix_exits_3_with_one_email_line(
     assert_no_recipient("\n".join(r.getMessage() for r in info_records(caplog)))
 
 
+def test_emoji_codes_in_server_text_are_printed_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+    email_env: None,
+    fake_run: FakeRunDigest,
+    send: SendSide,
+    out_dir: Path,
+) -> None:
+    # T085 M-2: Rich must not turn `:smile:` style codes into emoji.
+    reply = ef.Reply.server_error(":warning: Mail service :smile: hiccup")
+    send.scripts = [ef.send_script(reply), _spare()]
+    use_fast_sender(monkeypatch, send)
+    result = run_cli(out_dir, "--email")
+    assert result.exit_code == 3, result.output
+    reason = "Gmail returned an error: :warning: Mail service :smile: hiccup"
+    assert email_line(result) == failed_line(reason, out_dir / HTML_NAME)
+    assert email_line(result).isascii()
+
+
 def test_command_not_on_path_starts_no_session(
     monkeypatch: pytest.MonkeyPatch,
     email_env: None,
