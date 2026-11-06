@@ -52,9 +52,9 @@
 |---|---|---|---|---|---|
 | V31 | No new dependency: jinja2, markupsafe, mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1 and lxml already locked; `uv lock --check` passes; `pyproject.toml`/`uv.lock` unchanged | T068 | jinja2 3.1.6, markupsafe 3.0.4, mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1, lxml 6.1.3 (uv.lock) | `grep -A1 '^name = "<pkg>"$' uv.lock` for each; `uv lock --check`; `git status`/`git diff` on pyproject.toml and uv.lock; no `uv add` run | Confirmed. All six are locked at the expected versions; `uv lock --check` passes (Resolved 114 packages); pyproject.toml and uv.lock are unchanged. No dependency is added for email delivery. |
 | V32 | `mcp.ClientSession.list_tools(cursor=None)` / `ListToolsResult.nextCursor`, `Tool.inputSchema` (`properties`, `required`), `call_tool(name, arguments=None, read_timeout_seconds=None, ...)`, `CallToolResult.isError/.content`; `MultiServerMCPClient.session(name)` yields a raw `ClientSession` without loading tools | T071 | mcp 1.30.0, langchain-mcp-adapters 0.3.2 | Read (read only) `.venv/.../mcp/client/session.py`, `mcp/types.py`, `langchain_mcp_adapters/client.py`, `sessions.py`; real-client run against local python subprocesses (no npx, no Gmail) | Confirmed with one deviation. `list_tools(cursor=None, *, params=None)`: the `cursor=` overload is `@deprecated` in favour of `params=PaginatedRequestParams(cursor=...)`, so T071 uses `params`. `ListToolsResult(PaginatedResult)` has `tools: list[Tool]` and `nextCursor: str \| None`. `Tool.inputSchema: dict[str, Any]`. `call_tool(name, arguments=None, read_timeout_seconds=None, progress_callback=None, *, meta=None) -> CallToolResult`. `CallToolResult.content: list[ContentBlock]`, `isError: bool = False`. When `isError` is False, `call_tool` validates structured output and calls `list_tools()` again only if the tool was not cached; it is cached here because the session listed first. `MultiServerMCPClient.session(name, *, auto_initialize=True)` enters `create_session` -> `stdio_client` + `ClientSession`, awaits `initialize()` and yields the raw `ClientSession`. No `load_mcp_tools` is involved and no `BaseTool` is built. `ValueError` for an unknown server name. |
-| V33 | `anyio.fail_after` around `ClientSession.call_tool` inside the session task groups raises `TimeoutError` at scope exit, the stdio subprocess is reaped within mcp's 2 s `PROCESS_TERMINATION_TIMEOUT` (local FastMCP sleeping `send_email` tool, no npx) | T077 | mcp 1.30.0 (`PROCESS_TERMINATION_TIMEOUT = 2.0`), langchain-mcp-adapters 0.3.2, anyio 4.15.1 | `tests/test_gmail_mcp_send.py` V33 group: a FastMCP stdio script in `tmp_path` (run with `sys.executable`, 1.1.11-shaped `send_email` signature) that records each call and the pid, in three modes (`instant`, `async-sleep` 60 s, `blocking-sleep` 60 s via `time.sleep`); real `MultiServerMCPClient` from a test-local factory (never `_default_send_client`); `os.kill(pid, 0)` for the reap check; plus scratch timing probe `t077_close_probe.py` | Confirmed for the library, with one T071 defect. (1) With the scopes nested correctly (`fail_after(0.5)` entered and left inside the open session), the timeout comes out as a plain `TimeoutError` (no `ExceptionGroup`) 0.51 s after the call, the call reached the server once with exactly the five keys, and the process is gone after the `async with` exits: 0.11 s when the server's loop is responsive (it exits on stdin EOF), 2.1 s when the server is blocked (stdio_client terminates it after the 2 s wait). Start-up is about 0.5 s, so no `slow` marker is needed (3.2 s worst case). (2) Through the real `send_gmail_message`, every start fails: `_send_attempt` enters `client.session()` (which opens anyio task groups) inside `with anyio.fail_after(start_timeout)` and leaves that scope while the session is still open, so anyio raises `RuntimeError: Attempted to exit a cancel scope that isn't the current tasks's current cancel scope`. Result: START_FAILED after 2 starts and no call, even against an instantly answering server; with an outer cancel scope in the caller the same RuntimeError can escape from the caller's scope too. The fakes have no task groups and hide this (learnings T005 fix). The three real-session tests are strict xfails (`REAL_SESSION_DEFECT`); a scratch plugin with a correctly nested attempt (one `CancelScope` with the start deadline around the whole `async with`, deadline set to inf after listing, the call under its own nested `fail_after`) turns all three into XPASS and keeps the other 148 tests green. Per EP-9, T071 should be reopened. |
-| V34 | Shape of session-start failures through `MultiServerMCPClient.session` (plain exception vs `ExceptionGroup`), and that state-based classification handles both | T071 | mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1 | Scratch probe: real `MultiServerMCPClient({...stdio...}).session("gmail")` + `list_tools()` under `fail_after(1.5)` for four local commands; then the real `send_gmail_message` (default client) with `sys.executable -c ...` as the server command. No npx, no network | Both shapes occur. A missing executable raises a plain `FileNotFoundError` (stdio_client's `OSError` path, before any task group). A process that exits at once, or that prints non-JSON and exits, raises `ExceptionGroup[ExceptionGroup[McpError('Connection closed')]]`. A server that never answers `initialize` raises a plain `TimeoutError` from `fail_after`. All are `Exception` subclasses, so `except Exception` catches them, and classification reads only `_AttemptState.phase` (still `start`). Through `send_gmail_message`: the exiting server gives START_FAILED, detail `McpError: Connection closed`, 2 session starts, `call_issued` False, 0.05 s. The hanging server gives START_FAILED, detail `no answer within 0.5 s`, 2 starts, 1.02 s in total. No child process was left behind (pgrep). Cancellation is a `BaseException` and is never caught. |
-| V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) | jinja2 3.1.6 `PackageLoader`, hatchling build backend (`packages = ["src/newsletter_digest"]`) | `render.ENVIRONMENT.get_template("reading_list_email.html.j2")` used by every scratch render; `uv build --wheel --out-dir <scratchpad>/T073_wheel`, then `python3 -I -m zipfile -l` on the wheel | Confirmed. The loader finds the template; the wheel lists `newsletter_digest/templates/reading_list_email.html.j2` (7,223 bytes) beside `reading_list.html.j2`. Packaging is the same as the page template (whole package directory), so no pyproject change. |
+| V33 | `anyio.fail_after` around `ClientSession.call_tool` inside the session task groups raises `TimeoutError` at scope exit, the stdio subprocess is reaped within mcp's 2 s `PROCESS_TERMINATION_TIMEOUT` (local FastMCP sleeping `send_email` tool, no npx) | T077 | mcp 1.30.0 (`PROCESS_TERMINATION_TIMEOUT = 2.0`), langchain-mcp-adapters 0.3.2, anyio 4.15.1 | `tests/test_gmail_mcp_send.py` V33 group: a FastMCP stdio script in `tmp_path` (run with `sys.executable`, 1.1.11-shaped `send_email` signature) that records each call and the pid, in three modes (`instant`, `async-sleep` 60 s, `blocking-sleep` 60 s via `time.sleep`); real `MultiServerMCPClient` from a test-local factory (never `_default_send_client`); `os.kill(pid, 0)` for the reap check; plus scratch timing probe `t077_close_probe.py` | Confirmed for the library, with one T071 defect. (1) With the scopes nested correctly (`fail_after(0.5)` entered and left inside the open session), the timeout comes out as a plain `TimeoutError` (no `ExceptionGroup`) 0.51 s after the call, the call reached the server once with exactly the five keys, and the process is gone after the `async with` exits: 0.11 s when the server's loop is responsive (it exits on stdin EOF), 2.1 s when the server is blocked (stdio_client terminates it after the 2 s wait). Start-up is about 0.5 s, so no `slow` marker is needed (3.2 s worst case). (2) Through the real `send_gmail_message`, every start fails: `_send_attempt` enters `client.session()` (which opens anyio task groups) inside `with anyio.fail_after(start_timeout)` and leaves that scope while the session is still open, so anyio raises `RuntimeError: Attempted to exit a cancel scope that isn't the current tasks's current cancel scope`. Result: START_FAILED after 2 starts and no call, even against an instantly answering server; with an outer cancel scope in the caller the same RuntimeError can escape from the caller's scope too. The fakes have no task groups and hide this (learnings T005 fix). The three real-session tests are strict xfails (`REAL_SESSION_DEFECT`); a scratch plugin with a correctly nested attempt (one `CancelScope` with the start deadline around the whole `async with`, deadline set to inf after listing, the call under its own nested `fail_after`) turns all three into XPASS and keeps the other 148 tests green. Per EP-9, T071 should be reopened. **Resolved by the T071 fix 1ca246e** (one `CancelScope` with the start deadline around the whole session, deadline lifted after listing, the call under its own `fail_after`): the `REAL_SESSION_DEFECT` strict xfails were removed. **T087 re-check at 694753e:** `pytest tests/test_gmail_mcp_send.py -k v33` gives 5 passed, 0 xfailed (library check, real success, timeout after the call for async and blocking servers, process reaped). |
+| V34 | Shape of session-start failures through `MultiServerMCPClient.session` (plain exception vs `ExceptionGroup`), and that state-based classification handles both | T071 | mcp 1.30.0, langchain-mcp-adapters 0.3.2, anyio 4.15.1 | Scratch probe: real `MultiServerMCPClient({...stdio...}).session("gmail")` + `list_tools()` under `fail_after(1.5)` for four local commands; then the real `send_gmail_message` (default client) with `sys.executable -c ...` as the server command. No npx, no network | Both shapes occur. A missing executable raises a plain `FileNotFoundError` (stdio_client's `OSError` path, before any task group). A process that exits at once, or that prints non-JSON and exits, raises `ExceptionGroup[ExceptionGroup[McpError('Connection closed')]]`. A server that never answers `initialize` raises a plain `TimeoutError` from `fail_after`. All are `Exception` subclasses, so `except Exception` catches them, and classification reads only `_AttemptState.phase` (still `start`). Through `send_gmail_message`: the exiting server gives START_FAILED, detail `McpError: Connection closed`, 2 session starts, `call_issued` False, 0.05 s. The hanging server gives START_FAILED, detail `no answer within 0.5 s`, 2 starts, 1.02 s in total. No child process was left behind (pgrep). Cancellation is a `BaseException` and is never caught. **T087 re-probe after the T071 fix 1ca246e** (HEAD 694753e, scratch `T087_v34_probe.py`, real `send_gmail_message` with `client_factory=MultiServerMCPClient` and `sys.executable -c ...` commands, `start_timeout=0.5`, `retry_pause=0`): the results are the same. Exits at once: START_FAILED, `McpError: Connection closed`, 2 starts, no call, 0.03 s. Non-JSON then exits: the same, 0.03 s (mcp's own stdout reader logs a pydantic traceback for the bad line on stderr; that is library logging, not ours). Never answers `initialize`: START_FAILED, `no answer within 0.5 s` (now from the start `CancelScope`, not `fail_after`), 2 starts, no call, 1.01 s. No child process was left behind (pgrep on a marker). Through `send_gmail_message` a missing executable never reaches `stdio_client`: the `shutil.which` pre-check gives START_FAILED with 0 starts (covered by `test_command_not_on_path`, not re-probed). |
+| V35 | `render.ENVIRONMENT` (`PackageLoader`) finds `reading_list_email.html.j2`; `uv build --wheel` includes it | T073 (wheel re-checked by T087) | jinja2 3.1.6 `PackageLoader`, hatchling build backend (`packages = ["src/newsletter_digest"]`) | `render.ENVIRONMENT.get_template("reading_list_email.html.j2")` used by every scratch render; `uv build --wheel --out-dir <scratchpad>/T073_wheel`, then `python3 -I -m zipfile -l` on the wheel | Confirmed. The loader finds the template; the wheel lists `newsletter_digest/templates/reading_list_email.html.j2` (7,223 bytes) beside `reading_list.html.j2`. Packaging is the same as the page template (whole package directory), so no pyproject change. **T087 wheel re-check at 694753e:** `uv build --wheel --out-dir <scratchpad>/T087_wheel` lists `newsletter_digest/templates/reading_list_email.html.j2` (7,223 bytes), `reading_list.html.j2` and the fonts, and no `.env` or `out/`. |
 | V36 | `str.encode("ascii", "xmlcharrefreplace")` emits one decimal reference per astral code point (no surrogate pairs); lone surrogates must be mapped first | T073 | CPython 3.13.5 | Probe: `"a\U0001f600b\U0001f469\u200d\U0001f4bb\u00e9\u65e5".encode("ascii", "xmlcharrefreplace")`; the same on `"\ud800x"`; `"\ud800".encode("utf-8")`; `unicodedata.normalize("NFKD", "a\ud800\u00e9")` | Confirmed. Output `a&#128512;b&#128105;&#8205;&#128187;&#233;&#26085;`: one decimal reference per code point, astral included, never a surrogate pair (a ZWJ sequence is one reference per code point). A lone surrogate becomes `&#55296;` (an invalid reference) and cannot be UTF-8 encoded, so `to_email_ascii` maps U+D800-U+DFFF to U+FFFD first (`&#65533;`). NFKD passes lone surrogates through unchanged. |
 | V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) | `tests/email_fixture.py` at dadcc2c; template and renderer of the T073 commit | Scratch script (synthetic fixtures only): per-item bytes = (render of `make_list(40)` minus `make_list(20)`) / 20 for one item kind, ASCII-encoded before wrapping; `render_email_html` wrapped to count renders per `render_email` call | Per item: newsletter-only 1,420 B (ED-10 estimate 1.0-1.3 KB; the fixture is at the model caps: 300-char summary, 200-char reason, 150-300-char URLs whose `&` become `&amp;` in the href); compact newsletter-only 1,119 B; fetched with 5 key points 3,638 B (estimate about 3.5 KB); CJK newsletter-only 5,083 B; CJK fetched 20,678 B; empty-list document 1,710 B. So about 65 plain items fit in 95,000 bytes (estimate 70-90). `size_300` unbudgeted 464,860 B; budgeted 94,592 B, 41 shown (10 must + 31 worth), 259 omitted (all 200 skim, then 59 worth), 9 renders (1 full + 8 search; estimate about 10). `unranked_300` 94,497 B, 52 shown, 9 renders. 100 items (10/40/50, 10 fetched): 94,682 B, 48 shown, 8 renders, 66 ms. `must_heavy`: 2 renders, compact, `over_budget=True` at 245,360 B. `cjk_heavy` (60): compact, 53,207 B, 5 shown. **T078 re-measure** (same method, `tests/email_fixture.py` at dadcc2c, renderer at 6c15e04, `html_name=reading-list-2026-11-04.html`): identical per-item bytes (newsletter-only 1,420 / compact 1,119; fetched 3,638 / compact 2,019; CJK 5,083 / compact 3,509; CJK fetched 20,678 / compact 10,141; empty document 1,710). `size_300`: unbudgeted 464,860 B (asserted > 95,000 by measurement in `test_size_300`), final 94,592 B, 41 shown, 259 omitted, 9 renders, 108 ms; `unranked_300` 94,497 B, 52 shown, 9 renders; 100 items 94,682 B, 48 shown, 8 renders, 56 ms (NFR-E6 test asserts < 1 s); `must_heavy` 2 renders, compact + `over_budget` at 245,360 B; `cjk_heavy` (60) compact 53,207 B, 5 shown, 8 renders; golden (`standard_list`) 24,299 B, 1 render. |
 | V38 | click 8.5: `--email` `is_flag` without `envvar` ignores env; three `anyio.run` calls in one process (`run_digest`, Telegram, email); `ctx.exit(3)` after both channels | T075 | click 8.5.0, anyio 4.15.1 (uv.lock) | Scratch pytest smoke `t075_smoke_test.py` (scratchpad, offline: sockets blocked, `gmail_mcp.shutil.which` patched, `gmail_mcp._default_send_client` = T072 fake factory, Telegram on `httpx.MockTransport` via `delivery.deliver_reading_list` partial, `cli.run_digest` = `FakeRunDigest`), CliRunner in-process; `cli.digest.make_context(...).params` and the option's `.envvar` | Confirmed. The `--email` option has `envvar is None`, the command sets no `auto_envvar_prefix`, so no env value can turn it on; the resolved default is `False`. One process runs `anyio.run(run_digest)`, the Telegram `anyio.run` and the email `anyio.run` in sequence without error (`--telegram --email`, all four success/failure combinations): both channels are attempted every time, the Telegram line precedes the `Email:` line, stdout is the HTML plus the PDF path, exit 0 only when both succeed, else 3 from the single merged `ctx.exit(3)` after both. Caveat: the email `anyio.run` was exercised with the fake send client only; the real-session nesting defect T077 found in T071 (V33) is not visible through fakes. |
@@ -4933,3 +4933,180 @@ Only the positive checker catches these 11 mutants:
   check` shows 0 errors, and `ruff format` was run on the touched files.
   `ruff format --check .` reports only `shared/designs.md`, which existed before this
   work and was not touched.
+
+## T087 — Final verification gate (email delivery): pytest, ruff format/check, pyrefly, CLI smoke, identity, diff scope, manual e2e steps
+
+Run on 2026-11-06 at HEAD 694753e (branch feat/newsletter-digest), offline. `.env` and
+`out/` were never read or touched. Every CLI run used an empty scratch cwd. No npx,
+Gmail, Telegram or OpenRouter was reached. No source or test file was changed. This
+task edited only these notes: this section, plus appended re-check notes in rows
+V33, V34 and V35. No V31-V38 cell was still TODO and none was overwritten.
+
+| Check | Result |
+| --- | --- |
+| `uv sync` | OK (114 resolved, 111 audited) |
+| `uv lock --check` | OK, exit 0 |
+| `uv run pytest -q` | 4933 passed, 2 deselected (integration), 2 xfailed, 0 failed (83 s). The 2 xfails are the known T053 limitations (`test_delivery.py::test_bare_token_from_a_factory_exception_before_any_send_is_redacted`, `test_telegram_redaction.py::test_factory_error_with_bare_token_before_any_send`). The 2 T078 strict xfails are gone (694753e) |
+| Focused suite (`test_flag_off_identity`, `test_architecture`, `test_config_email`, `test_gmail_mcp_send`, `test_email_render`, `test_email_delivery`, `test_cli_email`, `test_agent`, `test_cli_telegram`) | 1535 passed, 0 xfailed (58 s) |
+| V33 group (`test_gmail_mcp_send.py -k v33`) | 5 passed, 0 xfailed (after the T071 fix 1ca246e) |
+| `uv run ruff format --check src tests` | 64 files already formatted |
+| `uv run ruff check .` | All checks passed |
+| `uv run pyrefly check` | 0 errors (17 suppressed). New suppression comments since e41b124: 4, all in tests, none in src. 2 are `# type: ignore[misc]` on deliberate frozen-dataclass assignments (`test_email_delivery.py`, `test_gmail_mcp_send.py` `message.subject = "changed"`), 1 is `[arg-type]` on a deliberately invalid status literal (`test_email_delivery.py`), and 1 is `[override]` on a fake mapping's `get` (`test_flag_off_identity.py`). Each is the point of its test |
+| `uv run newsletter-digest --help` (empty cwd) | Exit 0. The command docstring says EMAIL_TO and EMAIL_SEND_TIMEOUT are read only with `--email`. The `--email` help has the privacy text ("every recipient sees the others in To"), "no SMTP, no PDF", "The AI agent never gets the send tool" and no `[env var: ...]` |
+| Exit-2 smokes (see below) | 3/3 exit 2 before any Gmail work; fake npx and marker never started; `--out` empty |
+| CLI smoke `T087_cli_smoke.py` | Flag off 6/6, flag on 23/23 checks pass (see below) |
+| `import newsletter_digest.cli` (uv, empty cwd) | No `newsletter_digest.email*` or `fpdf*` module loaded (positive control: `newsletter_digest.gmail_mcp` is loaded; `cli.__file__` is this tree) |
+| `uv build --wheel` (scratchpad) | Has `templates/reading_list_email.html.j2` (7,223 B), `reading_list.html.j2` and the fonts; no `.env` or `out/` (V35) |
+| Test diff vs e41b124 | Modified only: conftest.py (+20/-0, one autouse fixture `_no_real_mcp_send_client` plus its raiser), test_cli.py (+1/-0, `"--email",` in ALL_OPTIONS), test_agent.py (+463/-0), test_flag_off_identity.py (+568/-0), test_gmail_mcp.py (+103/-0), test_architecture.py (+2244/-46). Of the 46 removed architecture lines, 43 come back verbatim elsewhere in the file (moved by the diff), and 3 really changed: `NEW_MODULES` was reflowed to include the email modules, and `DELIVERY_MODULES` became `LAZY_ONLY_MODULES` in the lazy-import helper (2 lines, T069). Everything else is added files, including the new golden `fixtures/email_ranked_golden.html` |
+| Unchanged since e41b124 | 0 diff lines for `tests/fixtures/flag_off_*` (last commit b5b2b50, T023), models.py, render.py, reading_list.html.j2, agent.py, tools.py, prompts.py, delivery.py, pdf.py and telegram.py. The Telegram test files (`test_telegram.py`, `test_telegram_redaction.py`, `test_cli_telegram.py`, `test_delivery.py`, `test_pdf.py`) are untouched |
+| pyproject.toml / uv.lock | Unchanged (committed and working tree); no new dependency (V31) |
+| `gmail_mcp.py` diff vs e41b124 | +429/-3. The 3 removed lines are the isort-merged imports (`collections.abc`, `typing`, `newsletter_digest.config`); everything else is additions (incl. `import math` from 1ca246e) |
+| Secrets / staging | `git status` shows no `.env`, `out/`, credential or token file; the index has nothing staged before this commit |
+| Address scan of the added lines | Apart from reserved domains (`example.com/.org/.net`, `.test`, `.invalid`, `.example`, any case), the only address-shaped strings are placeholders: `a@x.org`/`b@x.org` in a config.py comment; `a@x.io`, `b@x.io`, `b@y.io`, `x@evil.io` in shared/*.md; `name@domain.tld` in README; and invalid-syntax inputs (`a@-example.com`, `a@.example.com`, `a@example-.com`, `a@example..com`) in test_config_email.py. No real address, and the user's own address appears nowhere |
+
+**Exit-2 smokes.** From an empty scratch cwd: `/usr/bin/env -u EMAIL_TO -u
+EMAIL_SEND_TIMEOUT -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID "PATH=<scratch>/bin:$PATH"
+OPENROUTER_API_KEY=dummy GMAIL_MCP_COMMAND=<scratch>/bin/marker uv run --project <dir>
+newsletter-digest --model x/y --email --out <scratch>/out`. `<scratch>/bin/npx` and the
+marker each append to a file when started.
+- No EMAIL_TO: exit 2, `EMAIL_TO is not set (needed by --email); add a comma-separated
+  list of addresses to .env, e.g. EMAIL_TO=you@example.com. See README > Email delivery.`
+- `EMAIL_TO='Bob <b@example.com>'`: exit 2, `EMAIL_TO entry 1 is not a plain email
+  address ('Bob <b@example.com>'): display names and angle brackets are not supported.
+  ...`. The echo is the ED-5 `ascii()` echo of that entry only.
+- `EMAIL_TO='a@example.com;b@example.com'`: exit 2, `... semicolons do not separate
+  addresses (use commas). ...`. Only that entry is echoed.
+- In all three: stdout empty, nothing written to `--out`, and neither the fake npx nor
+  the marker was ever started.
+
+**CLI smoke** (scratchpad `T087_cli_smoke.py`, outside pytest, so no conftest guards).
+It blocks `socket.socket.connect/connect_ex`, `socket.create_connection` and
+`socket.getaddrinfo`, and deletes every `EMAIL_*`, `TELEGRAM_*`, `NEWSLETTER_*` and
+`GMAIL_MCP_*` variable. It replaces `cli.run_digest` with a fixed-list fake, patches
+`gmail_mcp.shutil.which` and sets `gmail_mcp._default_send_client` to the T072
+`fake_send_factory`. It drives `cli.digest` through CliRunner. Flag off and flag on run
+in separate processes.
+- Flag off (with a garbage `EMAIL_TO` in the env, which must not be read): exit 0, one
+  stdout line, only the `.html` written, bytes equal `flag_off_ranked_golden.html`, no
+  `Email:` line, and no `newsletter_digest.email*` or `fpdf*` in `sys.modules`
+  afterwards.
+- `--email` success (`ef.standard_list()`): exit 0, one stdout line, exactly one
+  `send_email` call with exactly `to, subject, body, htmlBody, mimeType`, no PDF, and
+  `Email: sent to 1 recipient (Gmail id 19a4f00dcafe1234).`.
+- `--email` with the flag-off ranked list: exit 0, and the HTML still equals the
+  flag-off golden byte for byte.
+- `--email` with an `Error: Insufficient Permission` reply: exit 3, the HTML is kept
+  and its path is on stdout, one call and no retry, no traceback, and `Email: FAILED
+  (... Insufficient Permission); re-run npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11
+  auth). Saved: <html>. See README > Email delivery.`. The `@` there is the package
+  spec, not an address (learnings T076/T074).
+- `--telegram --email` with Telegram 401 (MockTransport behind
+  `telegram._default_transport`) and email OK: exit 3. Both stderr lines appear,
+  `Telegram delivery failed (HTTP 401 ...)` first, then `Email: sent to 1 recipient`.
+- `--telegram --email` with Telegram OK and the email `Error:` reply: exit 3. Stderr has
+  `Sent reading-list-2026-11-04.pdf to Telegram.` and `Email: FAILED (`. Stdout has the
+  HTML and PDF paths. There were 2 Telegram requests in total, and the token secret
+  never appears in the output, even with all whitespace removed.
+
+**Decisions not in the spec.**
+- The flag-off golden comparison uses `tests/flag_off_fixture.build_ranked_reading_list()`
+  (AF-9, end date 2026-10-31). The `tests/email_fixture.py` lists have no page-level
+  golden: `email_ranked_golden.html` is the email body. The `--email` cases use
+  `ef.standard_list()`. One extra `--email` run on the flag-off list also proves the
+  saved HTML does not change with the flag on.
+- The `--telegram --email` check ran both "one channel fails" directions instead of one.
+
+**`ruff format --check .` and `shared/designs.md` (coordinator item).** `ruff format
+--check .` exits 1 with "1 file would be reformatted", which is `shared/designs.md`.
+`--check src tests` is clean.
+- Cause: ruff 0.17.3's default `file_resolver.include` contains `*.md`. This is
+  `ruff check --show-settings`; the project has no `include`/`extend-include` and no
+  preview, and `--no-preview` gives the same result. So `ruff format .` formats the
+  fenced `python` code blocks inside markdown files.
+- The flagged blocks are the ED-amendment code fences at designs.md lines 2509-2683
+  (`SEND_START_ATTEMPTS`, `OutgoingEmail`, `GmailSendErrorKind`/`GmailSendError`,
+  `EmailOutcome`, the config constants). They use column-aligned inline comments (one
+  space or many before `#`, where ruff wants exactly two). One stub line,
+  `def ambiguous(self) -> bool: ...  # ...`, is over 88 columns.
+- The pre-amendment file (`fa28154^`) checks clean, so the drift came in with fa28154.
+  The other 7 markdown files are already formatted.
+- Not a gate failure: T087 checks `src tests` (learnings T024). designs.md was not
+  changed. Options for the owner: run `ruff format shared/designs.md` (layout only, as
+  in T047), or add `extend-exclude = ["*.md"]` to `[tool.ruff]` (a pyproject change,
+  out of scope here).
+
+**Commit trailers (report only, no history rewritten).** 2c034d8 (T070 config) and
+949bd5f (T069 architecture rules) both end with `Co-Authored-By: Claude Opus 5.5
+<noreply@anthropic.com>`, not the project's `Claude Sonnet 5.5` trailer. Every other
+commit checked uses the Sonnet trailer (1ca246e, e41b124).
+
+**Defects found:** none in the source. Nothing was routed as review_feedback.
+
+**Open items (known, not fixed here, all non-blocking).**
+- T085 M-1 (MINOR, T071): a start timeout leaves the real server orphaned when the
+  command is a launcher. Cancelling the start scope skips mcp's `_terminate_process_tree`
+  (killpg), so only the direct `npx` child is killed, and the `npx` grandchild (the MCP
+  server) keeps running. At least document it.
+- T085 M-3 (MINOR, design/T074): an `Error:` reply whose text is a network failure
+  after the request was written (`ECONNRESET`, `socket hang up`, `ETIMEDOUT`, 5xx
+  `backendError`) is reported as FAILED ("Nothing was sent"), although the mail may have
+  been sent. A re-run can then send a duplicate. Suggested: a REJECTED class for those
+  markers mapped to OUTCOME UNKNOWN, or softer README wording. Confirm the real texts in
+  the manual end-to-end.
+- T065 finding 2 (MINOR, coordinator item, verified): the two Telegram stderr prints in
+  `cli._deliver_to_telegram` (cli.py lines 335 and 340) pass `markup=False,
+  highlight=False` but not `emoji=False`, so Rich can still rewrite `:name:` codes in a
+  Telegram reason or path. The `Email:` line (cli.py 410) has it since 694753e.
+- T085 NITs: N-1, the start-deadline race guard (`gmail_mcp.py` `if not
+  start_scope.cancel_called`), has no test. N-2, Ctrl-C during the send exits 1, which
+  the README defines as "no digest saved". N-3, `redact_addresses` misses mangled
+  spellings. N-4, a config error echoes up to 32 characters of a bad `EMAIL_TO` entry
+  (accepted).
+- T086 M1 (dry): limits are duplicated with no pinning test: line limit
+  `email_render.MAX_EMAIL_LINE_CHARS` vs `gmail_mcp._MAX_BODY_LINE_CHARS`, subject 150
+  vs `_SUBJECT_RE`. A read-only check at HEAD shows they agree (900/900, 150/150). T087
+  added no test, because its scope is verification plus notes. The suggested pinning test
+  is still open for a later test task.
+- T086 M2 (dry): `build_subject` repeats the `build_caption` count wording.
+- T086 M3 (dry): there are three one-line text cleaners.
+- T086 M4 (coupling): cli mirrors the `EmailOutcome` shape (`_EmailResult`,
+  `_EmailImportFailed`, the 9-field safety-net outcome).
+- T086 M5 is resolved by 694753e.
+- T086 INFO I1-I7 are wording and typing follow-ups:
+  - I2: the `find_lazy_email_import_violations` docstring is stale.
+  - I4: README exit-code rows 0/1 do not mention channels.
+  - I5: the `EMAIL_SEND_TIMEOUT` error has no README pointer.
+  - I7: `Any`-typed client/session seams.
+- Accepted limitation: the 2 T053 strict xfails (bare Telegram token raised by a custom
+  `client_factory` before any send).
+
+**Manual end-to-end for the user (acceptance 34, NOT run here: it sends real mail).**
+1. In `.env` in the directory you run from, set `EMAIL_TO=<your own address>` first.
+   Use one address only for the first run.
+2. Run `uv run newsletter-digest --window 1w --max-emails 5 --email`, then `echo $?`.
+   Expect exit 0. Stdout has one line, `out/reading-list-<date>.html`. Stderr ends with
+   `Email: sent to 1 recipient (Gmail id ...).`, and no PDF is written.
+3. Open the mail in Gmail web and in the Gmail phone app. Check:
+   - it is legible;
+   - the article links are tappable and open the right pages;
+   - there is no `[Message clipped]`;
+   - there are no dead controls (no buttons or scripts);
+   - it stays readable with forced dark mode (phone app dark theme).
+4. Repeat with a large window (for example `--window 1m --max-emails 50 --email`). Check:
+   - the omitted-count line (`... N more in the saved HTML`) and the `Email:` line
+     suffix;
+   - the size: in Gmail web, "Show original" shows the message size, and the HTML part
+     should be within the 95,000-byte budget;
+   - again, no `[Message clipped]`.
+5. On a permission error (`Email: FAILED (... re-run npx
+   @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth)`), run `npx
+   @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth` once, then re-run step 2.
+6. ED-21 [re-verify] items. Report these back for these notes:
+   - Does the 95,000-byte budget avoid clipping in practice (step 4)?
+   - Are the LF-only, 7bit `multipart/alternative` parts intact? "Show original": both
+     `text/plain` and `text/html` parts are present and not mangled.
+   - The token scope the server's OAuth token was granted (from the consent screen or
+     the server's credentials metadata; never paste the token itself).
+   - For T085 M-3: the exact text of any `Error:` reply you see.
+7. Never paste tokens, credentials or `.env` contents into a terminal log, an issue or
+   a chat.
