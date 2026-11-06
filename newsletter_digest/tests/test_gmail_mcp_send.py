@@ -1111,16 +1111,6 @@ SENT_KEYS_LINE = ",".join(sorted(ef.SEND_ARGUMENT_KEYS))
 #: mcp's ``stdio_client`` waits this long for the server to exit before it
 #: terminates it (mcp 1.30 ``PROCESS_TERMINATION_TIMEOUT``).
 TERMINATION_WAIT_S = 2.0
-#: T071 defect: ``_send_attempt`` enters ``client.session()`` (anyio task groups)
-#: inside ``with anyio.fail_after(start_timeout)`` and leaves that scope while the
-#: session is still open. anyio raises "Attempted to exit a cancel scope that isn't
-#: the current tasks's current cancel scope", so every real send ends START_FAILED
-#: after two starts (the fakes have no task groups and hide it). Strict: remove the
-#: marker once gmail_mcp.py is fixed (EP-9: T071 is reopened, not worked around).
-REAL_SESSION_DEFECT = pytest.mark.xfail(
-    strict=True,
-    reason="T071: start-timeout cancel scope wraps the session enter (see notes)",
-)
 
 
 @dataclasses.dataclass
@@ -1233,7 +1223,6 @@ async def test_v33_fail_after_around_real_call_tool(
         assert close_seconds < TERMINATION_WAIT_S
 
 
-@REAL_SESSION_DEFECT
 @pytest.mark.anyio
 async def test_v33_real_send_success_through_local_server(
     local_server_factory: Callable[[str], LocalServer], message: OutgoingEmail
@@ -1261,7 +1250,6 @@ async def test_v33_real_send_success_through_local_server(
     assert all(process_gone(pid) for pid in server.pids())
 
 
-@REAL_SESSION_DEFECT
 @pytest.mark.parametrize("mode", ["async-sleep", "blocking-sleep"])
 @pytest.mark.anyio
 async def test_v33_real_send_timeout_after_call_is_classified_and_reaped(

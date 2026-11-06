@@ -8,6 +8,7 @@ names and output formats (verified against the pinned default server,
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -757,37 +758,55 @@ async def _send_attempt(
 
     Records progress in ``state`` (``phase`` turns ``"call"`` right before the
     call is issued); the session is closed when this returns or raises.
+
+    One cancel scope with the start deadline wraps the whole session, because
+    the session's task groups are entered inside it and anyio requires scopes
+    to be left in the order they were entered. The deadline is lifted once the
+    tools are listed; the call then runs under its own nested timeout.
     """
-    async with AsyncExitStack() as stack:
-        try:
-            with anyio.fail_after(start_timeout):
-                session = await stack.enter_async_context(client.session(SERVER_NAME))
-                tools = await _list_all_tools(session)
-        except TimeoutError:
-            state.timed_out = True
-            state.detail = f"no answer within {start_timeout:g} s"
-            raise
-        logger.debug("Gmail MCP send session lists %d tools", len(tools))
-        wanted = GMAIL_SEND_TOOL_MAP["send_email"]
-        tool = next((tool for tool in tools if tool.name == wanted), None)
-        if tool is None:  # never fall back to another tool (FR-064)
-            state.deterministic = GmailSendErrorKind.TOOL_MISSING
-            state.detail = f"no tool named {wanted} is listed"
-            return
-        mismatch = _schema_mismatch(tool.inputSchema)
-        if mismatch:
-            state.deterministic = GmailSendErrorKind.TOOL_SCHEMA_CHANGED
-            state.detail = mismatch
-            return
-        state.phase = "call"  # from here on the call counts as issued
-        try:
-            with anyio.fail_after(send_timeout):
-                state.reply = await session.call_tool(tool.name, args)
-        except TimeoutError:
-            state.timed_out = True
-            state.detail = f"no reply within {send_timeout:g} s"
-            raise
-        state.phase = "done"
+    deadline = anyio.current_time() + start_timeout
+    with anyio.CancelScope(deadline=deadline) as start_scope:
+        async with client.session(SERVER_NAME) as session:
+            tools = await _list_all_tools(session)
+            start_scope.deadline = math.inf
+            # cancel_called stays set if the deadline passed as the list came back
+            if not start_scope.cancel_called:
+                await _call_send_tool(state, session, tools, args, send_timeout)
+    if start_scope.cancel_called:  # only the start deadline cancels this scope
+        state.timed_out = True
+        state.detail = f"no answer within {start_timeout:g} s"
+        raise TimeoutError(state.detail)
+
+
+async def _call_send_tool(
+    state: _AttemptState,
+    session: Any,
+    tools: list[Any],
+    args: dict[str, object],
+    send_timeout: float,
+) -> None:
+    """Look up and check ``send_email`` in ``tools``, then call it once."""
+    logger.debug("Gmail MCP send session lists %d tools", len(tools))
+    wanted = GMAIL_SEND_TOOL_MAP["send_email"]
+    tool = next((tool for tool in tools if tool.name == wanted), None)
+    if tool is None:  # never fall back to another tool (FR-064)
+        state.deterministic = GmailSendErrorKind.TOOL_MISSING
+        state.detail = f"no tool named {wanted} is listed"
+        return
+    mismatch = _schema_mismatch(tool.inputSchema)
+    if mismatch:
+        state.deterministic = GmailSendErrorKind.TOOL_SCHEMA_CHANGED
+        state.detail = mismatch
+        return
+    state.phase = "call"  # from here on the call counts as issued
+    try:
+        with anyio.fail_after(send_timeout):
+            state.reply = await session.call_tool(tool.name, args)
+    except TimeoutError:
+        state.timed_out = True
+        state.detail = f"no reply within {send_timeout:g} s"
+        raise
+    state.phase = "done"
 
 
 async def _list_all_tools(session: Any) -> list[Any]:

@@ -3878,6 +3878,12 @@ Decisions not covered by the spec / tradeoffs:
   and `timed_out` picks TIMEOUT_AFTER_SEND over TRANSPORT_AFTER_SEND. A
   `TimeoutError` raised by `call_tool` itself also counts as a timeout (the ED-4
   table says "phase call, TimeoutError").
+- **Deviation from ED-4's pseudocode (fixed in "T071 fix" below).** ED-4 enters
+  the session inside `with anyio.fail_after(start_timeout)` and leaves that scope
+  with the session still open. anyio rejects this on a real session (its task
+  groups were entered inside the scope), so the code now wraps the whole `async
+  with client.session(...)` in one `CancelScope` with the start deadline, lifted
+  after listing. The ED-4 table and every behaviour are unchanged.
 - **Retry rule:** retry only when `phase == "start"` and no deterministic kind was
   set, and only while `attempt < SEND_START_ATTEMPTS`. `factory(...)` is called
   inside the attempt's `try`, so a factory that raises (for example the T077 conftest
@@ -4411,3 +4417,87 @@ Checks run:
   default 90, max 10 recipients); no mismatch to route to T070.
 - Not verified live: the OAuth scope claim is from the design/verified facts; the first
   real send confirms it (stated in the README).
+
+## T071 fix — one start-deadline cancel scope around the whole send session (T077 finding, V33)
+
+The bug: `_send_attempt` entered `client.session(SERVER_NAME)` through an
+`AsyncExitStack` inside `with anyio.fail_after(start_timeout)`, then left that `with`
+while the session was still open. `stdio_client` and `ClientSession` enter anyio task
+groups (cancel scopes) inside it, so on a real session anyio raised `RuntimeError:
+Attempted to exit a cancel scope that isn't the current tasks's current cancel
+scope`. The catch-all classified that as a start failure, so every real send ended
+START_FAILED after 2 starts with no call. ED-4's pseudocode has the same shape (design
+defect, now noted as a deviation in the T071 section). The T072 fakes have no task
+groups, so no fake-driven test could see it.
+
+What changed (only inside the T071 send section of `gmail_mcp.py`):
+- `_send_attempt` now runs `with anyio.CancelScope(deadline=anyio.current_time() +
+  start_timeout) as start_scope:` around `async with client.session(SERVER_NAME) as
+  session:`. After `_list_all_tools` returns, `start_scope.deadline = math.inf`, so
+  the start deadline can no longer fire. Scopes are now entered and left in strict
+  nesting order: start scope, then session task groups, then the call's own
+  `fail_after(send_timeout)` inside the session.
+- **Start timeout.** After the scope, `if start_scope.cancel_called:` sets
+  `state.timed_out`, the detail `no answer within <start_timeout> s`, and raises
+  `TimeoutError(detail)`. The catch-all then classifies it from `state` (phase
+  `"start"`, START_FAILED, retried once), as before. `cancel_called` is used, not
+  `cancelled_caught`: nothing else cancels this scope, and it also covers the race
+  below.
+- **Race guard.** anyio's `cancel_called` is sticky: once the deadline has fired,
+  setting the deadline to inf does not undo it. If the deadline passes just as the
+  list comes back, the cancel is already pending and would hit the next await,
+  possibly inside `call_tool`. So the tool lookup and the call run only `if not
+  start_scope.cancel_called`. Otherwise the attempt stays in phase `"start"` and ends
+  as a start timeout, and the call is never issued under a fired start deadline.
+- The tool lookup, schema check and the one `call_tool` moved unchanged into a new
+  private helper `_call_send_tool(state, session, tools, args, send_timeout)`. This
+  was needed so the post-scope start-timeout check still runs when the lookup returns
+  early (a `return` inside the `with` would skip it). It is reached only from
+  `_send_attempt`, so the ED-3 rule "(d) `call_tool` only in `send_gmail_message` and
+  the private helpers it reaches" still holds (architecture test green). The
+  `GMAIL_SEND_TOOL_MAP["send_email"]` lookup moved with it.
+- `AsyncExitStack` is no longer used on the send path. Its import line is pre-existing
+  and still used by the read path, so it stays. Added line: `import math`.
+- `send_gmail_message`, `_AttemptState`, `_attempt_outcome` and the ED-4 table are
+  unchanged. Classification still reads only `state`. `call_tool` is still called at
+  most once and never retried after it is issued. The session is closed exactly once
+  (`async with`), and closing still finishes before the retry pause.
+
+Diff vs `e41b124`: still added-lines-only apart from the three isort-merged import
+lines already listed in the T071 section (now 429 added, 3 removed). Lines changed
+inside my own T071 code: the body of `_send_attempt` (rewritten as above, with 4 new
+docstring lines), the new `_call_send_tool` (its body is the old tail of
+`_send_attempt`, dedented one level), and `import math`.
+
+Test edit (the only one): removed the `REAL_SESSION_DEFECT` strict-xfail decorator from
+`test_v33_real_send_success_through_local_server` and
+`test_v33_real_send_timeout_after_call_is_classified_and_reaped` (2 params = the 3
+tests). Also removed the now-unused `REAL_SESSION_DEFECT` constant and its 6-line
+comment that describes the defect (12 lines removed, nothing added).
+
+Checks run:
+- The 3 former xfails pass: real success (1 session, 1 call with the five keys,
+  process reaped), and timeout after the call, async and blocking server
+  (TIMEOUT_AFTER_SEND, `no reply within 1 s`, 1 session, 1 call, process reaped).
+- Scratch probe (scratchpad `t071fix/test_t071_fix_probe.py`, not a project test; the
+  local FastMCP server and fixtures are imported from `tests/test_gmail_mcp_send.py`,
+  sockets blocked). It ran on both the asyncio and trio backends: 10/10 passed.
+  - A real start timeout (`start_timeout=0.05`) gives START_FAILED with `no answer
+    within 0.05 s`, 2 starts, no call, and both processes reaped.
+  - An outer `move_on_after(1.5)` during a hanging real call (async and blocking
+    server) is not swallowed: no `GmailSendError` and no result, 1 session, 1 call,
+    process reaped.
+  - An outer `move_on_after(0.05)` during a real start is not swallowed: no call,
+    process reaped.
+  - An outer `fail_after(1.5)` tighter than `send_timeout` raises the caller's own
+    `TimeoutError` (not a `GmailSendError`).
+- The existing fake-driven cancellation tests (outer `move_on_after` during a hanging
+  start or call, `BaseException`/`BaseExceptionGroup` passthrough) and all 148 other
+  `test_gmail_mcp_send.py` tests pass unchanged.
+- `uv run pytest -q`: 4553 passed, 2 deselected, 4 xfailed. The 4 xfails belong to
+  other tasks: 2 T053 token limitations and 2 in-flight T078 findings. None is from
+  this module.
+- `tests/test_architecture.py`, `tests/test_gmail_mcp.py` and
+  `tests/test_gmail_mcp_send.py`: 583 passed.
+- `ruff format` and `ruff check .` are clean on my files, and `pyrefly check` reports
+  0 errors.
