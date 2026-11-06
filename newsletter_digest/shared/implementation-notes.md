@@ -4759,3 +4759,135 @@ Checks:
   failure, in T080's untracked in-flight `tests/test_cli_email.py`
   (`test_unexpected_sender_exception_is_outcome_unknown`). It passed alone, after this file,
   and on the rerun. `ruff format`, `ruff check .`, `pyrefly check`: clean (0 errors).
+
+## T083 — Import-boundary tests: positive detectors for the email modules, exactly-one lazy import, real-tree mutation proof
+
+Edited only `tests/test_architecture.py` (plus this section and one learnings entry).
+`git diff HEAD -- tests/test_architecture.py`: 959 added lines, 0 removed. File tests
+309 -> 399.
+
+**Hunks changed in the existing file (EP-6 item 2):**
+1. `test_detector_sees_the_known_project_edges`: its `expected` set gains the seven ED-2
+   edges (cli->email_delivery, email_delivery->{gmail_mcp, email_render, models,
+   config}, email_render->{render, models}) and one comment line. Added lines only.
+2. A new section appended at the end of the file:
+   - `EXPECTED_EMAIL_EDGES`, `REQUIRED_IMPORTED_NAMES`, `MODULE_LEVEL_EMAIL_IMPORTS` and
+     other constants;
+   - the positive checker `find_missing_email_wiring` and its private helpers;
+   - five real-tree positive tests;
+   - `POSITIVE_EMAIL_TREE` with one allowed and ten violation self-tests;
+   - `EMAIL_REAL_TREE_MUTANTS` (47), `ACCEPTANCE_32_MUTANTS` (26) and
+     `test_email_rule_fails_on_mutated_real_tree`;
+   - an id-collision test.
+
+No existing checker, constant, `VIOLATION_CASES`/`ALLOWED_CASES` entry or
+`REAL_TREE_MUTANTS` entry changed. `apply_mutant`, `RealTreeMutant` and the T063 anchors
+(`_CLI_AGENT`, `_CLI_LAZY`, `_TOOLS_CONFIG`) are reused as they are.
+
+**Deviation: where "exactly one" lives.** The task says "tighten the lazy rule". The
+negative `find_lazy_email_import_violations` stays at "at most one". The exactly-one rule
+is in the new positive checker (`_lazy_email_wiring_violations`), the same split T063
+used for Telegram. Why: `ALLOWED_CASES` runs every `EMAIL_RULES` checker on
+`STUB_EMAIL_TREE`, where cli has no email import. Tightening the negative rule would turn
+that existing case red, or force me to edit it. Tradeoff: that checker's docstring still
+reads "(T083 tightens this to exactly once)". I left it alone to keep the diff `+`-only.
+The tightening is `find_missing_email_wiring`. It also requires that the one import is
+not at module level and that its owner is `_deliver_by_email` or a function that
+`_deliver_by_email` calls directly (call path, learnings T063: today
+`_run_email_delivery`). The Telegram rule is asserted next to it in
+`test_detector_sees_both_lazy_cli_imports`, which also checks that the two imports sit
+in different functions.
+
+**Decisions not covered by the spec (all pass on the real tree):**
+- **Allowed == used for the email modules.** The out-edges of each email module equal
+  its `ONLY_PROJECT_IMPORTS` entry. Importers are exactly `email_delivery: [cli]` and
+  `email_render: [email_delivery]`.
+- **Names are taken and used.**
+  - Every name an email module imports from `gmail_mcp` or `render` must be read
+    somewhere in that module as an `ast.Name` load. Mutant: an unused `SEND_MIME_TYPE`
+    is reported.
+  - email_delivery must take `send_gmail_message` and `OutgoingEmail`.
+  - email_render takes exactly `{ENVIRONMENT, safe_url}`: required names (positive)
+    plus the T069 cap (negative).
+  - ED-16 item 1: email_delivery's imports of `gmail_mcp` and `email_render` must be at
+    module level.
+- **Gate.** Every `_deliver_by_email(...)` call in cli must sit in the body of an `if`
+  whose test reads an attribute named `email`, and there must be at least one call. No
+  negative rule caught a missing `if settings.email:` (mutant `cli-email-not-gated`).
+- **Send map.** Exactly one module-level `GMAIL_SEND_TOOL_MAP` assignment, and
+  `ast.literal_eval` of it equals `{"send_email": "send_email"}`.
+- **`call_tool`.**
+  - There is exactly one `.call_tool(...)` call site in the whole package. It is in
+    gmail_mcp, on the send path. The send path is `send_gmail_message` plus the private
+    helpers it reaches by name (today `_send_attempt` -> `_call_send_tool`, after the
+    T071 fix).
+  - The negative rule (d) allows any number of calls on the send path. The positive
+    count is the static stand-in for "called at most once" (mutant
+    `gmail-call-tool-twice`).
+- **Send-path isolation (ED-3 layer 1, ED-17 seam row).**
+  - No send-path function references `load_mcp_tools`, `MultiServerMCPClient`,
+    `GMAIL_TOOL_MAP`, `open_gmail_tools` or `filter_read_only`.
+  - `send_gmail_message` names `_default_send_client`, and `_default_send_client`
+    calls `MultiServerMCPClient`. It is excluded from the path walk, so a direct call
+    to it would not be a false positive.
+  - The read path: `open_gmail_tools` still calls both `load_mcp_tools` and
+    `filter_read_only` (mutant `gmail-read-path-skips-filter`).
+- **Acceptance 32 as a grid.** Each email module × {agent, tools, prompts, fetch,
+  enrich, pdf, telegram} is reported by `find_forbidden_project_imports` (14). Each of
+  agent, tools and prompts × each email module is reported by
+  `find_send_capability_violations` (f) and by `find_importer_violations` (12).
+- Mutants keep the T063 rules. Anchored `str.replace(..., 1)` on the real text in
+  memory; the anchor must still exist; only the mutated module is re-parsed; expected
+  substrings are line-free. The cli email import anchor is the wrapped four-line form
+  (T075). Every anchor was checked to occur exactly once.
+
+**Scratch kill matrix** (scratchpad `T083_matrix.py`; it runs every
+`REAL_TREE_CHECKERS` entry plus both positive checkers on each mutated tree). Baseline:
+all clean. All 47 named mutants are reported by their intended checker. The ten
+task-listed mutants:
+
+| Mutant | Reported by |
+|---|---|
+| agent imports send_gmail_message | send_capability |
+| tools imports email_delivery | layer, importer, send_capability (f) |
+| cli imports email_delivery at module level | eager_delivery_imports, lazy_email_import, missing_email_wiring |
+| open_gmail_tools references GMAIL_SEND_TOOL_MAP | send_capability (b) |
+| filter_read_only default -> GMAIL_SEND_TOOL_MAP | send_capability (b) |
+| "draft_email" literal in gmail_mcp | send_capability (c) |
+| email_delivery imports telegram | forbidden, only_project, importer |
+| email_render imports gmail_mcp | layer, only_project, send_capability (a) |
+| email_delivery references load_mcp_tools | langchain_imports, send_capability (e) |
+| call_tool in open_gmail_tools | send_capability (d), missing_email_wiring |
+
+Only the positive checker catches these 11 mutants:
+- cli: no email import (2 cases), call path skipped (also caught by the negative lazy
+  rule), the `if settings.email:` gate removed;
+- email_delivery: `send_gmail_message` dropped, an unused send name, the config edge
+  dropped, `email_render` imported lazily;
+- email_render: only `safe_url` taken, the models edge dropped;
+- gmail_mcp: `call_tool` removed or called twice, the send path loads tools, filters,
+  builds a client or skips `_default_send_client`, and the read path skips the filter.
+
+**Findings (for review):**
+1. **ED-3 layer 4 does not list "the send path never calls `load_mcp_tools`".** Layer 1
+   states it, but rule (e) covers only `email_delivery`. So a `gmail_mcp` send path that
+   built LangChain tools (`tools = await load_mcp_tools(session)`) passed every T069
+   negative rule. The positive `_send_path_isolation_violations` now reports it (mutant
+   `gmail-send-path-loads-tools`). The same holds for `filter_read_only` and
+   `MultiServerMCPClient` on the send path.
+2. **Coupling, not a defect.** T069 added the email entries to `ONLY_IMPORTED_NAMES`, so
+   the T063 `find_missing_delivery_wiring` (the Telegram positive check) also reports
+   email name violations (mutants `email-render-takes-render-html`,
+   `email-delivery-imports-open-gmail-tools`). Its message still names only TD-2. Not
+   changed (existing checker).
+3. No behaviour in the real tree contradicts ED-2, ED-3 or ED-16. Every positive check
+   holds: the ED-2 edges and only those, the exact names, the single lazy import in
+   `_run_email_delivery`, the gate, the send map, a single `call_tool` in
+   `_call_send_tool`, and `_default_send_client` as the only client factory.
+
+**Verification:**
+- `uv run pytest -q tests/test_architecture.py`: 399 passed.
+- Full suite: 4930 passed, 2 deselected, 4 xfailed. That includes the in-flight T079,
+  T080 and T082 files and `tests/test_flag_off_identity.py`.
+- `uv run ruff format` (own file) and `uv run ruff check .`: clean.
+- `uv run pyrefly check` (and on the file explicitly): 0 errors.

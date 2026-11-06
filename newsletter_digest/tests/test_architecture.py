@@ -1417,6 +1417,14 @@ def test_detector_sees_the_known_project_edges(
         ("pdf", "render"),
         ("pdf", "models"),
         ("telegram", "config"),
+        # ED-2 email edges (T083)
+        ("cli", "email_delivery"),
+        ("email_delivery", "gmail_mcp"),
+        ("email_delivery", "email_render"),
+        ("email_delivery", "models"),
+        ("email_delivery", "config"),
+        ("email_render", "render"),
+        ("email_render", "models"),
     }
     assert expected <= edges, f"edges not seen: {sorted(expected - edges)}"
 
@@ -3652,6 +3660,957 @@ def test_rule_fails_on_mutated_real_tree(
     package: dict[str, SourceModule], mutant_id: str
 ) -> None:
     mutant = REAL_TREE_MUTANTS[mutant_id]
+    original = (SOURCE_DIR / f"{mutant.module}.py").read_text(encoding="utf-8")
+    changed = parse_module(mutant.module, apply_mutant(original, mutant))
+    mutated = {**package, mutant.module: changed}
+    assert mutant.checker(package) == []
+    violations = mutant.checker(mutated)
+    assert any(mutant.expected in v for v in violations), violations
+
+
+# ------------------------------------- positive email detectors (T083, ED-2/3/16)
+
+
+EXPECTED_EMAIL_EDGES = frozenset(
+    {
+        ("cli", "email_delivery"),
+        *(
+            (source, target)
+            for source, deps in ONLY_PROJECT_IMPORTS.items()
+            if source in EMAIL_MODULES
+            for target in deps
+        ),
+    }
+)
+"""Every ED-2 email edge, which the real tree must contain (not only allow)."""
+
+REQUIRED_IMPORTED_NAMES: dict[tuple[str, str], frozenset[str]] = {
+    ("email_delivery", "gmail_mcp"): frozenset({SEND_ENTRY, "OutgoingEmail"}),
+    ("email_render", "render"): frozenset({"ENVIRONMENT", "safe_url"}),
+}
+"""Names each email module must take (and use); `ONLY_IMPORTED_NAMES` caps them."""
+
+MODULE_LEVEL_EMAIL_IMPORTS = (
+    ("email_delivery", GMAIL_MODULE),
+    ("email_delivery", "email_render"),
+)
+"""ED-16 item 1: email_delivery imports these at module level, not lazily."""
+
+EMAIL_FLAG = "email"
+MCP_CLIENT = "MultiServerMCPClient"
+TOOL_LOADER = "load_mcp_tools"
+SEND_CLIENT_FACTORY = "_default_send_client"
+SEND_PATH_BANNED = frozenset(
+    {TOOL_LOADER, MCP_CLIENT, READ_TOOL_MAP, *READ_SIDE_FUNCTIONS}
+)
+"""The send path never loads LangChain tools, builds a client or uses the allowlist."""
+
+READ_PATH_ENTRY = "open_gmail_tools"
+READ_PATH_CALLS = (TOOL_LOADER, READ_FILTER)
+
+
+def _refs_from(module: SourceModule, target: str) -> list[ImportRef]:
+    """Return the `from newsletter_digest.<target> import ...` refs of `module`."""
+    return [ref for ref in module.imports if ref.target == f"{PACKAGE}.{target}"]
+
+
+def _loaded_names(module: SourceModule) -> set[str]:
+    """Return the plain names `module` reads anywhere (imports bind, never read)."""
+    return {
+        node.id
+        for node in ast.walk(module.tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+
+
+def _missing_email_edges(modules: Modules) -> list[str]:
+    """Report the ED-2 email edges that the import graph does not contain."""
+    edges = {(e.source, e.target) for e in all_edges(modules)}
+    return [
+        f"{source} -> {target}: expected ED-2 edge not seen"
+        for source, target in sorted(EXPECTED_EMAIL_EDGES - edges)
+    ]
+
+
+def _email_name_violations(modules: Modules) -> list[str]:
+    """Report required names an email module does not take, or takes but never uses."""
+    violations: list[str] = []
+    for (source, target), required in REQUIRED_IMPORTED_NAMES.items():
+        module = modules.get(source)
+        if module is None:
+            violations.append(f"{source}.py: module missing")
+            continue
+        taken = {name for ref in _refs_from(module, target) for name in ref.names}
+        used = _loaded_names(module)
+        violations.extend(
+            f"{source}.py: {source} does not import {name} from {target}"
+            for name in sorted(required - taken)
+        )
+        violations.extend(
+            f"{source}.py: {source} imports {name} from {target} but never uses it"
+            for name in sorted(taken - used)
+        )
+    return violations
+
+
+def _module_level_email_import_violations(modules: Modules) -> list[str]:
+    """Report email_delivery imports of gmail_mcp/email_render made inside functions."""
+    violations: list[str] = []
+    for source, target in MODULE_LEVEL_EMAIL_IMPORTS:
+        module = modules.get(source)
+        if module is None:
+            continue
+        top = set(module_level_imports(module))
+        violations.extend(
+            f"{source}.py:{ref.line}: {source} imports {ref.target} inside a "
+            "function; ED-16 wants it at module level"
+            for ref in _refs_from(module, target)
+            if ref not in top
+        )
+    return violations
+
+
+def _lazy_email_wiring_violations(modules: Modules) -> list[str]:
+    """Check cli imports email_delivery exactly once, on the `--email` call path."""
+    cli = modules.get(LAZY_IMPORTER)
+    if cli is None:
+        return [f"{LAZY_IMPORTER}.py: module missing"]
+    refs = [ref for ref in cli.imports if _loads(ref, EMAIL_DELIVERY_IMPORT)]
+    if len(refs) != 1:
+        lines = [ref.line for ref in refs]
+        return [
+            f"cli.py: {len(refs)} imports of {EMAIL_DELIVERY_IMPORT} (lines {lines}); "
+            "expected exactly one (ED-16)"
+        ]
+    ref = refs[0]
+    owner = _top_level_function_of_lines(cli).get(ref.line)
+    entry_path = {LAZY_EMAIL_ENTRY} | _direct_callees(cli, LAZY_EMAIL_ENTRY)
+    if ref in module_level_imports(cli) or owner not in entry_path:
+        return [
+            f"cli.py:{ref.line}: the one {EMAIL_DELIVERY_IMPORT} import is in "
+            f"{owner or '<module>'}, not on the {LAZY_EMAIL_ENTRY} call path"
+        ]
+    return []
+
+
+def _email_gate_violations(modules: Modules) -> list[str]:
+    """Check every `_deliver_by_email(...)` call sits under an `if <x>.email:` test."""
+    cli = modules.get(LAZY_IMPORTER)
+    if cli is None:
+        return []
+    gated: set[int] = set()
+    for node in ast.walk(cli.tree):
+        if not isinstance(node, ast.If):
+            continue
+        tests = [n for n in ast.walk(node.test) if isinstance(n, ast.Attribute)]
+        if any(n.attr == EMAIL_FLAG for n in tests):
+            gated.update(id(n) for stmt in node.body for n in ast.walk(stmt))
+    calls = [
+        node
+        for node in ast.walk(cli.tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == LAZY_EMAIL_ENTRY
+    ]
+    if not calls:
+        return [f"cli.py: {LAZY_EMAIL_ENTRY} is never called"]
+    return [
+        f"cli.py:{call.lineno}: {LAZY_EMAIL_ENTRY} called outside "
+        f"`if <settings>.{EMAIL_FLAG}:`"
+        for call in calls
+        if id(call) not in gated
+    ]
+
+
+def _send_map_assignments(gmail: SourceModule) -> list[ast.expr | None]:
+    """Return the values of module-level assignments to `GMAIL_SEND_TOOL_MAP`."""
+    values: list[ast.expr | None] = []
+    for stmt in gmail.tree.body:
+        if isinstance(stmt, ast.Assign):
+            targets, value = stmt.targets, stmt.value
+        elif isinstance(stmt, ast.AnnAssign):
+            targets, value = [stmt.target], stmt.value
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == SEND_TOOL_MAP for t in targets):
+            values.append(value)
+    return values
+
+
+def _send_map_presence_violations(gmail: SourceModule) -> list[str]:
+    """Check gmail_mcp defines `GMAIL_SEND_TOOL_MAP` once, as `{send_email: ...}`."""
+    values = _send_map_assignments(gmail)
+    if len(values) != 1:
+        return [
+            f"gmail_mcp.py: {len(values)} module-level {SEND_TOOL_MAP} "
+            "assignments, expected one"
+        ]
+    try:
+        literal = ast.literal_eval(values[0]) if values[0] is not None else None
+    except (ValueError, TypeError):
+        literal = None
+    if literal != {SEND_TOOL_NAME: SEND_TOOL_NAME}:
+        return [f"gmail_mcp.py: {SEND_TOOL_MAP} is not {{'send_email': 'send_email'}}"]
+    return []
+
+
+def _call_tool_site_violations(modules: Modules) -> list[str]:
+    """Check the package calls `.call_tool(...)` exactly once, on the send path."""
+    sites = [
+        (name, node)
+        for name, module in modules.items()
+        for node in ast.walk(module.tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == CALL_TOOL
+    ]
+    gmail = modules.get(GMAIL_MODULE)
+    send_path = _send_path_nodes(gmail) if gmail is not None else set()
+    inside = [n for name, n in sites if name == GMAIL_MODULE and id(n) in send_path]
+    if len(sites) == 1 and len(inside) == 1:
+        return []
+    where = [f"{name}.py:{node.lineno}" for name, node in sites]
+    return [
+        f"{len(sites)} {CALL_TOOL}() call sites {where}; expected exactly one on "
+        f"{GMAIL_MODULE}'s send path"
+    ]
+
+
+def _send_path_isolation_violations(gmail: SourceModule) -> list[str]:
+    """Check the send path stays off the agent's read side and builds no client."""
+    path = _send_path_functions(gmail)
+    if not path:
+        return [f"gmail_mcp.py: no module-level {SEND_ENTRY}"]
+    violations: list[str] = []
+    for function in sorted(path - {SEND_CLIENT_FACTORY}):
+        node = _top_level_function(gmail, function)
+        if node is None:
+            continue
+        violations.extend(
+            f"gmail_mcp.py:{line}: send path function {function} references {ident}"
+            for ident, line in _node_identifiers(node)
+            if ident in SEND_PATH_BANNED
+        )
+    entry = _top_level_function(gmail, SEND_ENTRY)
+    if entry is not None and SEND_CLIENT_FACTORY not in {
+        ident for ident, _ in _node_identifiers(entry)
+    }:
+        violations.append(
+            f"gmail_mcp.py: {SEND_ENTRY} does not fall back to {SEND_CLIENT_FACTORY}"
+        )
+    factory = _top_level_function(gmail, SEND_CLIENT_FACTORY)
+    if factory is None or MCP_CLIENT not in _direct_callees(gmail, SEND_CLIENT_FACTORY):
+        violations.append(
+            f"gmail_mcp.py: {SEND_CLIENT_FACTORY} does not build {MCP_CLIENT}"
+        )
+    return violations
+
+
+def _read_path_violations(gmail: SourceModule) -> list[str]:
+    """Check `open_gmail_tools` loads the tools and passes them through the filter."""
+    if _top_level_function(gmail, READ_PATH_ENTRY) is None:
+        return [f"gmail_mcp.py: no module-level {READ_PATH_ENTRY}"]
+    callees = _direct_callees(gmail, READ_PATH_ENTRY)
+    return [
+        f"gmail_mcp.py: {READ_PATH_ENTRY} does not call {name}"
+        for name in READ_PATH_CALLS
+        if name not in callees
+    ]
+
+
+def find_missing_email_wiring(modules: Modules) -> list[str]:
+    """Report ED-2/ED-3/ED-16 facts the real email code must show (positive).
+
+    The ED-2 edges are present; email_delivery takes and uses `send_gmail_message`
+    and `OutgoingEmail` (and imports its peers at module level); email_render takes
+    and uses `ENVIRONMENT` and `safe_url`; cli imports email_delivery exactly once,
+    on the `_deliver_by_email` call path, and calls that only under `if ....email`;
+    gmail_mcp defines the send map, calls `call_tool` exactly once on the send path,
+    keeps that path off the read side, and still filters the agent's tools.
+    """
+    gmail = modules.get(GMAIL_MODULE)
+    gmail_violations = (
+        [
+            *_send_map_presence_violations(gmail),
+            *_send_path_isolation_violations(gmail),
+            *_read_path_violations(gmail),
+        ]
+        if gmail is not None
+        else [f"{GMAIL_MODULE}.py: module missing"]
+    )
+    return [
+        *_missing_email_edges(modules),
+        *_email_name_violations(modules),
+        *_module_level_email_import_violations(modules),
+        *_lazy_email_wiring_violations(modules),
+        *_email_gate_violations(modules),
+        *_call_tool_site_violations(modules),
+        *gmail_violations,
+    ]
+
+
+def test_detector_sees_the_email_wiring(package: dict[str, SourceModule]) -> None:
+    violations = find_missing_email_wiring(package)
+    assert violations == [], _report(violations)
+
+
+def test_detector_sees_exactly_the_allowed_email_edges(
+    package: dict[str, SourceModule],
+) -> None:
+    edges = {(e.source, e.target) for e in all_edges(package)}
+    assert EXPECTED_EMAIL_EDGES <= edges, sorted(EXPECTED_EMAIL_EDGES - edges)
+    for module in EMAIL_MODULES:
+        used = {target for source, target in edges if source == module}
+        assert used == ONLY_PROJECT_IMPORTS[module], (module, sorted(used))
+    importers = {
+        target: sorted(s for s, t in edges if t == target) for target in EMAIL_MODULES
+    }
+    assert importers == {"email_delivery": ["cli"], "email_render": ["email_delivery"]}
+
+
+def test_detector_sees_both_lazy_cli_imports(
+    package: dict[str, SourceModule],
+) -> None:
+    cli = package[LAZY_IMPORTER]
+    assert _lazy_cli_import_violations(package) == []
+    assert _lazy_email_wiring_violations(package) == []
+    refs = [r for r in cli.imports if _loads(r, EMAIL_DELIVERY_IMPORT)]
+    assert len(refs) == 1 and refs[0] not in module_level_imports(cli)
+    owners = _top_level_function_of_lines(cli)
+    email_owner = owners[refs[0].line]
+    assert email_owner == LAZY_EMAIL_ENTRY or email_owner in _direct_callees(
+        cli, LAZY_EMAIL_ENTRY
+    ), email_owner
+    telegram = [r for r in cli.imports if DELIVERY_IMPORT in _lazy_only_targets(r)]
+    assert owners[telegram[0].line] != email_owner
+    assert not any(_loads(r, EMAIL_RENDER_IMPORT) for r in cli.imports)
+
+
+def test_detector_sees_the_email_import_names(
+    package: dict[str, SourceModule],
+) -> None:
+    for (source, target), required in REQUIRED_IMPORTED_NAMES.items():
+        module = package[source]
+        taken = {n for ref in _refs_from(module, target) for n in ref.names}
+        assert required <= taken <= ONLY_IMPORTED_NAMES[(source, target)], taken
+        assert taken <= _loaded_names(module), sorted(taken - _loaded_names(module))
+    render_names = {
+        n for ref in _refs_from(package["email_render"], "render") for n in ref.names
+    }
+    assert render_names == {"ENVIRONMENT", "safe_url"}
+
+
+def test_detector_sees_the_send_map_and_one_call_tool(
+    package: dict[str, SourceModule],
+) -> None:
+    gmail = package[GMAIL_MODULE]
+    values = _send_map_assignments(gmail)
+    assert len(values) == 1 and values[0] is not None
+    assert ast.literal_eval(values[0]) == {SEND_TOOL_NAME: SEND_TOOL_NAME}
+    assert _call_tool_site_violations(package) == []
+    path = _send_path_functions(gmail)
+    owners = [
+        function
+        for function in path
+        for node in ast.walk(gmail.tree)
+        if id(node) in top_level_function_nodes(gmail, function)
+        and isinstance(node, ast.Attribute)
+        and node.attr == CALL_TOOL
+    ]
+    assert len(owners) == 1 and owners[0] in path, owners
+    assert SEND_CLIENT_FACTORY not in path
+    assert set(READ_PATH_CALLS) <= _direct_callees(gmail, READ_PATH_ENTRY)
+
+
+# ------------------------------------------ positive email checker self-tests (T083)
+
+
+POSITIVE_EMAIL_TREE: dict[str, str] = {
+    **FINAL_EMAIL_TREE,
+    "cli": FINAL_EMAIL_TREE["cli"]
+    + """
+        def digest(settings: Settings) -> bool:
+            delivered = True
+            if settings.email:
+                delivered &= _deliver_by_email(None, None, settings)
+            return delivered
+        """,
+}
+"""The EP-5-shaped final tree plus a cli `digest` that gates the email channel."""
+
+
+def test_positive_email_checker_allows_the_synthetic_final_tree() -> None:
+    violations = find_missing_email_wiring(make_modules(**POSITIVE_EMAIL_TREE))
+    assert violations == [], _report(violations)
+
+
+POSITIVE_EMAIL_CASES: list[tuple[str, dict[str, str], str]] = [
+    ("stub-tree", STUB_EMAIL_TREE, "cli -> email_delivery: expected ED-2 edge"),
+    ("stub-tree-names", STUB_EMAIL_TREE, "does not import send_gmail_message"),
+    ("stub-tree-lazy", STUB_EMAIL_TREE, "cli.py: 0 imports of"),
+    ("stub-tree-gate", STUB_EMAIL_TREE, "_deliver_by_email is never called"),
+    ("stub-tree-send-map", STUB_EMAIL_TREE, "0 module-level GMAIL_SEND_TOOL_MAP"),
+    ("stub-tree-call-tool", STUB_EMAIL_TREE, "0 call_tool() call sites []"),
+    ("final-tree-ungated", FINAL_EMAIL_TREE, "_deliver_by_email is never called"),
+    (
+        "send-path-calls-public-helper",
+        {
+            **POSITIVE_EMAIL_TREE,
+            "gmail_mcp": POSITIVE_EMAIL_TREE["gmail_mcp"].replace(
+                "_send_attempt", "send_attempt"
+            ),
+        },
+        "1 call_tool() call sites",
+    ),
+    (
+        "gate-on-telegram",
+        {
+            **POSITIVE_EMAIL_TREE,
+            "cli": POSITIVE_EMAIL_TREE["cli"].replace(
+                "if settings.email:", "if settings.telegram:"
+            ),
+        },
+        "_deliver_by_email called outside",
+    ),
+    (
+        "render-module-object",
+        {
+            **POSITIVE_EMAIL_TREE,
+            "email_render": POSITIVE_EMAIL_TREE["email_render"].replace(
+                "from newsletter_digest.render import ENVIRONMENT, safe_url",
+                "from newsletter_digest import render",
+            ),
+        },
+        "email_render does not import ENVIRONMENT from render",
+    ),
+]
+"""Synthetic trees the positive email checker must reject (line-free substrings)."""
+
+
+@pytest.mark.parametrize(
+    ("case_id", "tree", "expected"),
+    POSITIVE_EMAIL_CASES,
+    ids=[case[0] for case in POSITIVE_EMAIL_CASES],
+)
+def test_positive_email_checker_reports_missing_wiring(
+    case_id: str, tree: dict[str, str], expected: str
+) -> None:
+    violations = find_missing_email_wiring(make_modules(**tree))
+    assert any(expected in v for v in violations), (case_id, violations)
+
+
+# ------------------------------------------ real-tree mutants (T083, ED-2/3/16)
+
+
+_CLI_EMAIL_IMPORT = (
+    "from newsletter_digest.email_delivery import (\n"
+    "            EmailOutcome,\n"
+    "            redact_addresses,\n"
+    "            send_reading_list_email,\n"
+    "        )"
+)
+_CLI_EMAIL_CALL = "outcome = _run_email_delivery("
+_CLI_EMAIL_GATE = "    if settings.email:\n        delivered &= _deliver_by_email("
+_CLI_GMAIL = "from newsletter_digest.gmail_mcp import GmailMCPError\n"
+_AGENT_GMAIL = (
+    "from newsletter_digest.gmail_mcp import open_gmail_tools, search_email_refs\n"
+)
+_PROMPTS_MODELS = "from newsletter_digest.models import Topic\n"
+_GMAIL_YIELD = "yield filter_read_only(tools)"
+_GMAIL_FILTER_DEFAULT = "tool_map: dict[str, str] = GMAIL_TOOL_MAP"
+_GMAIL_SEND_MAP = 'GMAIL_SEND_TOOL_MAP: dict[str, str] = {"send_email": "send_email"}'
+_GMAIL_READ_MAP_END = '    "read_email": "read_email",\n}'
+_GMAIL_CALL = "state.reply = await session.call_tool(tool.name, args)"
+_GMAIL_DONE = '    state.phase = "done"'
+_GMAIL_LIST = "tools = await _list_all_tools(session)"
+_GMAIL_LOOKUP = "tool = next((tool for tool in tools if tool.name == wanted), None)"
+_GMAIL_FACTORY = "factory = client_factory or _default_send_client"
+_ED_MODELS = "from newsletter_digest.models import ReadingList\n"
+_ED_SEND_LAST = "    send_gmail_message,\n)"
+_ED_OUTGOING = "    OutgoingEmail,\n"
+_ED_CONFIG = "from newsletter_digest.config import GMAIL_MCP_PACKAGE, Settings\n"
+_ED_RENDER = "from newsletter_digest.email_render import ("
+_ER_RENDER = "from newsletter_digest.render import ENVIRONMENT, safe_url\n"
+_ER_MODELS = "from newsletter_digest.models import ReadingItem, ReadingList\n"
+
+EMAIL_REAL_TREE_MUTANTS: dict[str, RealTreeMutant] = {
+    # -- the ED-17 examples and the T083 task list (negative rules)
+    "agent-imports-send-gmail-message": RealTreeMutant(
+        "agent",
+        ((_AGENT_GMAIL, _AGENT_GMAIL.replace("\n", ", send_gmail_message\n")),),
+        find_send_capability_violations,
+        "agent imports send_gmail_message from gmail_mcp; only gmail_mcp and "
+        "email_delivery may use the send names",
+    ),
+    "agent-references-gmail-send-attribute": RealTreeMutant(
+        "agent",
+        (
+            (
+                _AGENT_GMAIL,
+                _AGENT_GMAIL + "from newsletter_digest import gmail_mcp\n"
+                "_SEND = gmail_mcp.send_gmail_message\n",
+            ),
+        ),
+        find_send_capability_violations,
+        "agent references gmail_mcp.send_gmail_message",
+    ),
+    "tools-imports-email-delivery": RealTreeMutant(
+        "tools",
+        (
+            (
+                _TOOLS_CONFIG,
+                _TOOLS_CONFIG
+                + "from newsletter_digest.email_delivery import build_subject\n",
+            ),
+        ),
+        find_importer_violations,
+        "tools -> email_delivery: only cli may import email_delivery",
+    ),
+    "tools-imports-email-delivery-send-rule": RealTreeMutant(
+        "tools",
+        (
+            (
+                _TOOLS_CONFIG,
+                _TOOLS_CONFIG
+                + "from newsletter_digest.email_delivery import build_subject\n",
+            ),
+        ),
+        find_send_capability_violations,
+        "tools -> email_delivery: the agent side never imports the email modules",
+    ),
+    "cli-module-level-email-delivery": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_AGENT,
+                _CLI_AGENT + f"from {EMAIL_DELIVERY_IMPORT} import EmailOutcome\n",
+            ),
+        ),
+        find_eager_delivery_imports,
+        f"module-level import of {EMAIL_DELIVERY_IMPORT}; import it inside",
+    ),
+    "cli-module-level-email-delivery-lazy-rule": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_AGENT,
+                _CLI_AGENT + f"from {EMAIL_DELIVERY_IMPORT} import EmailOutcome\n",
+            ),
+        ),
+        find_lazy_email_import_violations,
+        "imported in <module>, not in _deliver_by_email or a function it calls",
+    ),
+    "cli-type-checking-email-render": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_AGENT,
+                _CLI_AGENT
+                + "if TYPE_CHECKING:\n    from newsletter_digest import email_render\n",
+            ),
+        ),
+        find_eager_delivery_imports,
+        f"module-level import of {EMAIL_RENDER_IMPORT}",
+    ),
+    "cli-lazy-email-render": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_EMAIL_IMPORT,
+                _CLI_EMAIL_IMPORT
+                + "\n        from newsletter_digest.email_render import render_email",
+            ),
+        ),
+        find_lazy_email_import_violations,
+        f"cli imports {EMAIL_RENDER_IMPORT}; only email_delivery may import it",
+    ),
+    "cli-takes-redact-from-gmail": RealTreeMutant(
+        "cli",
+        ((_CLI_GMAIL, _CLI_GMAIL.replace("\n", ", redact_addresses\n")),),
+        find_send_capability_violations,
+        "cli imports redact_addresses from gmail_mcp",
+    ),
+    "open-gmail-tools-references-send-map": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_YIELD, "yield filter_read_only(tools, GMAIL_SEND_TOOL_MAP)"),),
+        find_send_capability_violations,
+        "open_gmail_tools references GMAIL_SEND_TOOL_MAP; the read-only agent path",
+    ),
+    "filter-default-send-map": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_FILTER_DEFAULT, "tool_map: dict[str, str] = GMAIL_SEND_TOOL_MAP"),),
+        find_send_capability_violations,
+        "filter_read_only's tool_map default is GMAIL_SEND_TOOL_MAP, not "
+        "GMAIL_TOOL_MAP",
+    ),
+    "filter-default-missing": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_FILTER_DEFAULT, "tool_map: dict[str, str]"),),
+        find_send_capability_violations,
+        "filter_read_only's tool_map default is missing, not GMAIL_TOOL_MAP",
+    ),
+    "gmail-draft-email-literal": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_SEND_MAP, _GMAIL_SEND_MAP + '\n_FALLBACK_TOOL = "draft_email"'),),
+        find_send_capability_violations,
+        "string 'draft_email' names a Gmail write tool outside GMAIL_SEND_TOOL_MAP",
+    ),
+    "gmail-send-map-gains-draft-email": RealTreeMutant(
+        "gmail_mcp",
+        (
+            (
+                _GMAIL_SEND_MAP,
+                _GMAIL_SEND_MAP.replace("}", ', "draft_email": "draft_email"}'),
+            ),
+        ),
+        find_send_capability_violations,
+        "GMAIL_SEND_TOOL_MAP must be the literal {'send_email': 'send_email'}",
+    ),
+    "gmail-read-map-gains-draft-email": RealTreeMutant(
+        "gmail_mcp",
+        (
+            (
+                _GMAIL_READ_MAP_END,
+                '    "read_email": "read_email",\n    "draft_email": "draft_email",\n}',
+            ),
+        ),
+        find_send_capability_violations,
+        "string 'draft_email' names a Gmail write tool",
+    ),
+    "call-tool-in-open-gmail-tools": RealTreeMutant(
+        "gmail_mcp",
+        (
+            (
+                _GMAIL_YIELD,
+                'await session.call_tool("search_emails", {})\n'
+                "                yield filter_read_only(tools)",
+            ),
+        ),
+        find_send_capability_violations,
+        "references call_tool outside gmail_mcp.send_gmail_message and its private "
+        "helpers",
+    ),
+    "call-tool-in-public-helper": RealTreeMutant(
+        "gmail_mcp",
+        (
+            ("await _call_send_tool(state", "await call_send_tool(state"),
+            ("async def _call_send_tool(", "async def call_send_tool("),
+        ),
+        find_send_capability_violations,
+        "references call_tool outside gmail_mcp.send_gmail_message",
+    ),
+    "email-delivery-imports-telegram": RealTreeMutant(
+        "email_delivery",
+        ((_ED_MODELS, _ED_MODELS + "from newsletter_digest.telegram import redact\n"),),
+        find_forbidden_project_imports,
+        "email_delivery -> telegram is banned",
+    ),
+    "email-delivery-imports-telegram-only-rule": RealTreeMutant(
+        "email_delivery",
+        ((_ED_MODELS, _ED_MODELS + "from newsletter_digest.telegram import redact\n"),),
+        find_only_project_import_violations,
+        "email_delivery -> telegram: email_delivery may import only config, "
+        "email_render, gmail_mcp, models",
+    ),
+    "email-render-imports-gmail-mcp": RealTreeMutant(
+        "email_render",
+        (
+            (
+                _ER_RENDER,
+                _ER_RENDER
+                + "from newsletter_digest.gmail_mcp import redact_addresses\n",
+            ),
+        ),
+        find_only_project_import_violations,
+        "email_render -> gmail_mcp: email_render may import only models, render",
+    ),
+    "email-render-imports-gmail-mcp-layer": RealTreeMutant(
+        "email_render",
+        (
+            (
+                _ER_RENDER,
+                _ER_RENDER
+                + "from newsletter_digest.gmail_mcp import redact_addresses\n",
+            ),
+        ),
+        find_layer_violations,
+        "email_render (tier 4) -> gmail_mcp (tier 4) does not point to a strictly "
+        "lower tier",
+    ),
+    "email-render-imports-gmail-mcp-send-rule": RealTreeMutant(
+        "email_render",
+        (
+            (
+                _ER_RENDER,
+                _ER_RENDER
+                + "from newsletter_digest.gmail_mcp import redact_addresses\n",
+            ),
+        ),
+        find_send_capability_violations,
+        "email_render imports redact_addresses from gmail_mcp",
+    ),
+    "email-render-takes-render-html": RealTreeMutant(
+        "email_render",
+        ((_ER_RENDER, _ER_RENDER.replace("safe_url", "render_html, safe_url")),),
+        find_imported_name_violations,
+        "email_render takes render_html from render; only ENVIRONMENT, safe_url",
+    ),
+    "email-delivery-references-load-mcp-tools": RealTreeMutant(
+        "email_delivery",
+        (
+            (
+                _ED_MODELS,
+                _ED_MODELS
+                + "from langchain_mcp_adapters.tools import load_mcp_tools\n",
+            ),
+        ),
+        find_send_capability_violations,
+        "email_delivery references load_mcp_tools; it sends only through",
+    ),
+    "email-delivery-imports-open-gmail-tools": RealTreeMutant(
+        "email_delivery",
+        ((_ED_SEND_LAST, "    open_gmail_tools,\n" + _ED_SEND_LAST),),
+        find_send_capability_violations,
+        "email_delivery references open_gmail_tools",
+    ),
+    "email-delivery-imports-open-gmail-tools-names": RealTreeMutant(
+        "email_delivery",
+        ((_ED_SEND_LAST, "    open_gmail_tools,\n" + _ED_SEND_LAST),),
+        find_imported_name_violations,
+        "email_delivery takes open_gmail_tools from gmail_mcp",
+    ),
+    # -- the positive detector (exactly one lazy import, names used, call paths)
+    "cli-second-email-import": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_LAZY,
+                _CLI_LAZY + "\n        from newsletter_digest.email_delivery import "
+                "EmailOutcome",
+            ),
+        ),
+        find_missing_email_wiring,
+        f"cli.py: 2 imports of {EMAIL_DELIVERY_IMPORT}",
+    ),
+    "cli-email-import-on-telegram-path": RealTreeMutant(
+        "cli",
+        (
+            (_CLI_EMAIL_IMPORT, "EmailOutcome = redact_addresses = None"),
+            (
+                _CLI_LAZY,
+                _CLI_LAZY + "\n        from newsletter_digest.email_delivery import "
+                "send_reading_list_email",
+            ),
+        ),
+        find_missing_email_wiring,
+        "import is in _run_delivery, not on the _deliver_by_email call path",
+    ),
+    "cli-no-email-import": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_EMAIL_IMPORT,
+                "EmailOutcome = redact_addresses = send_reading_list_email = None",
+            ),
+        ),
+        find_missing_email_wiring,
+        "cli -> email_delivery: expected ED-2 edge not seen",
+    ),
+    "cli-no-email-import-count": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_EMAIL_IMPORT,
+                "EmailOutcome = redact_addresses = send_reading_list_email = None",
+            ),
+        ),
+        find_missing_email_wiring,
+        f"cli.py: 0 imports of {EMAIL_DELIVERY_IMPORT}",
+    ),
+    "cli-email-entry-skips-lazy-import": RealTreeMutant(
+        "cli",
+        ((_CLI_EMAIL_CALL, "outcome = _other_email_delivery("),),
+        find_missing_email_wiring,
+        "import is in _run_email_delivery, not on the _deliver_by_email call path",
+    ),
+    "cli-email-not-gated": RealTreeMutant(
+        "cli",
+        (
+            (
+                _CLI_EMAIL_GATE,
+                "    if settings.email:\n        pass\n"
+                "    delivered &= _deliver_by_email(",
+            ),
+        ),
+        find_missing_email_wiring,
+        "_deliver_by_email called outside `if <settings>.email:`",
+    ),
+    "email-delivery-drops-send-gmail-message": RealTreeMutant(
+        "email_delivery",
+        ((_ED_SEND_LAST, ")"),),
+        find_missing_email_wiring,
+        "email_delivery does not import send_gmail_message from gmail_mcp",
+    ),
+    "email-delivery-unused-send-name": RealTreeMutant(
+        "email_delivery",
+        ((_ED_OUTGOING, _ED_OUTGOING + "    SEND_MIME_TYPE,\n"),),
+        find_missing_email_wiring,
+        "email_delivery imports SEND_MIME_TYPE from gmail_mcp but never uses it",
+    ),
+    "email-delivery-drops-config": RealTreeMutant(
+        "email_delivery",
+        ((_ED_CONFIG, "GMAIL_MCP_PACKAGE = Settings = None\n"),),
+        find_missing_email_wiring,
+        "email_delivery -> config: expected ED-2 edge not seen",
+    ),
+    "email-delivery-lazy-email-render": RealTreeMutant(
+        "email_delivery",
+        ((_ED_RENDER, "def _late() -> None:\n    " + _ED_RENDER),),
+        find_missing_email_wiring,
+        "email_delivery imports newsletter_digest.email_render inside a function",
+    ),
+    "email-render-takes-only-safe-url": RealTreeMutant(
+        "email_render",
+        ((_ER_RENDER, "from newsletter_digest.render import safe_url\n"),),
+        find_missing_email_wiring,
+        "email_render does not import ENVIRONMENT from render",
+    ),
+    "email-render-drops-models": RealTreeMutant(
+        "email_render",
+        ((_ER_MODELS, "ReadingItem = ReadingList = None\n"),),
+        find_missing_email_wiring,
+        "email_render -> models: expected ED-2 edge not seen",
+    ),
+    "gmail-send-map-renamed": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_SEND_MAP, _GMAIL_SEND_MAP.replace(SEND_TOOL_MAP, "_SEND_MAP")),),
+        find_missing_email_wiring,
+        "0 module-level GMAIL_SEND_TOOL_MAP assignments, expected one",
+    ),
+    "gmail-call-tool-removed": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_CALL, "state.reply = await session.send(tool.name, args)"),),
+        find_missing_email_wiring,
+        "0 call_tool() call sites []; expected exactly one",
+    ),
+    "gmail-call-tool-twice": RealTreeMutant(
+        "gmail_mcp",
+        (
+            (
+                _GMAIL_DONE,
+                "    await session.call_tool(tool.name, args)\n" + _GMAIL_DONE,
+            ),
+        ),
+        find_missing_email_wiring,
+        "2 call_tool() call sites",
+    ),
+    "gmail-call-tool-in-public-helper": RealTreeMutant(
+        "gmail_mcp",
+        (
+            ("await _call_send_tool(state", "await call_send_tool(state"),
+            ("async def _call_send_tool(", "async def call_send_tool("),
+        ),
+        find_missing_email_wiring,
+        "1 call_tool() call sites",
+    ),
+    "gmail-send-path-loads-tools": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_LIST, "tools = await load_mcp_tools(session)"),),
+        find_missing_email_wiring,
+        "send path function _send_attempt references load_mcp_tools",
+    ),
+    "gmail-send-path-filters": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_LOOKUP, "tool = filter_read_only(tools).get(wanted)"),),
+        find_missing_email_wiring,
+        "send path function _call_send_tool references filter_read_only",
+    ),
+    "gmail-send-path-builds-client": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_FACTORY, "factory = client_factory or MultiServerMCPClient"),),
+        find_missing_email_wiring,
+        "send path function send_gmail_message references MultiServerMCPClient",
+    ),
+    "gmail-send-path-skips-factory": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_FACTORY, "factory = client_factory or MultiServerMCPClient"),),
+        find_missing_email_wiring,
+        "send_gmail_message does not fall back to _default_send_client",
+    ),
+    "gmail-read-path-skips-filter": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_YIELD, "yield {tool.name: tool for tool in tools}"),),
+        find_missing_email_wiring,
+        "open_gmail_tools does not call filter_read_only",
+    ),
+}
+"""Each ED-2/ED-3/ED-16 rule (T069 negative, T083 positive) on a mutated real tree."""
+
+ACCEPTANCE_32_BANNED = (
+    "agent",
+    "tools",
+    "prompts",
+    "fetch",
+    "enrich",
+    "pdf",
+    "telegram",
+)
+"""PRD acceptance 32: the email modules import none of these."""
+
+_EMAIL_MODULE_ANCHORS = {"email_delivery": _ED_MODELS, "email_render": _ER_RENDER}
+_AGENT_SIDE_ANCHORS = {
+    "agent": _AGENT_GMAIL,
+    "tools": _TOOLS_CONFIG,
+    "prompts": _PROMPTS_MODELS,
+}
+
+ACCEPTANCE_32_MUTANTS: dict[str, RealTreeMutant] = {
+    **{
+        f"{module}-imports-{banned}": RealTreeMutant(
+            module,
+            ((anchor, anchor + f"from {PACKAGE} import {banned}\n"),),
+            find_forbidden_project_imports,
+            f"{module} -> {banned} is banned",
+        )
+        for module, anchor in _EMAIL_MODULE_ANCHORS.items()
+        for banned in ACCEPTANCE_32_BANNED
+    },
+    **{
+        f"{importer}-imports-{target}": RealTreeMutant(
+            importer,
+            ((anchor, anchor + f"from {PACKAGE} import {target}\n"),),
+            find_send_capability_violations,
+            f"{importer} -> {target}: the agent side never imports the email modules",
+        )
+        for importer, anchor in _AGENT_SIDE_ANCHORS.items()
+        for target in EMAIL_MODULES
+    },
+    **{
+        f"{importer}-imports-{target}-importer-rule": RealTreeMutant(
+            importer,
+            ((anchor, anchor + f"from {PACKAGE}.{target} import X\n"),),
+            find_importer_violations,
+            f"{importer} -> {target}: only ",
+        )
+        for importer, anchor in _AGENT_SIDE_ANCHORS.items()
+        for target in EMAIL_MODULES
+    },
+}
+"""PRD acceptance 32 as a grid: every banned edge in both directions is reported."""
+
+ALL_EMAIL_MUTANTS = {**EMAIL_REAL_TREE_MUTANTS, **ACCEPTANCE_32_MUTANTS}
+
+
+def test_email_mutant_ids_do_not_collide() -> None:
+    assert not set(EMAIL_REAL_TREE_MUTANTS) & set(ACCEPTANCE_32_MUTANTS)
+    assert not set(ALL_EMAIL_MUTANTS) & set(REAL_TREE_MUTANTS)
+
+
+@pytest.mark.parametrize("mutant_id", sorted(ALL_EMAIL_MUTANTS))
+def test_email_rule_fails_on_mutated_real_tree(
+    package: dict[str, SourceModule], mutant_id: str
+) -> None:
+    mutant = ALL_EMAIL_MUTANTS[mutant_id]
     original = (SOURCE_DIR / f"{mutant.module}.py").read_text(encoding="utf-8")
     changed = parse_module(mutant.module, apply_mutant(original, mutant))
     mutated = {**package, mutant.module: changed}

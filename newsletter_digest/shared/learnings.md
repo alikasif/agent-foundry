@@ -511,3 +511,10 @@
   made through that default. Tripwire the default with `monkeypatch.setitem(fn.__kwdefaults__,
   "sender", wire)` (read `__kwdefaults__` before tripwiring `fn` itself), and assert the
   default `is` the helper.
+- (T083) Do not tighten a negative architecture rule from "at most one" to "exactly
+  one" when `ALLOWED_CASES` runs it on a stub tree (`STUB_EMAIL_TREE` has no cli email
+  import). Put the "exactly one" rule in a positive real-tree checker, which T063
+  already does for Telegram. Positive checkers also catch real gaps: no ED-3 negative
+  rule reported a `gmail_mcp` send path calling `load_mcp_tools`, or a missing `if
+  settings.email:` gate. Build a kill matrix (every checker × every mutant) to find
+  mutants that only the positive checker catches.
