@@ -496,3 +496,10 @@
 - (T079) In "no address at any level" log checks, exempt the DEBUG `Email recipients:`
   record explicitly (ED-15 allows it). The first draft failed on it, because the check
   ran on every record.
+- (T080) In CliRunner tests, `--log-level DEBUG` puts every DEBUG record on stderr
+  (RichHandler), and with that the ED-15 `Email recipients:` line. So a "no address in
+  the output" assertion holds only at INFO, unless `send_reading_list_email` itself is
+  replaced. To test waiting send branches through the CLI (`EMAIL_SEND_TIMEOUT` >= 10 s,
+  2 s retry pause), patch `email_delivery.send_reading_list_email` with
+  `partial(original, sender=fast)`, where `fast` calls the real `send_gmail_message`
+  with 0.05 s timeouts and a recording `sleep`. cli's lazy import picks it up.

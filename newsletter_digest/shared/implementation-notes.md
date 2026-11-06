@@ -4585,3 +4585,102 @@ Checks run:
 - `uv run pytest -q`: 4838 passed, 2 deselected, 4 xfailed. `ruff format` and `ruff
   check` are clean on my file, and `pyrefly check` reports 0 errors. `ruff check .`
   reports 4 E501 only in `tests/test_cli_email.py` (T080, in flight, not mine).
+
+## T080 — CLI tests for --email: exit 2 per config class, outcomes, --email --telegram exit-code matrix, ED-3 event order
+
+Files: `tests/test_cli_email.py` (new; 67 passed) and `tests/test_cli.py` (only
+`"--email"` appended to `ALL_OPTIONS`; diff is one `+` line).
+
+Harness (offline): an autouse socket guard; an autouse isolation fixture (empty cwd;
+deletes the 7 tool, 10 fetch, 2 Telegram and 2 email variables and the WSL variables;
+patches `gmail_mcp.shutil.which` to a fake npx path; restores the package logger).
+`cli.run_digest` is the `FakeRunDigest` from `test_cli.py`, returning
+`ef.standard_list()`. The send side is `gmail_mcp._default_send_client` patched with a
+`SendSide` wrapper around the T072 `FakeSendFactory`. The wrapper logs `client` (and
+`browser` from the `--open` recorder) into the same `EventLog`. The real
+`email_delivery`, `email_render` and `send_gmail_message` run on top of it. Telegram
+uses the existing `FakeTelegram`/MockTransport seam, imported from
+`test_cli_telegram.py` and installed via `partial(deliver_reading_list,
+client_factory=..., builder=...)`.
+
+Decisions not covered by the spec / tradeoffs:
+- **Fast sender for the waiting branches.** `EMAIL_SEND_TIMEOUT` is at least 10 s and
+  the start-retry pause is 2 s, so the acceptance-30 matrix cases patch
+  `email_delivery.send_reading_list_email` with `partial(original, sender=...)`. The
+  sender records the `send_timeout` that `email_delivery` passed (asserted `[45.0]`
+  from `EMAIL_SEND_TIMEOUT=45`) and calls the real `send_gmail_message` with 0.05 s
+  start/send timeouts and a recording `sleep` (the default client is still the fake).
+  Success, ordering, the `--telegram` matrix and the ED-3 tests use the unpatched
+  default sender. cli's lazy import reads the module attribute at call time, so the
+  patch takes effect. No real waiting anywhere; the file runs in about 4 s.
+- **Over-budget suffix** via `partial(render_email, budget=2_000)` on the same seam.
+  `standard_list` then ends `over_budget=True` with items omitted, so the line carries
+  both suffixes. The **omitted suffix** uses the real 95,000 budget with
+  `ef.size_300_list()`. Expected `shown` comes from calling `render_email` directly.
+- **Matrix rows** (exact ED-12 reasons, written out from the table, not computed by
+  `failure_reason`): start failure (raise on enter, x2) and start timeout (`list_tools`
+  hangs, x2): 2 sessions, `sleep(2.0)` once, 0 calls. Tool missing (all 18 others
+  offered, `draft_email` included): 1 session, 0 calls. `Error:` result, `isError`
+  result, permission, recipient, rate limit, unknown reply: 1 call. Timeout after the
+  call and an `ExceptionGroup`-wrapped `BrokenResourceError` after the call: `unknown`,
+  1 call. Every row except the start rows has a spare second script, so `opened == 1`
+  proves "no retry". The scripted server texts and the start error echo recipient
+  addresses on purpose; `<address>` is asserted in the reasons, and no recipient,
+  `@example` or `@inbox.test` appears in stdout/stderr or in any INFO+ record. Also
+  covered: not on PATH (0 sessions), a render failure (pre-send, 0 sessions), an
+  unexpected sender exception (`unknown`, `KeyError`), the cli safety net (`unknown`,
+  `RuntimeError`, DEBUG traceback redacted), and a failing lazy import, both as
+  `email_delivery` missing (`ModuleNotFoundError`) and as `email_render` broken via a
+  meta-path finder (`ImportError`, no path text).
+- **Address assertions** follow T074/T075: never a bare `@` (the fixed hints contain
+  the package spec). The unexpected-sender test runs at INFO, because at DEBUG the
+  recipient list is logged by design (ED-15). My first draft ran it at DEBUG and
+  failed for that reason.
+- **`--email --telegram`:** the four ED combinations plus a fifth row (the PDF build
+  fails, so stdout has only the HTML path). Each row checks that Telegram is attempted
+  once and `send_email` is called once, the exit code (0 only if both succeed), the
+  exact Telegram line (unchanged T060 texts) before the exact `Email:` line, and that
+  no recipient appears in the output.
+- **ED-3 event order** runs the real `run_digest` as `cli.run_digest` (wrapped in
+  `fail_after(GRAPH_TIMEOUT_S)`), with `gmail_opener=partial(open_gmail_tools,
+  client_factory=factory)`, a `RecordingBuilder` around the real `build_agent`, and
+  `ModelFactoryRecorder(main_responder)`. Session 1 is T081's `session_1_script()` (all
+  19 tools, one email). `_default_send_client` is the same factory, and the CLI gets
+  `--model`/`--reader-model` with the scripted names. Asserted: the log with the
+  `call#1(...)` events filtered out equals the ED-3 list exactly; the full log is
+  exactly `open#1, list#1, call#1(search_emails), call#1(read_email), close#1, open#2,
+  list#2, call#2(send_email), close#2`; session 1 calls only the read tools; the builder
+  saw only `{search_emails, read_email}`; no write tool is bound to either model; and
+  session 2's `to` is the validated list. Without `--email`, only session 1 is opened,
+  there is one client and no `call#2`.
+
+Findings (none blocking; no code defect found):
+1. **ED-3 expected log is incomplete as written.** `open#1, list#1, close#1, ...`
+   leaves out the read calls that `run_digest` always makes on session 1
+   (`call#1(search_emails)`, plus `call#1(read_email)` per email). This confirms the
+   T072 note. The test asserts both forms; the design text could say "ignoring read
+   calls on session 1".
+2. **The `EMAIL_SEND_TIMEOUT` error names the variable and range but not `README >
+   Email delivery`.** It is the generic `_env_number` message (`EMAIL_SEND_TIMEOUT must
+   be a number between 10 and 600, got 'x'.`), exactly as ED-13 specifies, and
+   acceptance 27 covers only `EMAIL_TO`. The task text asks for the README hint in every
+   config class, so the tests assert the hint for the `EMAIL_TO` classes only and the
+   exact actual message for the timeout. Consistent with the design; the hint could be
+   added if wanted.
+
+Checks run:
+- Mutation check: a scratch `-p` plugin exec'd mutated `cli.py`/`email_delivery.py`
+  into their modules (learnings T056/T061; `load_dotenv` neutralised; source
+  untouched). 15/15 mutants killed: email skipped after a Telegram failure; no exit 3;
+  always plural; no omitted suffix; no over-budget suffix; unknown printed as FAILED;
+  import failure as unknown; email before Telegram; email before `--open`; safety net
+  as failed; unredacted safety-net traceback; first recipient only; recipients at INFO;
+  subject at INFO; unexpected sender exception as failed. That last one survived the
+  first draft; the unexpected-sender test was added for it. Negative control: a
+  `filter_read_only` that leaks every tool fails both ED-3 tests.
+- Coverage (`uv run --with coverage`, branch, this file only): `email_delivery.py` 97%.
+  `cli.py` 77%; the email functions are fully covered, and the misses are WSL/browser,
+  the Telegram exception branch, the fetch report line and `main()`.
+- `uv run pytest -q`: 4840 passed, 2 deselected, 4 xfailed (with the T071 fix's
+  in-flight `gmail_mcp.py` edits in the tree). `ruff format`, `ruff check .` and
+  `pyrefly check` are clean (0 errors).
