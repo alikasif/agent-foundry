@@ -5558,3 +5558,12 @@ Decisions and checks:
   `uv run pyrefly check` (0 errors), `uv run pytest -q`: 5060 passed, 2 xfailed,
   2 deselected (same count as after T092; the three tests that use `EMAIL_SENT_LINE`
   and every `sent_line()` user pass with the new line).
+
+## T098 — README: email attachment behaviour, filename, privacy, security statement, failure meanings, corrected 'no attachment' wording
+
+- Added a "### The attachment" subsection (EA-12 items 1-4, 6) and security bullets
+  (item 5) to the Email delivery, Security model, Safety model and Privacy sections.
+- Deviation: a non-ASCII `TMPDIR` surfaces from the real code as the app's own check
+  `the attachment path is not a plain absolute path` (gmail_mcp `_attachment_problem`),
+  not as `could not prepare the attachment`; the troubleshooting row says so.
+- Corrected the `--email` row of the options table and the intro to mention the attachment.

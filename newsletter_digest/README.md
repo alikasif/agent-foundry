@@ -210,7 +210,7 @@ uv run newsletter-digest [OPTIONS]
 | `--fetch-articles` | `NEWSLETTER_FETCH_ARTICLES` | off | Also fetch the linked pages of must-read and worth-reading items and summarise them. See [Privacy](#privacy). |
 | `--max-fetch INTEGER` | `NEWSLETTER_MAX_FETCH` | `15` | Maximum number of article pages to fetch, 1 to 50. Only used with `--fetch-articles`. |
 | `--telegram` | none (flag only) | off | Also save a PDF copy next to the HTML and send it to your own Telegram chat. Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. See [Telegram delivery](#telegram-delivery) and [Privacy](#privacy). |
-| `--email` | none (flag only) | off | Also email the reading list (HTML plus a short plain-text part) to the addresses in `EMAIL_TO`, through the same Gmail MCP server and login. No SMTP, no PDF. Combines with `--telegram`. See [Email delivery](#email-delivery) and [Privacy](#privacy). |
+| `--email` | none (flag only) | off | Also email the reading list (HTML plus a short plain-text part, with the same HTML attached as `reading-list-YYYY-MM-DD.html`) to the addresses in `EMAIL_TO`, through the same Gmail MCP server and login. No SMTP, no PDF. Combines with `--telegram`. See [Email delivery](#email-delivery) and [Privacy](#privacy). |
 | `--log-level [debug\|info\|warning\|error]` | none | `INFO` | Logging verbosity. `DEBUG` also prints tracebacks on failure. |
 | `-h`, `--help` | none | none | Show help and exit. |
 
@@ -540,7 +540,9 @@ With a real bot and your chat ID in `.env`:
 With `--email`, the tool also emails the reading list to the addresses you list in
 `EMAIL_TO`. The message is one HTML email plus a short plain-text part. It is sent through
 the same pinned Gmail MCP server and the same login as the search: no SMTP, no new
-credentials, no PDF. The HTML file is written first and is never changed by this step.
+credentials, no PDF. The same HTML is also attached once (see
+[The attachment](#the-attachment)). The HTML file is written first and is never changed
+by this step.
 Without the flag nothing email-related is loaded, read or sent, and the HTML output is
 unchanged. It combines with `--telegram`: both channels are attempted.
 
@@ -570,8 +572,29 @@ EMAIL_SEND_TIMEOUT=90
   offending entry (shortened to 32 characters) and says why.
 - `EMAIL_TO` and `EMAIL_SEND_TIMEOUT` are read only with `--email`. A missing or blank
   `EMAIL_TO`, or an `EMAIL_SEND_TIMEOUT` outside 10 to 600, exits with code 2.
-- Every recipient is in the To line and sees the others. There is no Cc, Bcc or
-  attachment.
+- Every recipient is in the To line and sees the others. There is no Cc or Bcc; the HTML
+  is attached once.
+
+### The attachment
+
+- **What is sent.** With `--email`, the message carries one attachment,
+  `reading-list-YYYY-MM-DD.html`, identical to the email body. It is the compact email
+  version, not the saved page: no "Read here" text, no mark-read checkbox, no script, and
+  not a PDF. It opens offline in any browser.
+- **Same name, different file.** The saved page in the output folder has the same name
+  and is the full list. The attachment is a copy of the email, including the
+  "M of N items are shown" note when items were left out. It does not replace the saved
+  page.
+- **Privacy.** Every recipient receives the whole list as a file they can save and
+  forward, with the same content as the body. The attachment is not end-to-end encrypted,
+  and anyone with the file can open it. A copy stays in your Sent folder.
+- **How the file is handled.** It is written to a new private temporary directory
+  (owner-only permissions) and deleted after the send, whatever the outcome. Nothing is
+  written to the output folder. If the process is killed, a `newsletter-digest-email-*`
+  folder holding that one copy may stay in the system temp directory; it can be deleted.
+- **Gmail notes.** The attachment does not count toward the about 102 KB clipping of the
+  body. The whole message is roughly 2.5 times the HTML size (about 240 KB at the full
+  budget).
 
 ### Security model
 
@@ -581,6 +604,11 @@ EMAIL_SEND_TIMEOUT=90
   short-lived** Gmail MCP session, after the HTML is written and the agent session has
   ended. The recipients come from `EMAIL_TO`, and the subject is a fixed template built
   from counts only (see below).
+- The delivery code sends exactly one attachment, whose path is made by fixed code. The
+  Gmail MCP server attaches **any** readable local file it is given a path to; it has no
+  path checks of its own. So the path is never taken from email, web or model content,
+  `.env` or a command-line option. Before the send, the app re-checks that the file is
+  its own private copy and byte-identical to the body.
 - No other Gmail write tool (draft, modify, delete, label, filter) is used by anything.
 - The Gmail session the agent uses stays read-only; the send session is never given to a
   model.
@@ -650,7 +678,7 @@ Exit codes are in [Exit codes](#exit-codes). With `--email` the tool prints exac
 
 | Outcome | stderr | Exit code |
 | --- | --- | --- |
-| Gmail accepted it | `Email: sent to <n> recipient(s) (Gmail id <id>).` Then, if the budget dropped items, `<shown> of <total> items included; the full list is in the saved HTML.` and, if still over budget, `The email is over Gmail's size budget and may be clipped.` | 0 |
+| Gmail accepted it | `Email: sent to <n> recipient(s) with 1 attachment (Gmail id <id>).` Then, if the budget dropped items, `<shown> of <total> items included; the full list is in the saved HTML.` and, if still over budget, `The email is over Gmail's size budget and may be clipped.` | 0 |
 | Nothing was sent | `Email: FAILED (<reason>). Saved: <html path>. See README > Email delivery.` | 3 |
 | Ambiguous | `Email: OUTCOME UNKNOWN (<reason>); the email may have been sent, check your Gmail Sent folder before re-running. Saved: <html path>. See README > Email delivery.` | 3 |
 
@@ -677,6 +705,8 @@ Exit codes are in [Exit codes](#exit-codes). With `--email` the tool prints exac
 | `the Gmail MCP server offers no send_email tool` or `the Gmail MCP server's send_email arguments differ from version 1.1.11 (...)` | `GMAIL_MCP_ARGS` does not point at the pinned `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`, or another version changed the tool. Nothing was sent. See [Pinned server version](#pinned-server-version). |
 | `Email: OUTCOME UNKNOWN (no reply from the Gmail MCP server within <n> s after the send was issued)` | Gmail may have accepted it. Check **Sent** before re-running. If sends are just slow, raise `EMAIL_SEND_TIMEOUT` (up to 600). |
 | `Email: OUTCOME UNKNOWN (the Gmail MCP connection failed after the send was issued ...)` or `(unexpected error ...)` or `(unrecognised reply from send_email ...)` | Same: check **Sent** first, then re-run only if the digest is missing. |
+| `the mail server could not read the attachment file; nothing was sent` | The server could not open the temporary copy. The usual cause is a `GMAIL_MCP_COMMAND` that runs a Windows-side `node` from WSL, which cannot see Linux paths. Use a Linux `node`/`npx`. The pin is unchanged. |
+| `could not prepare the attachment (<ErrorType>); nothing was sent` | The temp folder is full or not writable. Free space or fix `TMPDIR`. A `TMPDIR` containing non-ASCII characters is also refused (`the attachment path is not a plain absolute path` in the app's own checks); point it at an ASCII path. |
 | `the email failed this app's own checks (...); nothing was sent` / `could not build the email (...)` | A bug or an unexpected value in the data; the HTML is still saved. Re-run with `--log-level DEBUG` and report it. |
 
 Error text from the server is shortened and has any address replaced before it is shown.
@@ -688,10 +718,16 @@ This is a manual check with a real Gmail login; it is not part of the automated 
 1. Put your own address in `.env`: `EMAIL_TO=you@example.com`.
 2. Run `uv run newsletter-digest --window 1w --max-emails 5 --email`.
 3. Check stdout: one line, the `.html` path. Check that stderr ends with
-   `Email: sent to 1 recipient (Gmail id ...).` and that the exit code is 0 (`echo $?`).
+   `Email: sent to 1 recipient with 1 attachment (Gmail id ...).` and that the exit code
+   is 0 (`echo $?`).
 4. In Gmail, open the message (Inbox, and a copy in Sent): the subject starts with
    `Newsletter digest:`, Must read comes first, the links open, and there is no
    "View entire message" clipping at the bottom. Check it on your phone too.
+   Attachment checks: the message shows an attachment chip named
+   `reading-list-<date>.html`; opening it in a browser works offline and shows the same
+   content as the body. Under "Show original": the message is `multipart/mixed` wrapping
+   a `multipart/alternative`, the attachment is a base64 `text/html` part, and `From:`
+   shows your own address.
 5. If the send fails with a permission error, re-run the `auth` command from
    [OAuth scope](#oauth-scope) and try again; this first send is what confirms the token.
 6. Failure check: put `EMAIL_TO=not-an-address` in `.env`, re-run, and confirm exit code 2
@@ -710,7 +746,9 @@ Without `--email` no run writes to Gmail at all.
 - **Sending is a separate, deterministic step (only with `--email`).** After the HTML is
   written, the app's own delivery code opens a second, short-lived Gmail MCP session and
   calls only `send_email`, with recipients from `EMAIL_TO` and a fixed, counts-only
-  subject. No model is involved and no other write tool (draft, modify, delete, label,
+  subject, and attaches exactly one file: the app's own private copy of the email HTML
+  (the path is made by fixed code, never taken from email, web or model content, `.env`
+  or a CLI option). No model is involved and no other write tool (draft, modify, delete, label,
   filter) is used by anything. See [Email delivery](#email-delivery).
 - **The OAuth scope is not the guard.** The token you create in step 3 comes from the
   server's own consent flow, and its scopes include send and modify access. The allowlist
@@ -797,7 +835,8 @@ Without `--email` no run writes to Gmail at all.
   same derived data as the HTML, without fetched page text beyond the summaries). It
   goes through Gmail to every address in `EMAIL_TO`; every recipient sees all the others
   in the To line. Email is not end-to-end encrypted, and a copy stays in your Sent
-  folder. The subject has counts only. Recipient addresses are never logged at the
+  folder. The same HTML is attached once as `reading-list-YYYY-MM-DD.html`, so each
+  recipient can save and forward the whole list as a file. The subject has counts only. Recipient addresses are never logged at the
   default level and are redacted from error output (they appear only at `DEBUG`).
 - The tool keeps no database or history. The only persisted state is the HTML file (plus
   the PDF with `--telegram`) and the mark-read flags in your browser. The email is kept
