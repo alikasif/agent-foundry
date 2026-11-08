@@ -601,3 +601,11 @@
   umask 022. Run the staging once under `os.umask(0o277)` (restore it in a finalizer):
   without the explicit chmods that gives 0500/0400. Likewise, a "no resolve" mutant is
   only visible when `tempfile.tempdir` is a symlink.
+- (T101) `uv run` creates its own `uv-<hash>.lock` in `$TMPDIR` before Python starts.
+  So a smoke started as `/usr/bin/env "TMPDIR=<empty dir>" uv run ... python x.py`
+  never sees an empty `TMPDIR`, and "nothing created in TMPDIR" checks fail (or have to
+  ignore uv's file). Pass the private root in a separate variable (`T101_TMP=<dir>`) and
+  set `os.environ["TMPDIR"]` and `tempfile.tempdir` inside the script before any
+  project import. Also, Telegram success on stderr is `Sent <name>.pdf to Telegram.`,
+  with no `Telegram:` prefix. The fake send server records an `AttachmentSnapshot` with
+  `exists=False` for a missing file, so "no snapshot" is the wrong check there.

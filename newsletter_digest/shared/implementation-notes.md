@@ -5989,3 +5989,180 @@ module-level `GMAIL_SEND_ARG_MAP["cc"] = "cc"`; the `map-written-later` case cau
   seam returned a regular file path, `_stage_attachment` would `chmod` that file to 0700
   before failing the is-a-directory check. Only a test seam can do this (mkdtemp always
   creates a directory), so it is not tested and not reported as a defect.
+
+## T101 — Final verification gate (email attachment): pytest, ruff format/check, pyrefly, smoke with fakes, temp leak check, diff scope, manual acceptance-43 steps
+
+Run on 2026-11-08 at HEAD `2a953d4` (branch `feat/newsletter-digest`), with no other
+agent running. A previous T101 run died before it committed anything. This run started
+again from the beginning. No file under `src/` or `tests/` was changed, and no
+`review_feedback` was raised: every gate passed.
+
+**Gate results (exact):**
+
+| Command | Result |
+|---|---|
+| `uv sync` | `Resolved 114 packages`, `Audited 111 packages`, exit 0 |
+| `uv lock --check` | `Resolved 114 packages`, exit 0 (uv.lock unchanged since 77b6728) |
+| `newsletter-digest-email-*` in `tempfile.gettempdir()` (`/tmp`) before the suite | **0** (T089 baseline 0) |
+| `uv run pytest -q` | **5373 passed, 2 deselected, 2 xfailed** in 121.9 s (run twice, same counts; the first run added `-p no:cacheprovider`) |
+| same count after the suite | **0** (equal to the before count and to T089's baseline) |
+| `uv run pytest tests/test_flag_off_identity.py tests/test_architecture.py tests/test_gmail_mcp_send.py tests/test_email_delivery.py tests/test_cli_email.py tests/test_email_fixture.py tests/test_agent.py tests/test_gmail_mcp.py tests/test_email_render.py tests/test_cli_telegram.py -q` | **1790 passed** in 92.3 s |
+| `uv run pytest tests/test_architecture.py -q` (alone, T100 note) | **519 passed** |
+| `uv run ruff format --check .` (whole repo, AMENDED) | `64 files already formatted`, exit 0 |
+| `uv run ruff format --check src tests` | `64 files already formatted` |
+| `uv run ruff check .` | `All checks passed!` |
+| `uv run pyrefly check` | `0 errors (18 suppressed, 3 warnings not shown)`, exit 0 |
+| `newsletter-digest --help` from an empty scratch cwd (`uv run --project ...`) | exit 0; the `--email` help ends with `The same HTML is attached as reading-list-YYYY-MM-DD.html.` (Click wraps it as `reading-` / `list-...`, so it was compared with all whitespace removed, learnings T060); the cwd was still empty afterwards |
+
+**Suppressions:** 18 now, against 17 at T087. The one new comment since `77b6728` is
+`tests/test_email_fixture.py:882` `snapshot.data = b"changed"  # type: ignore[misc]`, a
+deliberate write to a frozen dataclass (`AttachmentSnapshot`) inside
+`pytest.raises(AttributeError)`. That write is what the test checks. None is in `src/`.
+
+**Smoke with fakes** (scratch `T101_smoke.py` + `T101_run.sh`, not committed). Each mode
+runs in its own process:
+- `/usr/bin/env -i` with only HOME, PATH and PYTHONPATH=<project>, plus the private
+  temp root;
+- `uv run --project`, from an empty scratch cwd, so no `.env` is found;
+- `connect`, `create_connection` and `getaddrinfo` raise;
+- `cli.run_digest` is replaced by an async fake that returns a fixture list;
+- `gmail_mcp._default_send_client` is replaced by `ef.fake_send_factory(...)`, and
+  `gmail_mcp.shutil` by a proxy whose `which` returns a fake npx;
+- `cli.PROC_VERSION` points at a missing file;
+- `TMPDIR` and `tempfile.tempdir` point at an empty `<work>/tmp`;
+- the CLI runs through `CliRunner`.
+
+| Mode | Checks | Result |
+|---|---|---|
+| `off` (flag-off fixture list) | 15 | exit 0, one stdout line, HTML byte-equal to `flag_off_ranked_golden.html`, no `newsletter_digest.email*` module after import or after the run, send client never built, no `Email:` line, out dir = the HTML only, temp root empty |
+| `email_ok` (`ef.standard_list()`, one recipient) | 29 | exit 0; one `send_email` call; key set exactly `{to, subject, body, htmlBody, mimeType, attachments}` == `ef.SEND_ARGUMENT_KEYS`, no forbidden key; one attachment `<TMPDIR>/newsletter-digest-email-*/reading-list-2026-11-04.html`, outside the out dir; call-time snapshot is a regular file, 0600 in 0700, bytes == `htmlBody.encode("ascii")` and != the saved page; `Email: sent to 1 recipient with 1 attachment (Gmail id 19a4f00dcafe1234).`; one stdout line; out dir = the HTML only; temp root empty afterwards |
+| `email_golden` (flag-off list with `--email`) | 30 | as `email_ok`, and the saved HTML is still byte-equal to the flag-off ranked golden |
+| `email_missing` | 24 | the staged file is deleted after the argument re-check and before the session, so the fake server answers the verified `Error: File does not exist: <path>`. Result: exit 3, `Email: FAILED (the mail server could not read the attachment file; nothing was sent). Saved: <html>. See README > Email delivery.`, the temp path is not on stderr, one call and no retry, HTML kept, temp root empty |
+| `email_telegram` (`--email --telegram`, Telegram via `telegram._default_transport` -> `httpx.MockTransport` with `tests.test_cli_telegram.ok_response`) | 33 | exit 0; the `Email:` sent line and `Sent reading-list-2026-11-04.pdf to Telegram.`; one Telegram request whose multipart body has the `.pdf` name and `%PDF-` and not the `.html` name; the email arguments hold no `.pdf`; out dir = HTML + PDF; stdout = HTML then PDF path; temp root empty |
+
+All 131 checks pass. The system `/tmp` count was still 0 after the smoke.
+
+**Diff scope against `77b6728`:**
+- `src/`: only `cli.py` (+4/-3: the module docstring sentence, the help sentence and
+  `with 1 attachment`), `email_delivery.py` (+208/-21) and `gmail_mcp.py` (+115/-9).
+  In `gmail_mcp.py` the only changes above the send half (line 529) are two added
+  imports (`stat`, `pathlib.Path`). The read half is unchanged.
+- `tests/`: only `email_fixture.py`, `test_architecture.py`, `test_cli_email.py`,
+  `test_email_delivery.py`, `test_email_fixture.py`, `test_flag_off_identity.py` and
+  `test_gmail_mcp_send.py`. Every `-` line was checked against the HEAD file with
+  `grep -qxF` (moves are not removals). The real removals are all AP-6 item 2 hunks:
+  - `email_fixture.py`: the 5→6 / 5→4 constant flip and its docstring line (T092), and
+    the `FakeSendSession.call_tool` docstring (T091).
+  - `test_architecture.py`: 7 lines in the module docstring,
+    `find_send_capability_violations`, `FINAL_EMAIL_TREE` and its comment (T090/T097).
+    The other 127 `-` lines are moves.
+  - `test_cli_email.py`: the `sent_line` helper (T093). One added `import tempfile` line
+    (T096, addition only).
+  - `test_email_delivery.py`: `SentCall`/`RecordingSender` (T092), the post-delivery
+    `build_send_arguments` call (T092), `FakeSend` docstring (T092),
+    `test_cancellation_is_not_swallowed` (T095).
+  - `test_flag_off_identity.py`: `EMAIL_SENT_LINE` (T093). Otherwise one appended
+    block of new tests (T096).
+  - `test_gmail_mcp_send.py`: module docstring, `message` fixture, five-key → six-key
+    test, the `new-required` schema case (T092), and `attachments: list[str] = []` in the
+    local FastMCP server (T092, see T100 F6).
+  - `test_email_fixture.py`: additions only.
+  These match the hunks each task lists in its notes (T091-T096) and T100 F6.
+- **Unchanged, as AP-2 requires:** `config.py`, `models.py`, `render.py`,
+  `email_render.py`, `templates/`, `fonts/`, `agent.py`, `tools.py`, `prompts.py`,
+  `store.py`, `delivery.py`, `pdf.py`, `telegram.py`, `enrich.py`, `fetch.py`,
+  `netguard.py`, `extract.py`, `links.py`, `llm.py`; all 38 files under
+  `tests/fixtures/`; `tests/conftest.py`, `test_agent.py`, `test_gmail_mcp.py`,
+  `test_email_render.py`, `test_email_html.py`, `test_config_email.py`; every Telegram,
+  PDF and delivery test file; `.env.example`; `uv.lock`; `shared/designs.md`;
+  `shared/verified_facts.md`. `pyproject.toml` differs only by the approved T089 line
+  `extend-exclude = ["*.md"]`.
+- **Other:** `shared/prd.md` gained 3 lines in `8ec7f19` (the orchestrator's
+  "Approval record (2026-11-08...)"). That is the approval record itself, not a task
+  edit, so it is not a scope violation. `README.md` changed in T098 as planned.
+- **Secrets:** the index is empty. No committed or tracked path matches `.env`, `out/`,
+  `cred`, `token` or `secret`. The only address-shaped strings in the added lines use
+  reserved domains (`example.com`, `example.org`, `inbox.test`, one `Reader@Example.com`).
+  `.env` and `out/` were not read or listed.
+
+**V39-V45:** every row is already filled by its owner (T089, T092, T094, T095, T096).
+None was TODO, so nothing was changed.
+
+**Decisions not covered by the spec / deviations:**
+1. **The smoke passes the private temp root as `T101_TMP`, and the script sets `TMPDIR`
+   and `tempfile.tempdir` itself.** `uv run` writes its own `uv-<hash>.lock` into
+   `TMPDIR` before Python starts. A `TMPDIR` given on the `uv run` command line therefore
+   is never empty at start, which would make "temp dir empty" ambiguous (learnings
+   T101). The `attachment_dir_under_tmpdir` check is the positive control that staging
+   really used that root.
+2. **Extra mode `email_golden`** (flag-off fixture with `--email`): the saved page stays
+   byte-identical to the golden when the attachment is sent. This was not asked for; it
+   is cheap and pins EA-10.
+3. **`File does not exist` case.** The spec only says "with `Error: File does not
+   exist`". The smoke produced it the way the T096 test does: the file is deleted after
+   the argument re-check and before the session, so the fake answers the verified text
+   itself. A scripted reply was not used. The fake still records one snapshot with
+   `exists=False`.
+4. **Telegram fake.** The smoke patched `telegram._default_transport` (the T087 recipe),
+   not the `deliver_reading_list` partial of the tests. That way the real
+   `TelegramClient`, PDF build and `delivery` path ran.
+5. **`uv build --wheel` was not repeated.** T101 does not list it; no template or
+   package data changed since T087 (V35).
+
+**Open findings carried forward (non-blocking, not fixed here: "fix nothing in src"):**
+- T099 MINOR 1: check 7 opens a FIFO in blocking mode.
+- T099 MINOR 2: other Node errno texts (e.g. `EMFILE: too many open files, open
+  '<path>'`) are not in the marker list. They map to a detail-bearing row, so the temp
+  path can reach WARNING and stderr.
+- T099 MINOR 3: legacy tests stage in the real `/tmp`. It is clean while the suite is
+  green, as this gate confirms.
+- T099 INFO 4-5.
+- T100 F1: (h)(2) does not constrain `_stage_attachment`'s arguments.
+- T100 F2: cleanup and chmod act on a seam directory that may not be fresh.
+- T100 F3-F6 INFO.
+- Earlier open items per AP-6 item 8 (T085 M-1/M-3, T086 M1-M4/I1-I7, C1-C10).
+T102 should carry them.
+
+**Manual acceptance 43 (user step; NOT run by any task; it sends real mail):**
+1. Set `EMAIL_TO` in your own `.env` to your own address only. Do not paste `.env`
+   contents or tokens anywhere, including bug reports. The Gmail MCP login must be the
+   same one the digest reads with.
+2. From the project dir, run `uv run newsletter-digest --window 1w --max-emails 5
+   --email`. Expect exit 0 (`echo $?`), the HTML path on stdout, and on stderr exactly
+   `Email: sent to 1 recipient with 1 attachment (Gmail id <id>).`
+3. Run `ls -d /tmp/newsletter-digest-email-* 2>/dev/null | wc -l`. Expect `0`: the
+   private copy was removed. The output folder holds only
+   `reading-list-YYYY-MM-DD.html`; the email step writes nothing there.
+4. In Gmail web and in the Gmail phone app:
+   - the body renders as before (legible, links tappable, no dead controls, forced dark
+     mode readable);
+   - there is exactly one attachment chip, `reading-list-YYYY-MM-DD.html` (the reading
+     list's end date). It opens in a browser and matches the body: same items, and the
+     "M of N items are shown" note if items were left out;
+   - there is no "Read here" text, no checkbox and no script.
+5. "Show original" in Gmail web:
+   - top-level `Content-Type: multipart/mixed` wrapping a `multipart/alternative` with
+     both a `text/plain` and a `text/html` part, both intact;
+   - one `text/html` attachment part, `Content-Transfer-Encoding: base64`, with
+     `filename="reading-list-YYYY-MM-DD.html"`;
+   - `From:` shows your own address (Q-A7; the nodemailer path probably omits it and
+     Gmail fills it in);
+   - the message was accepted with LF line endings (no garbling, no bounce).
+   Report what you see for each item.
+6. Repeat with a large window (e.g. `--window 1m --max-emails 60 --email`):
+   - no `[Message clipped]` on the body;
+   - a normal chip;
+   - the omitted-count suffix on the stderr line when items were dropped;
+   - note the message size from "Show original" (expected about 2.5 x the HTML, at most
+     about 240 KB).
+7. If the line is `Email: FAILED (the mail server could not read the attachment file;
+   ...)`:
+   - nothing was sent;
+   - check that `GMAIL_MCP_COMMAND` runs a Linux-side `node`/`npx`, not a Windows one
+     under WSL;
+   - for V44, re-run with `--log-level debug` and copy only the server's `Error: ...`
+     text. Replace the temp path and any address before sharing it.
+   On a permission error, re-run `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth`.
+8. Report back the exact text of any `Error:` reply (V44, T085 M-3), the `From:` header
+   result, the line-ending result and the clipping result. They settle the EA-16
+   `[re-verify]` items in these notes.
