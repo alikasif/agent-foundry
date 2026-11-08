@@ -3151,6 +3151,21 @@ VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
         {"prompts": "from .email_render import render_email\n"},
         "prompts -> email_render: the agent side never imports",
     ),
+    (
+        find_gmail_parameters,
+        {"email_delivery": "async def f(gmail_session: object) -> None: ...\n"},
+        "email_delivery.py:1: parameter 'gmail_session'",
+    ),
+    (
+        find_langchain_imports,
+        {"email_render": "from langchain_core.messages import M\n"},
+        "LangChain-free email_render imports langchain_core.messages",
+    ),
+    (
+        find_langchain_imports,
+        {"email_delivery": "import mcp.types\n"},
+        "LangChain-free email_delivery imports mcp.types",
+    ),
     # ---- Email HTML attachment (EA-2, T090): (a) send names, (f), (h)(1), (h)(3), (i)
     (
         find_send_capability_violations,
@@ -3416,21 +3431,6 @@ VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
         find_send_capability_violations,
         {"agent": "H = getattr(m, '_stage_attachment')\n"},
         "agent.py:1: agent holds string '_stage_attachment'",
-    ),
-    (
-        find_gmail_parameters,
-        {"email_delivery": "async def f(gmail_session: object) -> None: ...\n"},
-        "email_delivery.py:1: parameter 'gmail_session'",
-    ),
-    (
-        find_langchain_imports,
-        {"email_render": "from langchain_core.messages import M\n"},
-        "LangChain-free email_render imports langchain_core.messages",
-    ),
-    (
-        find_langchain_imports,
-        {"email_delivery": "import mcp.types\n"},
-        "LangChain-free email_delivery imports mcp.types",
     ),
 ]
 

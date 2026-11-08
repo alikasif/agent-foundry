@@ -5382,3 +5382,8 @@ Verification:
   and final-tree mutant is killed by the rule it targets.
 - `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyrefly check`
   (and `pyrefly check tests/test_architecture.py`): clean.
+- Case-id stability (scratch import of the 118f707 copy): the old `VIOLATION_CASES`
+  (170) are an exact prefix of the new list (213), and `REAL_TREE_CHECKERS` is
+  unchanged. The old `ALLOWED_CASES` (78) keep their checker names and order; the only
+  changed entries are the 11 `EMAIL_RULES` x `FINAL_EMAIL_TREE` cases (the tree
+  content, by design). `STUB_EMAIL_TREE` is byte-identical.
