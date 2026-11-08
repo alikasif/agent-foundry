@@ -68,16 +68,45 @@ Fake MCP send side (ED-17, ED-3):
   ``FakeSendFactory`` / ``fake_send_factory(script, log=None)``: a ``client_factory``
   (``connections dict -> client``) that hands out sessions in order, one script per
   session; a session beyond the script raises ``AssertionError`` on enter.
+
+Attachment staging and emulation (EA-3, EA-7, EA-11; additive, so the fake serves
+the five-key and the six-key send code alike):
+
+- ``stage_private_copy(base, html, *, name=None)``: creates
+  ``base/newsletter-digest-email-<n>/`` (0700, ``<n>`` = 1, 2, ... the first free
+  number) and in it the file ``name`` (default ``DEFAULT_ATTACHMENT_NAME``, i.e.
+  ``reading-list-<standard_list().meta.end_date>.html``) holding
+  ``html.encode("ascii")`` (0600, ``O_CREAT|O_EXCL|O_NOFOLLOW``), the way EA-3 does,
+  and returns the resolved absolute file path. ``write_private_file(directory, name,
+  data)`` is its exclusive 0600 writer (raises ``FileExistsError`` for an existing
+  entry, a planted symlink included). ``STAGED_DIR_PREFIX``, ``STAGED_NAME_RE``.
+- ``AttachmentSnapshot`` (``path``, ``exists``, ``data``, ``file_mode``,
+  ``dir_mode``, ``is_symlink``); ``AttachmentSnapshot.take(path)`` reads the file
+  NOW, because after delivery it is gone.
+- ``FakeSendSession.call_tool("send_email", ...)`` with an ``attachments`` key:
+  ``_send_problem`` also requires a list of strings (``Error: Invalid arguments:
+  attachments must be an array of strings``); one ``AttachmentSnapshot`` per path is
+  appended to ``attachment_snapshots`` when the call arrives; a path that does not
+  exist answers ``missing_attachment_text(path)`` (``Error: File does not exist:
+  <path>``); ``SessionScript(attachment_reply="eacces")`` answers
+  ``eacces_text(path)`` (``Error: EACCES: permission denied, open '<path>'``). An
+  empty list takes the server's no-attachment path (no snapshot, no file check).
+  Without the key everything behaves as before. ``FakeSendFactory`` exposes
+  ``attachment_snapshots`` (all sessions) and ``last_attachment_snapshot()``.
 """
 
 from __future__ import annotations
 
+import os
 import random
+import re
+import stat
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, timezone
 from email.utils import format_datetime
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, NoReturn
 
@@ -253,6 +282,22 @@ _READ_SCHEMAS: dict[str, dict[str, Any]] = {
 _TOOLS_WITH_SEND_SCHEMA = frozenset({"send_email", "draft_email"})
 DEFAULT_MESSAGE_ID = "19a4f00dcafe1234"
 SUCCESS_TEXT_PREFIX = "Email sent successfully with ID: "
+
+#: EA-3/EA-4 staging shape, kept here so the fixture never imports ``gmail_mcp``
+#: send names (ED-17); a self-test pins them to ``gmail_mcp`` once it has them.
+STAGED_DIR_PREFIX = "newsletter-digest-email-"
+STAGED_NAME_RE = re.compile(r"reading-list-[0-9]{4}-[0-9]{2}-[0-9]{2}\.html")
+#: ``reading-list-<standard_list().meta.end_date.isoformat()>.html``.
+DEFAULT_ATTACHMENT_NAME = f"reading-list-{END_DATE.isoformat()}.html"
+_ATTACHMENTS_KEY = "attachments"
+_POSIX = os.name == "posix"
+_PRIVATE_FILE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
 
 # ------------------------------------------------------------- word pools
 
@@ -691,10 +736,138 @@ def all_text(rl: ReadingList) -> str:
     return "\n".join(parts)
 
 
+# ------------------------------------------------------- attachment staging
+
+
+def _check_mode(info: os.stat_result, mode: int, what: str) -> None:
+    """Raise ``OSError`` unless (on POSIX) ``info`` has exactly ``mode``."""
+    if _POSIX and stat.S_IMODE(info.st_mode) != mode:
+        raise OSError(f"staged {what} is {stat.S_IMODE(info.st_mode):o}, not {mode:o}")
+
+
+def _make_private_dir(base: Path) -> Path:
+    """Create ``base/<STAGED_DIR_PREFIX><n>`` (first free ``n`` from 1), 0700."""
+    root = Path(base).resolve(strict=True)
+    number = 1
+    while True:
+        directory = root / f"{STAGED_DIR_PREFIX}{number}"
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            number += 1
+            continue
+        break
+    if _POSIX:
+        os.chmod(directory, 0o700)  # mkdir's mode is filtered by the umask
+    info = os.lstat(directory)
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"staged directory is not a directory: {directory}")
+    _check_mode(info, 0o700, "directory")
+    return directory
+
+
+def write_private_file(directory: Path, name: str, data: bytes) -> Path:
+    """Write ``data`` to ``directory/name`` exclusively, mode 0600 (EA-3).
+
+    ``O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`` never reuses or follows an existing
+    entry, so a second call with the same name, or a planted symlink, raises
+    ``FileExistsError``. The mode is set with ``fchmod`` (umask-proof) and the result
+    is checked with ``lstat`` (regular file, ``len(data)`` bytes, 0600 on POSIX).
+    Returns ``directory / name`` (not resolved).
+    """
+    path = Path(directory) / name
+    fd = os.open(path, _PRIVATE_FILE_FLAGS, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        if _POSIX:
+            os.fchmod(handle.fileno(), 0o600)
+        handle.write(data)
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_size != len(data):
+        raise OSError(f"staged file check failed: {path}")
+    _check_mode(info, 0o600, "file")
+    return path
+
+
+def stage_private_copy(base: Path, html: str, *, name: str | None = None) -> Path:
+    """Stage ``html`` like EA-3 does and return the resolved absolute file path.
+
+    Creates ``base/newsletter-digest-email-<n>/`` (0700, chmod explicitly) holding
+    exactly one file ``name`` (default :data:`DEFAULT_ATTACHMENT_NAME`) with the
+    bytes ``html.encode("ascii")`` (0600, binary, exclusive create). ``name`` is
+    used verbatim, so tests can stage wrong names for the path-safety matrix.
+
+    Raises:
+        UnicodeEncodeError: ``html`` is not ASCII (nothing is created then).
+        OSError: creating or checking the directory or file failed.
+    """
+    data = html.encode("ascii")
+    directory = _make_private_dir(base)
+    path = write_private_file(
+        directory, DEFAULT_ATTACHMENT_NAME if name is None else name, data
+    )
+    return path.resolve(strict=True)
+
+
+def _lstat_or_none(path: str) -> os.stat_result | None:
+    """``os.lstat(path)``, or ``None`` if there is no such entry (or a bad path)."""
+    try:
+        return os.lstat(path)
+    except (OSError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class AttachmentSnapshot:
+    """What one attachment path looked like when ``send_email`` was called.
+
+    ``exists`` follows symlinks (like the server's ``fs.existsSync``); ``data`` is
+    the file content read through the path (``None`` if it cannot be read);
+    ``file_mode`` and ``dir_mode`` are ``S_IMODE`` of ``lstat`` of the entry and of
+    its parent directory (``None`` if missing); ``is_symlink`` is the entry itself.
+    """
+
+    path: str
+    exists: bool
+    data: bytes | None
+    file_mode: int | None
+    dir_mode: int | None
+    is_symlink: bool
+
+    @classmethod
+    def take(cls, path: str | os.PathLike[str]) -> AttachmentSnapshot:
+        """Snapshot ``path`` now (the staged file is removed after delivery)."""
+        text = os.fspath(path)
+        entry = _lstat_or_none(text)
+        parent = _lstat_or_none(os.path.dirname(text) or os.curdir)
+        try:
+            data: bytes | None = Path(text).read_bytes()
+        except (OSError, ValueError):
+            data = None
+        return cls(
+            path=text,
+            exists=os.path.exists(text),
+            data=data,
+            file_mode=None if entry is None else stat.S_IMODE(entry.st_mode),
+            dir_mode=None if parent is None else stat.S_IMODE(parent.st_mode),
+            is_symlink=entry is not None and stat.S_ISLNK(entry.st_mode),
+        )
+
+
+def missing_attachment_text(path: str) -> str:
+    """The verified 1.1.11 reply for a path that does not exist (utl.js 103-105)."""
+    return f"Error: File does not exist: {path}"
+
+
+def eacces_text(path: str) -> str:
+    """A nodemailer-style unreadable-file reply (EA-7; not run against Node)."""
+    return f"Error: EACCES: permission denied, open '{path}'"
+
+
 # ------------------------------------------------------------ fake MCP side
 
 
 FaultKind = Literal["raise", "raise_group", "hang"]
+AttachmentReplyKind = Literal["eacces"]
 
 
 @dataclass(frozen=True)
@@ -803,6 +976,8 @@ class SessionScript:
     offered tool without one answers ``""``, a tool not offered answers like the
     server (``Error: Unknown tool: <name>``). ``validate_send`` makes ``send_email``
     answer ``Error: ...`` (like zod) for a missing required key or a wrong type.
+    ``attachment_reply="eacces"`` makes a ``send_email`` call whose attachments all
+    exist answer :func:`eacces_text` for the first path instead of ``replies``.
     """
 
     tool_names: tuple[str, ...] = SERVER_TOOL_NAMES_1_1_11
@@ -813,6 +988,7 @@ class SessionScript:
     list_fault: Fault | None = None
     exit_fault: Fault | None = None
     validate_send: bool = True
+    attachment_reply: AttachmentReplyKind | None = None
 
 
 def send_script(reply: Reply | None = None, **overrides: Any) -> SessionScript:
@@ -865,6 +1041,32 @@ def _send_problem(arguments: Mapping[str, Any]) -> str | None:
     mime = arguments.get("mimeType", "text/plain")
     if mime not in SEND_MIME_TYPES:
         return "Error: Invalid arguments: mimeType is not a valid enum value"
+    if _ATTACHMENTS_KEY in arguments and _attachment_paths(arguments) is None:
+        return "Error: Invalid arguments: attachments must be an array of strings"
+    return None
+
+
+def _attachment_paths(arguments: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The ``attachments`` paths if the value is a list of strings, else ``None``."""
+    value = arguments.get(_ATTACHMENTS_KEY)
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        return None
+    return tuple(value)
+
+
+def _attachment_reply_text(
+    snapshots: Sequence[AttachmentSnapshot], script: SessionScript
+) -> str | None:
+    """The server's answer for unusable attachments (EA-7), or ``None``.
+
+    Like 1.1.11's ``createEmailWithNodemailer``: the first path that does not exist
+    fails with ``File does not exist``; then the scripted ``attachment_reply``.
+    """
+    for snapshot in snapshots:
+        if not snapshot.exists:
+            return missing_attachment_text(snapshot.path)
+    if script.attachment_reply == "eacces":
+        return eacces_text(snapshots[0].path)
     return None
 
 
@@ -879,6 +1081,7 @@ class FakeSendSession:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.call_options: list[dict[str, Any]] = []
         self.list_cursors: list[str | None] = []
+        self.attachment_snapshots: list[AttachmentSnapshot] = []
 
     async def list_tools(
         self,
@@ -911,19 +1114,33 @@ class FakeSendSession:
         *,
         meta: dict[str, Any] | None = None,
     ) -> mcp_types.CallToolResult:
-        """Record the call, log ``call#i(name)``, then follow the script."""
+        """Record the call, log ``call#i(name)``, then follow the script.
+
+        A ``send_email`` call whose ``attachments`` is a non-empty list of strings
+        first snapshots every path (``attachment_snapshots``), then, after argument
+        validation, answers the server's attachment errors (EA-7) if any apply.
+        """
         args = dict(arguments or {})
         self.calls.append((name, args))
         self.call_options.append(
             {"read_timeout_seconds": read_timeout_seconds, "meta": meta}
         )
         self.log.add(f"call#{self.index}({name})")
+        snapshots: list[AttachmentSnapshot] = []
+        if name == "send_email":
+            paths = _attachment_paths(args) or ()
+            snapshots = [AttachmentSnapshot.take(path) for path in paths]
+            self.attachment_snapshots.extend(snapshots)
         if name not in self.script.tool_names:
             return await Reply.text_reply(f"Error: Unknown tool: {name}").produce()
         if name == "send_email" and self.script.validate_send:
             problem = _send_problem(args)
             if problem is not None:
                 return await Reply.text_reply(problem).produce()
+        if snapshots:
+            text = _attachment_reply_text(snapshots, self.script)
+            if text is not None:
+                return await Reply.text_reply(text).produce()
         reply = self.script.replies.get(name, Reply())
         return await reply.produce()
 
@@ -966,6 +1183,22 @@ class FakeSendFactory:
     def calls(self) -> list[tuple[str, dict[str, Any]]]:
         """Every ``call_tool`` across all sessions, in order."""
         return [call for session in self.sessions for call in session.calls]
+
+    @property
+    def attachment_snapshots(self) -> list[AttachmentSnapshot]:
+        """Every attachment snapshot across all sessions, in call order."""
+        return [
+            snapshot
+            for session in self.sessions
+            for snapshot in session.attachment_snapshots
+        ]
+
+    def last_attachment_snapshot(self) -> AttachmentSnapshot:
+        """The most recent attachment snapshot; ``AssertionError`` if there is none."""
+        snapshots = self.attachment_snapshots
+        if not snapshots:
+            raise AssertionError("no send_email call carried attachments")
+        return snapshots[-1]
 
 
 class FakeSendClient:

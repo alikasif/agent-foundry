@@ -9,10 +9,13 @@ sessions of the ED-3 event-order test.
 
 from __future__ import annotations
 
+import os
 import socket
+import stat
 import unicodedata
 from collections.abc import Callable
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
@@ -692,3 +695,405 @@ async def test_open_gmail_tools_over_paginated_fake_yields_only_read_tools(
         assert set(tools) == {"search_emails", "read_email"}
     assert factory.log.events == ["open#1"] + ["list#1"] * 5 + ["close#1"]
     assert factory.calls == []
+
+
+# ------------------------------------- attachment staging and emulation (T091)
+
+STAGED_HTML = "<!doctype html>\n<html><body><p>Reading list</p></body></html>\n"
+ATTACHMENT_LIST_ERROR = (
+    "Error: Invalid arguments: attachments must be an array of strings"
+)
+POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+
+
+def _attachment_args(*paths: str, html: str = STAGED_HTML) -> dict[str, Any]:
+    """``GOOD_ARGS`` plus ``htmlBody`` = ``html`` and ``attachments`` = ``paths``."""
+    return {**GOOD_ARGS, "htmlBody": html, "attachments": list(paths)}
+
+
+def _remove_staged(path: Path) -> None:
+    """Delete a staged file and its directory (what delivery does afterwards)."""
+    path.unlink()
+    path.parent.rmdir()
+
+
+def test_stage_private_copy_layout_bytes_and_resolved_path(tmp_path: Path) -> None:
+    path = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    assert path.is_absolute()
+    assert path == path.resolve(strict=True)
+    assert path.parent.parent == tmp_path.resolve()
+    assert path.parent.name == f"{ef.STAGED_DIR_PREFIX}1"
+    assert path.name == ef.DEFAULT_ATTACHMENT_NAME
+    assert ef.STAGED_NAME_RE.fullmatch(path.name)
+    assert os.listdir(path.parent) == [path.name]
+    assert os.listdir(tmp_path) == [path.parent.name]
+    info = os.lstat(path)
+    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    assert info.st_size == len(STAGED_HTML)
+    assert path.read_bytes() == STAGED_HTML.encode("ascii")
+
+
+def test_default_attachment_name_is_the_standard_list_end_date() -> None:
+    end_date = ef.standard_list().meta.end_date
+    assert ef.DEFAULT_ATTACHMENT_NAME == f"reading-list-{end_date.isoformat()}.html"
+    assert ef.DEFAULT_ATTACHMENT_NAME == "reading-list-2026-11-04.html"
+
+
+def test_staging_constants_agree_with_gmail_mcp_once_it_has_them() -> None:
+    # Before T092 gmail_mcp has neither name; afterwards both must agree (EA-4).
+    prefix = getattr(gmail_mcp, "ATTACHMENT_DIR_PREFIX", ef.STAGED_DIR_PREFIX)
+    pattern = getattr(gmail_mcp, "ATTACHMENT_NAME_RE", ef.STAGED_NAME_RE)
+    assert prefix == ef.STAGED_DIR_PREFIX == "newsletter-digest-email-"
+    assert pattern.pattern == ef.STAGED_NAME_RE.pattern
+    assert pattern.fullmatch(ef.DEFAULT_ATTACHMENT_NAME)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "reading-list-2026-11-08.htm",
+        "reading-list-２０２６-11-08.html",
+        "reading-list-2026-11-08.html\n",
+        "credentials.json",
+    ],
+)
+def test_staged_name_pattern_rejects_lookalikes(name: str) -> None:
+    assert ef.STAGED_NAME_RE.fullmatch(name) is None
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("umask", [0o022, 0o077, 0o777])
+def test_stage_private_copy_modes_ignore_the_umask(tmp_path: Path, umask: int) -> None:
+    previous = os.umask(umask)
+    try:
+        path = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    finally:
+        os.umask(previous)
+    directory = os.lstat(path.parent)
+    file = os.lstat(path)
+    assert stat.S_ISDIR(directory.st_mode)
+    assert stat.S_IMODE(directory.st_mode) == 0o700
+    assert stat.S_IMODE(file.st_mode) == 0o600
+    assert directory.st_uid == file.st_uid == os.getuid()
+    assert path.read_bytes() == STAGED_HTML.encode("ascii")
+
+
+@pytest.mark.parametrize(
+    "html",
+    ["", "<p>a</p>\r\n<p>b</p>\n", "<p>\tno BOM</p>", "x" * 95_000],
+    ids=["empty", "crlf-and-lf", "tab", "95000-bytes"],
+)
+def test_stage_private_copy_writes_exact_bytes(tmp_path: Path, html: str) -> None:
+    path = ef.stage_private_copy(tmp_path, html)
+    data = path.read_bytes()
+    assert data == html.encode("ascii")
+    assert not data.startswith(b"\xef\xbb\xbf")
+    assert os.lstat(path).st_size == len(html)
+
+
+def test_stage_private_copy_numbers_new_directories(tmp_path: Path) -> None:
+    planted = tmp_path / f"{ef.STAGED_DIR_PREFIX}1"
+    planted.mkdir()
+    (planted / "other.txt").write_text("keep")
+    first = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    second = ef.stage_private_copy(tmp_path, "<p>two</p>")
+    assert first.parent.name == f"{ef.STAGED_DIR_PREFIX}2"
+    assert second.parent.name == f"{ef.STAGED_DIR_PREFIX}3"
+    assert first.name == second.name == ef.DEFAULT_ATTACHMENT_NAME
+    assert first.read_bytes() == STAGED_HTML.encode("ascii")
+    assert second.read_bytes() == b"<p>two</p>"
+    assert os.listdir(planted) == ["other.txt"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["reading-list-2026-11-08.html", "reading-list-2026-11-08.htm", "credentials.json"],
+)
+def test_stage_private_copy_uses_the_given_name(tmp_path: Path, name: str) -> None:
+    path = ef.stage_private_copy(tmp_path, STAGED_HTML, name=name)
+    assert path.name == name
+    assert os.listdir(path.parent) == [name]
+
+
+def test_stage_private_copy_resolves_a_relative_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = ef.stage_private_copy(Path("."), STAGED_HTML)
+    assert path.is_absolute()
+    assert path == tmp_path.resolve() / f"{ef.STAGED_DIR_PREFIX}1" / path.name
+
+
+def test_stage_private_copy_resolves_a_symlinked_base(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    path = ef.stage_private_copy(link, STAGED_HTML)
+    assert path.parent.parent == real.resolve()
+    assert os.path.realpath(path) == str(path)
+
+
+def test_stage_private_copy_refuses_non_ascii_and_creates_nothing(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(UnicodeEncodeError):
+        ef.stage_private_copy(tmp_path, "<p>café</p>")
+    assert os.listdir(tmp_path) == []
+
+
+def test_write_private_file_refuses_a_second_write_with_the_same_name(
+    tmp_path: Path,
+) -> None:
+    path = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    with pytest.raises(FileExistsError):
+        ef.write_private_file(path.parent, path.name, b"replaced")
+    assert path.read_bytes() == STAGED_HTML.encode("ascii")
+    assert os.listdir(path.parent) == [path.name]
+
+
+def test_write_private_file_refuses_a_planted_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_bytes(b"secret")
+    directory = tmp_path / "private"
+    directory.mkdir()
+    (directory / ef.DEFAULT_ATTACHMENT_NAME).symlink_to(target)
+    with pytest.raises(FileExistsError):
+        ef.write_private_file(directory, ef.DEFAULT_ATTACHMENT_NAME, b"overwrite")
+    assert target.read_bytes() == b"secret"
+
+
+def test_write_private_file_returns_the_unresolved_path(tmp_path: Path) -> None:
+    path = ef.write_private_file(tmp_path, "plain.html", b"<p>x</p>")
+    assert path == tmp_path / "plain.html"
+    assert path.read_bytes() == b"<p>x</p>"
+
+
+def test_attachment_snapshot_of_a_staged_file(tmp_path: Path) -> None:
+    path = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    snapshot = ef.AttachmentSnapshot.take(path)
+    assert snapshot.path == str(path)
+    assert snapshot.exists and not snapshot.is_symlink
+    assert snapshot.data == STAGED_HTML.encode("ascii")
+    if os.name == "posix":
+        assert (snapshot.file_mode, snapshot.dir_mode) == (0o600, 0o700)
+    assert ef.AttachmentSnapshot.take(str(path)) == snapshot
+    with pytest.raises(AttributeError):
+        snapshot.data = b"changed"  # type: ignore[misc]
+
+
+def test_attachment_snapshot_is_taken_when_called(tmp_path: Path) -> None:
+    path = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    before = ef.AttachmentSnapshot.take(path)
+    _remove_staged(path)
+    after = ef.AttachmentSnapshot.take(path)
+    assert before.data == STAGED_HTML.encode("ascii") and before.exists
+    assert (after.exists, after.data, after.file_mode, after.dir_mode) == (
+        False,
+        None,
+        None,
+        None,
+    )
+
+
+def test_attachment_snapshot_of_a_missing_file_in_an_existing_directory(
+    tmp_path: Path,
+) -> None:
+    snapshot = ef.AttachmentSnapshot.take(tmp_path / "missing.html")
+    assert not snapshot.exists and not snapshot.is_symlink
+    assert snapshot.data is None and snapshot.file_mode is None
+    assert snapshot.dir_mode == stat.S_IMODE(os.lstat(tmp_path).st_mode)
+
+
+def test_attachment_snapshot_of_symlinks(tmp_path: Path) -> None:
+    target = tmp_path / "target.html"
+    target.write_bytes(b"<p>target</p>")
+    link = tmp_path / "link.html"
+    link.symlink_to(target)
+    dangling = tmp_path / "dangling.html"
+    dangling.symlink_to(tmp_path / "nowhere.html")
+    followed = ef.AttachmentSnapshot.take(link)
+    assert followed.is_symlink and followed.exists
+    assert followed.data == b"<p>target</p>"
+    broken = ef.AttachmentSnapshot.take(dangling)
+    assert broken.is_symlink and not broken.exists and broken.data is None
+    assert broken.file_mode is not None
+
+
+@pytest.mark.parametrize("kind", ["directory", "nul", "empty"])
+def test_attachment_snapshot_of_unreadable_paths(tmp_path: Path, kind: str) -> None:
+    path = {"directory": str(tmp_path), "nul": f"{tmp_path}/a\x00b", "empty": ""}[kind]
+    snapshot = ef.AttachmentSnapshot.take(path)
+    assert snapshot.data is None and not snapshot.is_symlink
+    assert snapshot.exists is (kind == "directory")
+
+
+@pytest.mark.anyio
+async def test_fake_snapshots_the_attachment_at_call_time(tmp_path: Path) -> None:
+    path = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    args = _attachment_args(str(path))
+    factory = ef.fake_send_factory(ef.send_script(ef.Reply.success("att-1")))
+    result = await _send_once(factory, args)
+    _remove_staged(path)  # delivery removes the copy once the send returned
+    assert _text(result) == "Email sent successfully with ID: att-1"
+    assert factory.calls == [("send_email", args)]
+    (snapshot,) = factory.sessions[0].attachment_snapshots
+    assert factory.attachment_snapshots == [snapshot]
+    assert factory.last_attachment_snapshot() is snapshot
+    assert snapshot.path == str(path)
+    assert snapshot.exists and not snapshot.is_symlink
+    assert snapshot.data == STAGED_HTML.encode("ascii") == args["htmlBody"].encode()
+    if os.name == "posix":
+        assert (snapshot.file_mode, snapshot.dir_mode) == (0o600, 0o700)
+    assert not path.parent.exists()
+
+
+@pytest.mark.anyio
+async def test_fake_snapshot_precedes_a_hanging_or_raising_reply(
+    tmp_path: Path,
+) -> None:
+    path = ef.stage_private_copy(tmp_path, STAGED_HTML)
+    hang = ef.fake_send_factory(ef.send_script(ef.Reply.hang()))
+    with pytest.raises(TimeoutError):
+        with anyio.fail_after(0.05):
+            await _send_once(hang, _attachment_args(str(path)))
+    assert hang.last_attachment_snapshot().data == STAGED_HTML.encode("ascii")
+    boom = ef.fake_send_factory(ef.send_script(ef.Reply.raising(OSError("pipe"))))
+    with pytest.raises(OSError, match="pipe"):
+        await _send_once(boom, _attachment_args(str(path)))
+    assert boom.last_attachment_snapshot().exists
+
+
+@pytest.mark.anyio
+async def test_fake_missing_attachment_gets_the_verified_reply(
+    tmp_path: Path,
+) -> None:
+    missing = str(tmp_path / f"{ef.STAGED_DIR_PREFIX}9" / ef.DEFAULT_ATTACHMENT_NAME)
+    factory = ef.fake_send_factory(ef.send_script(ef.Reply.success()))
+    result = await _send_once(factory, _attachment_args(missing))
+    assert _text(result) == f"Error: File does not exist: {missing}"
+    assert _text(result) == ef.missing_attachment_text(missing)
+    assert result.isError is False
+    assert len(factory.calls) == 1
+    snapshot = factory.last_attachment_snapshot()
+    assert (snapshot.exists, snapshot.data, snapshot.dir_mode) == (False, None, None)
+
+
+@pytest.mark.anyio
+async def test_fake_names_the_first_missing_of_several_paths(tmp_path: Path) -> None:
+    present = str(ef.stage_private_copy(tmp_path, STAGED_HTML))
+    gone_a, gone_b = str(tmp_path / "a.html"), str(tmp_path / "b.html")
+    script = ef.send_script(attachment_reply="eacces")
+    factory = ef.fake_send_factory(script)
+    result = await _send_once(factory, _attachment_args(present, gone_a, gone_b))
+    assert _text(result) == ef.missing_attachment_text(gone_a)
+    assert [s.path for s in factory.attachment_snapshots] == [present, gone_a, gone_b]
+    assert [s.exists for s in factory.attachment_snapshots] == [True, False, False]
+
+
+@pytest.mark.anyio
+async def test_fake_eacces_script_option(tmp_path: Path) -> None:
+    path = str(ef.stage_private_copy(tmp_path, STAGED_HTML))
+    factory = ef.fake_send_factory(ef.send_script(attachment_reply="eacces"))
+    result = await _send_once(factory, _attachment_args(path))
+    assert _text(result) == f"Error: EACCES: permission denied, open '{path}'"
+    assert _text(result) == ef.eacces_text(path)
+    assert result.isError is False
+    assert len(factory.calls) == 1
+    assert factory.last_attachment_snapshot().data == STAGED_HTML.encode("ascii")
+    unchecked = ef.send_script(attachment_reply="eacces", validate_send=False)
+    lenient = ef.fake_send_factory(unchecked)
+    assert _text(await _send_once(lenient, _attachment_args(path))).startswith(
+        "Error: EACCES"
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "value",
+    ["/tmp/x.html", None, [1], [["/tmp/x.html"]], {"path": "/tmp/x.html"}, 7],
+    ids=["str", "none", "int-item", "nested-list", "dict", "int"],
+)
+async def test_fake_requires_attachments_to_be_a_list_of_strings(value: Any) -> None:
+    args = {**GOOD_ARGS, "attachments": value}
+    factory = ef.fake_send_factory(ef.send_script())
+    result = await _send_once(factory, args)
+    assert _text(result) == ATTACHMENT_LIST_ERROR
+    assert factory.calls == [("send_email", args)]
+    assert factory.attachment_snapshots == []
+    lenient = ef.fake_send_factory(ef.send_script(validate_send=False))
+    assert _text(await _send_once(lenient, args)).startswith("Email sent")
+    assert lenient.attachment_snapshots == []
+
+
+@pytest.mark.anyio
+async def test_fake_validates_arguments_before_reading_attachments(
+    tmp_path: Path,
+) -> None:
+    missing = str(tmp_path / "missing.html")
+    args = {**_attachment_args(missing), "to": "reader@example.com"}
+    factory = ef.fake_send_factory(ef.send_script())
+    result = await _send_once(factory, args)
+    assert "to must be an array" in _text(result)
+    assert [s.path for s in factory.attachment_snapshots] == [missing]
+
+
+@pytest.mark.anyio
+async def test_fake_empty_attachment_list_takes_the_plain_path() -> None:
+    factory = ef.fake_send_factory(ef.send_script(attachment_reply="eacces"))
+    result = await _send_once(factory, {**GOOD_ARGS, "attachments": []})
+    assert _text(result) == ef.SUCCESS_TEXT_PREFIX + ef.DEFAULT_MESSAGE_ID
+    assert factory.attachment_snapshots == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        ef.Reply.success("plain-1"),
+        ef.Reply.server_error("Insufficient Permission"),
+        ef.Reply.error_result("boom"),
+        ef.Reply.unknown("Queued"),
+    ],
+)
+@pytest.mark.parametrize("attachment_reply", [None, "eacces"])
+async def test_fake_send_without_attachments_is_unchanged(
+    reply: ef.Reply, attachment_reply: ef.AttachmentReplyKind | None
+) -> None:
+    baseline = ef.fake_send_factory(ef.send_script(reply))
+    factory = ef.fake_send_factory(
+        ef.send_script(reply, attachment_reply=attachment_reply)
+    )
+    expected = await _send_once(baseline, GOOD_ARGS)
+    result = await _send_once(factory, GOOD_ARGS)
+    assert (_text(result), result.isError) == (_text(expected), expected.isError)
+    assert factory.calls == baseline.calls == [("send_email", GOOD_ARGS)]
+    assert factory.log.events == baseline.log.events
+    assert factory.sessions[0].attachment_snapshots == []
+    with pytest.raises(AssertionError, match="no send_email call carried"):
+        factory.last_attachment_snapshot()
+
+
+def test_session_script_attachment_reply_defaults_to_none() -> None:
+    assert ef.SessionScript().attachment_reply is None
+    assert ef.send_script().attachment_reply is None
+    assert ef.read_script({}).attachment_reply is None
+
+
+@pytest.mark.anyio
+async def test_fake_start_retry_sees_one_snapshot_of_the_same_path(
+    tmp_path: Path,
+) -> None:
+    path = str(ef.stage_private_copy(tmp_path, STAGED_HTML))
+    factory = ef.fake_send_factory(
+        [
+            ef.send_script(enter_fault=ef.Fault.raising(RuntimeError("start"))),
+            ef.send_script(),
+        ]
+    )
+    with pytest.raises(RuntimeError):
+        await _send_once(factory, _attachment_args(path))
+    result = await _send_once(factory, _attachment_args(path))
+    assert _text(result).startswith(ef.SUCCESS_TEXT_PREFIX)
+    assert factory.sessions[0].attachment_snapshots == []
+    assert [s.path for s in factory.attachment_snapshots] == [path]

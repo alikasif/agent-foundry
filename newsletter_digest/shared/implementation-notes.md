@@ -5184,3 +5184,100 @@ never read or touched.
 - **Tradeoff.** `extend-exclude = ["*.md"]` also stops ruff from formatting Python code
   blocks inside Markdown; accepted, the drift in `shared/designs.md` was the reason.
 - No file under `src/` or `tests/` was created or modified.
+
+## T091 — Shared fixtures (attachment): stage_private_copy, AttachmentSnapshot, FakeSendSession attachment emulation
+
+Files: `tests/email_fixture.py` (additive helpers), `tests/test_email_fixture.py` (new
+tests only). `SEND_ARGUMENT_KEYS`, `FORBIDDEN_SEND_KEYS` and `SEND_EMAIL_SCHEMA_1_1_11`
+are unchanged (T092 flips the key constants). Suite: 5030 passed, 2 xfailed, 2
+deselected (includes T090's in-progress architecture tests in the working tree);
+`tests/test_email_fixture.py` 118 passed (54 new test ids, 64 existing unchanged). No
+`newsletter-digest-email-*` entry was left in `tempfile.gettempdir()` (count 0, same as
+the T089 baseline): every new test stages under `tmp_path`.
+
+New API in `tests/email_fixture.py` (all with type hints and docstrings):
+- `stage_private_copy(base, html, *, name=None) -> Path` (EA-3 shape),
+  `write_private_file(directory, name, data) -> Path` (its exclusive 0600 writer),
+  `STAGED_DIR_PREFIX`, `STAGED_NAME_RE`, `DEFAULT_ATTACHMENT_NAME`.
+- `AttachmentSnapshot` (frozen: `path`, `exists`, `data`, `file_mode`, `dir_mode`,
+  `is_symlink`) with `AttachmentSnapshot.take(path)`.
+- `SessionScript.attachment_reply: Literal["eacces"] | None = None` (last field, default
+  `None`, so every existing construction is unchanged); `AttachmentReplyKind`.
+- `FakeSendSession.attachment_snapshots`; `FakeSendFactory.attachment_snapshots`
+  (all sessions) and `FakeSendFactory.last_attachment_snapshot()`.
+- `missing_attachment_text(path)` / `eacces_text(path)`: the exact reply texts, so
+  T094-T096 build expected values from one place.
+
+Modified pre-existing hunks (AP-6 item 2; everything else is new lines):
+- `tests/email_fixture.py`: module docstring (new "Attachment staging and emulation"
+  block appended; the `SEND_ARGUMENT_KEYS` line is left for T092); imports (`os`, `re`,
+  `stat`, `pathlib.Path` added); constants block after `SUCCESS_TEXT_PREFIX` (new
+  constants appended); `SessionScript` docstring (+2 lines) and the new last field;
+  `_send_problem` (+2 lines before `return None`); `FakeSendSession.__init__`
+  (+`attachment_snapshots`); `FakeSendSession.call_tool` (docstring line replaced by a
+  longer docstring, snapshot + attachment-reply steps inserted; the old statements are
+  unchanged and in the same order); `FakeSendFactory` (new property and method after
+  `calls`). The only `-` line in `git diff 118f707 -- tests/email_fixture.py` is the old
+  one-line `call_tool` docstring.
+- `tests/test_email_fixture.py`: three import lines added (`os`, `stat`,
+  `pathlib.Path`); a new section appended at the end. No existing test changed.
+
+Decisions not covered by the spec:
+- **`<n>` is a counter**, not mkdtemp's random suffix: the first free number from 1
+  (`os.mkdir` is exclusive, `FileExistsError` moves on). Deterministic names make the
+  tests readable (`newsletter-digest-email-1`); a planted directory with the same name
+  is skipped, never reused.
+- **O_EXCL refusal is tested on `write_private_file`**, the public writer
+  `stage_private_copy` uses: every `stage_private_copy` call makes a fresh directory, so
+  "a second call with the same name in the same dir" is only reachable through the
+  writer. It refuses a second write and a planted symlink with `FileExistsError` and
+  leaves the existing file / symlink target untouched.
+- **Encode first**: `html.encode("ascii")` runs before anything is created, so a
+  non-ASCII `html` raises `UnicodeEncodeError` and leaves `base` empty. `name` is used
+  verbatim (no validation) so T094 can stage the wrong-name cases of the path-safety
+  matrix (`.htm`, full-width digits, trailing newline, `credentials.json`); raw bytes
+  (different content, same size) go through `write_private_file`.
+- **Return value**: `(directory / name).resolve(strict=True)`; the base is resolved too,
+  so a relative or symlinked `base` gives an absolute path with no symlink component
+  (`os.path.realpath(p) == str(p)`, EA-4 check 3).
+- **Fixture checks**: the staged directory and file are verified like EA-3 (`lstat`:
+  directory / regular file, size, 0700 / 0600 on POSIX) and an `OSError` is raised
+  otherwise, so a broken staging fails at the fixture, not deep inside a send test.
+- **Prefix and name pattern live in the fixture** (`STAGED_DIR_PREFIX`,
+  `STAGED_NAME_RE`) because ED-17 forbids importing `gmail_mcp` send names here. A
+  forward-compatible self-test compares them with `gmail_mcp.ATTACHMENT_DIR_PREFIX` /
+  `ATTACHMENT_NAME_RE` via `getattr(..., default)`, so it passes today and pins equality
+  once T092 adds the names.
+- **Snapshot timing**: snapshots are taken right after the call is recorded and logged,
+  for every `send_email` call whose `attachments` is a non-empty list of strings, before
+  the unknown-tool check, validation and the scripted reply. So a hanging or raising
+  reply (the timeout/transport-after-call cases) still leaves the call-time snapshot,
+  and a validation error still records what the path looked like.
+- **Snapshot semantics**: `exists` follows symlinks (like `fs.existsSync`); `data` is
+  read through the path (`None` on `OSError`/`ValueError`, e.g. a directory or a NUL in
+  the path); `file_mode`/`dir_mode` are `S_IMODE` of `lstat` of the entry and of its
+  parent (`None` if missing); `is_symlink` is the entry itself.
+- **Emulation order** (1.1.11 `handleEmailAction` + `createEmailWithNodemailer`): zod
+  validation first (`attachments must be an array of strings` if the key is present with
+  any other value: a string, `None`, a dict, an int, non-string items), then the first
+  path that does not exist answers `Error: File does not exist: <path>`, then
+  `attachment_reply="eacces"` answers `Error: EACCES: permission denied, open
+  '<first path>'`, then the scripted reply. A missing file wins over `eacces`.
+- **Empty list** `attachments: []`: the server takes its no-attachment path (verified
+  facts: only a non-empty array uses nodemailer), so no snapshot, no file check, no
+  `eacces` reply.
+- **`validate_send=False`**: the list-of-strings check is part of `_send_problem` and is
+  skipped like the other zod checks; a non-list value then gets no emulation at all
+  (no snapshot), while a well-typed list still gets the file checks and `eacces`.
+- **Not emulated**: a path that exists but cannot be read (a directory, mode 000) is not
+  turned into an EISDIR/EACCES reply automatically; only the scripted option produces
+  EACCES (the real texts are not run, EA-7 [re-verify]). The snapshot shows
+  `data is None` for such paths.
+
+Verification: scratch mutation probe (`-p` plugin that execs a mutated
+`tests/email_fixture.py` into the module, learnings T056) killed: no explicit dir
+chmod, no `fchmod`, no `O_EXCL`, no missing-file reply, no eacces reply, no list check,
+snapshots not recorded, utf-8 instead of ascii, empty list emulated, text-mode write.
+Removing only one of the two resolves (base or result) is an equivalent mutant (the
+other one still resolves); removing both is killed by the relative- and symlinked-base
+tests.

@@ -518,3 +518,10 @@
   rule reported a `gmail_mcp` send path calling `load_mcp_tools`, or a missing `if
   settings.email:` gate. Build a kill matrix (every checker × every mutant) to find
   mutants that only the positive checker catches.
+- (T091) A `-p <plugin>` mutation runner whose plugin imports `tests.<module>` needs the
+  project dir on the path as well as the plugin dir: `"PYTHONPATH=<scratch>:."`. With
+  only the scratch dir every run ends `ModuleNotFoundError: tests` before any test, which
+  looks like a "kill" if you only read the last line.
+- (T091) Two redundant guards (resolving both the base dir and the returned path) make
+  each single-removal mutant equivalent; mutate both together to show the tests pin the
+  property, and record the single ones as equivalent rather than adding fake tests.
