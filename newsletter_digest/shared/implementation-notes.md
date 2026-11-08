@@ -67,7 +67,7 @@
 | V40 | `tempfile.mkdtemp(prefix=...)` honours `TMPDIR` / `tempfile.tempdir` at call time, creates 0700 under the current umask, returns an absolute path; `Path.resolve(strict=True)` of it equals itself under `/tmp` on WSL | T092 | CPython 3.13.5 stdlib, Linux 6.6 WSL2 | Scratch probe `<scratchpad>/T092_probe.py` run with `python3 -I`, `TMPDIR` unset, cwd = scratchpad; every directory removed afterwards | Confirmed. `gettempdir()` is `/tmp`; the default `mkdtemp(prefix=...)` returns an absolute path directly under `/tmp`, `Path(d).resolve(strict=True) == d`, mode 0700. Mode 0700 under umask 077 and 022, but **0500 under umask 277**: mkdtemp's mode is filtered by the umask, so EA-3's explicit `os.chmod(directory, 0o700)` is needed. `tempfile.tempdir = X` is honoured at call time; `TMPDIR` is honoured only while `tempfile.tempdir` is None (it caches the first lookup), so tests should set `tempfile.tempdir` (AP-6 item 4). |
 | V41 | `os.O_NOFOLLOW`, `O_CLOEXEC` exist on Linux/WSL; `O_CREAT|O_EXCL` refuses a planted symlink (`FileExistsError`) and an existing file; `fchmod` 0600 survives umask 077 and 022 (scratch probe under the scratchpad) | T092 | CPython 3.13.5 stdlib, Linux 6.6 WSL2 | Same probe, inside a scratch work directory (never the project tree) | Confirmed. Both flags exist. `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC` raises `FileExistsError` for a planted symlink to an existing file, for a **dangling** symlink (the target is not created) and for an existing file. Under umask 077 and 022 the open gives 0600; under umask 777 it gives 0000 and `fchmod(fd, 0o600)` restores 0600 in all three cases. |
 | V42 | Flag-off `sys.modules` after `import newsletter_digest.cli` (empty cwd, `uv run --project`): `stat`/`pathlib`/`os` already present at interpreter start; whether `tempfile` is present (record, assert only what is true); no `newsletter_digest.email_*` | T096 |  |  | TODO |
-| V43 | The local FastMCP stdio child under mcp's minimal environment reads a 0600 file in a 0700 directory; its SHA-256 equals `sha256(htmlBody)` (no npx, no Gmail) | T094 |  |  | TODO |
+| V43 | The local FastMCP stdio child under mcp's minimal environment reads a 0600 file in a 0700 directory; its SHA-256 equals `sha256(htmlBody)` (no npx, no Gmail) | T094 | mcp 1.30.0, langchain-mcp-adapters 0.3.2, CPython 3.13.5, Linux 6.6 WSL2 | `tests/test_gmail_mcp_send.py::test_v43_stdio_child_reads_the_private_copy`: the real `send_gmail_message` through a real `MultiServerMCPClient` (test-local factory, never `_default_send_client`) to the local FastMCP stdio `send_email`, which reads each `attachments` path **in the child** and appends one JSON record (exists, SHA-256, modes, uid, environment names) to `<calls file>.attachments.jsonl`; same run once more from the scratch probe `<scratchpad>/t094/t094_v43_probe.py` to print the values | Confirmed. The child (same uid as the app) read the 0600 file in the 0700 `newsletter-digest-email-<n>` directory, and its SHA-256 equals `sha256(htmlBody)`. The child's environment held exactly `HOME, LOGNAME, PATH, SHELL, TERM, USER` (mcp's `DEFAULT_INHERITED_ENV_VARS`) plus `LC_CTYPE`, which CPython sets itself at start-up (PEP 538 locale coercion). A marker variable set only in the parent did not reach the child. No `TMPDIR` is needed (the full path is passed). Extra: when the file is removed after the EA-4 check, the child answers 1.1.11's `Error: File does not exist: <path>`, which gives REJECTED with exactly one call and one session (`test_v43_stdio_child_missing_file_is_rejected_once`). A real npx/Node server is still only checked by the manual send (acceptance 43). |
 | V44 | Error-text markers for "server could not read the attachment" (`file does not exist`, `no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email with`): verified `File does not exist: <path>` from source; Node `EACCES`/`EISDIR` texts are general knowledge, not run; confirm on the manual send | T092 (re-checked by T099) | server 1.1.11 (read from source, `verified_facts.md`), nodemailer 7.x not run | `email_delivery._UNREADABLE_ATTACHMENT_MARKERS` holds exactly these eight lower-case markers, matched case-insensitively against the redacted detail **before** the permission row; scratch probe: `File does not exist: /tmp/x` and `EACCES: permission denied, open '/tmp/x'` both map to `the mail server could not read the attachment file; nothing was sent`, `Insufficient Permission` still maps to the permission row | Recorded. Only `File does not exist: <path>` is verified (utl.js 103-105). The `EACCES`/`EISDIR` (and `ENOENT`/`EPERM`/`ENOTDIR`) texts are Node/nodemailer general knowledge and were **not run** (no Node, no npx); `failed to send email with` is the server's stderr text, listed defensively. Confirm on the manual send (acceptance 43). |
 | V45 | `estimated_message_bytes(95_000, t)` is 2.4-2.6 x the HTML; stdlib `quopri` + `base64` of the synthetic 300-item email HTML agree within 10% | T095 |  |  | TODO |
 
@@ -5567,3 +5567,89 @@ Decisions and checks:
   `the attachment path is not a plain absolute path` (gmail_mcp `_attachment_problem`),
   not as `could not prepare the attachment`; the troubleshooting row says so.
 - Corrected the `--email` row of the options table and the intro to mention the attachment.
+
+## T094 — gmail_mcp send tests (attachment): six keys, path-safety matrix, schema matrix, failure matrix, child-process read (V43)
+
+- **Result.** `tests/test_gmail_mcp_send.py`: 151 -> 277 test items (+126), all
+  passing against the T092 code. The full suite was **5316 passed, 2 deselected,
+  2 xfailed**, run with other agents' uncommitted in-flight files in the tree.
+  `ruff format`/`ruff check` are clean on the file and `pyrefly check` reports 0
+  errors, with no new suppression. **V43 filled** (table above).
+- **Pre-existing hunks modified (AP-6 item 2, "an extra `attachments` parameter use
+  in the existing local FastMCP `send_email` server"):** only the
+  `LOCAL_SEND_SERVER_SCRIPT` string. That is four docstring lines, the imports
+  `hashlib`/`json`/`stat`, the `ATTACHMENTS` path and the `read_attachment` helper,
+  plus a loop in `send_email` after the calls-file write. The loop reads each path
+  in the child, appends a JSON record and answers `Error: File does not exist:
+  <path>` for a missing one, like utl.js 103-105. The `given = sorted(locals())`
+  line is still first, so the recorded key line and every V33 assertion are
+  unchanged. The module's import block gains new lines only (`hashlib`, `json`,
+  `random`, `stat`, `threading`, `datetime`, `mcp.client.stdio`); no existing
+  import line changed. All new tests are appended after the last existing test.
+  `git diff HEAD` of the file: 768 lines added, 0 removed.
+- **Deviation: the child writes the SHA-256 to `<calls file>.attachments.jsonl`, not
+  to the calls file** (the task text says "the calls file"). Three existing V33 tests
+  assert `call_lines() == [SENT_KEYS_LINE]` exactly, so an extra line in that file
+  would have meant changing them. The test reads the sibling file through a new
+  helper, `attachment_records(server)`; `LocalServer` itself is unchanged.
+- **Decision: full-width digits expect `the attachment path is not a plain absolute
+  path`.** The name is non-ASCII, so check 2 refuses it before check 4 runs (T092
+  observation). A separate unit test of `ATTACHMENT_NAME_RE` shows that check 4 also
+  refuses full-width and Arabic-Indic digits and a trailing newline (it uses
+  fullmatch).
+- **Matrix cases beyond the listed ones:** `[p]` (a one-element list), a tuple,
+  `bytes`; `.HTML`, `.html.html`, a one-digit month; the prefix only on the
+  grandparent; a 0750 parent; an extra hidden file; the file removed from its
+  directory; a 0400 file; a FIFO as the file; a truncated copy; a prefixed directory
+  that does not exist and a path with an embedded NUL (both `the attachment file
+  could not be checked`); a non-ASCII body plus a `str` attachment (the body detail
+  still comes first). Wrong-typed fields use `dataclasses.replace` with a
+  `dict[str, Any]` mapping, the form the existing tests use (pyrefly checks
+  `replace` keywords against the field types, so `dict[str, object]` fails). The
+  missing-field test uses `OutgoingEmail(**kwargs)`, so no `# type: ignore` is
+  needed. Mode and FIFO cases are skipped on non-POSIX systems.
+- **Decision: the start-retry test counts `_attachment_problem` calls** through a
+  monkeypatched module global (looked up at call time) and asserts one check per
+  send. This pins EA-6's "build_send_arguments runs once, before the loop" as well
+  as the same path in the single call.
+- **Schema extras:** `items` that is not a dict, a nullable `anyOf` (pydantic's shape,
+  learnings T092) and a non-dict property. Each gives `wrong type: attachments`,
+  TOOL_SCHEMA_CHANGED, 1 start, 0 calls and the events `open#1, list#1, close#1`
+  (a spare script proves there is no second session).
+- **Property test:** 200 seeded runs (seed 20261108). Each uses a random ASCII
+  directory name (spaces, `~`, `@`, `%`, dots, never `.`/`..`), a random date
+  between about year 930 and 7500, and a random ASCII body with mixed line breaks
+  and lines of at most 900 characters. `attachments` is always a fresh one-element
+  `list` equal to `[str(message.attachment)]`, and the keys stay exactly six.
+- **Mutation probe** (`<scratchpad>/t094/t094_mut_plugin.py`, exec-mutated
+  `gmail_mcp`, run once per mutant, only the T094 tests selected): 23 mutants, **all
+  killed**. They drop each EA-4 check 1-8 (the `..` and normpath parts together,
+  because each alone is equivalent), swap `fullmatch` for `match`, use `\d` in the
+  pattern, run the attachment check before or instead of the body check, send two
+  paths or a bare string, drop the `wrong type` check or the `items` check, refuse
+  a required `attachments`, and let a `ValueError` escape. The `no S_ISREG` mutant
+  first survived: a directory has `st_nlink == 2`, so the link-count check refuses it
+  too. The FIFO case (one link) was added to kill it.
+- **Finding for T099 (low; not changed, it is gmail_mcp code):** check 7 opens with
+  `O_RDONLY|O_NOFOLLOW|O_CLOEXEC` and no `O_NONBLOCK`. A FIFO at the attachment path
+  makes `os.open` block until some process opens it for writing. That happens
+  synchronously inside `send_gmail_message`, so anyio timeouts cannot interrupt it.
+  Only a same-user process can plant a FIFO in the 0700 directory (the EA-4 accepted
+  class). Adding `O_NONBLOCK` to `_READ_FLAGS` would make the open return at once
+  (regular files ignore the flag) and check 7 would refuse the FIFO. The test case
+  supplies a writer thread so that it terminates.
+- **Observation: the `file-missing` case reports `the attachment directory holds
+  other files`.** Check 6 compares `os.listdir(parent) == [name]`, and an empty
+  directory fails that check. This matches the spec (and fails closed), though the
+  wording is slightly odd for a missing file.
+- **Observation for T101 (temp leak check):** after one full-suite run, 12
+  `newsletter-digest-email-<random>` directories (mkdtemp names, not
+  `stage_private_copy`'s numbered ones) appeared in `/tmp` while other agents were
+  running suites in parallel. With a private `TMPDIR`, `test_gmail_mcp_send.py`,
+  `test_email_delivery.py` and `test_cli_email.py` each leave **0**. T094's tests
+  stage only under `tmp_path` and never call `email_delivery`, so the entries do not
+  come from T094. T101 should run its before/after listing with nothing else
+  running. I did not remove them.
+- **In-flight files of other tasks** (not touched): `tests/test_email_delivery.py`
+  (T095) had nine unused imports (`ruff check .` F401) and 1 failing test under a
+  custom `TMPDIR` at the time of my runs.

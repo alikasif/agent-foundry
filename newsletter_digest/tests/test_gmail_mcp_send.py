@@ -18,19 +18,26 @@ The V33 group runs the real ``send_gmail_message`` through a real
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import logging
 import os
+import random
 import socket
+import stat
 import sys
 import textwrap
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
 import anyio
 import pytest
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS
 
 from newsletter_digest import gmail_mcp
 from newsletter_digest.config import MAX_EMAIL_RECIPIENTS, Settings
@@ -1075,9 +1082,16 @@ LOCAL_SEND_SERVER_SCRIPT = textwrap.dedent(
     mode "instant" answers at once, "async-sleep" awaits for 60 s (the event loop
     stays responsive), "blocking-sleep" blocks the loop for 60 s (stdin EOF is not
     seen, so the client must terminate the process).
+    Each attachment path is read here, in the child, and one JSON record (exists,
+    SHA-256, modes, uid, environment names) is appended to
+    ``<calls file>.attachments.jsonl``; a missing path answers 1.1.11's
+    ``Error: File does not exist: <path>``.
     """
 
+    import hashlib
+    import json
     import os
+    import stat
     import sys
     import time
     from pathlib import Path
@@ -1091,6 +1105,24 @@ LOCAL_SEND_SERVER_SCRIPT = textwrap.dedent(
     with Path(sys.argv[2]).open("a") as pids:
         pids.write(f"{os.getpid()}\\n")
     server = FastMCP("fake-gmail-send")
+    ATTACHMENTS = CALLS.with_name(CALLS.name + ".attachments.jsonl")
+
+
+    def read_attachment(path: str) -> dict[str, object]:
+        """What this child process sees at ``path`` (one JSON record, V43)."""
+        record: dict[str, object] = {
+            "path": path,
+            "exists": os.path.exists(path),
+            "env": sorted(os.environ),
+        }
+        if record["exists"]:
+            info = os.stat(path)
+            record["mode"] = stat.S_IMODE(info.st_mode)
+            record["dir_mode"] = stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode)
+            record["uid"] = info.st_uid
+            with open(path, "rb") as handle:
+                record["sha256"] = hashlib.sha256(handle.read()).hexdigest()
+        return record
 
 
     @server.tool()
@@ -1111,6 +1143,12 @@ LOCAL_SEND_SERVER_SCRIPT = textwrap.dedent(
         given = sorted(k for k, v in locals().items() if v is not None)
         with CALLS.open("a") as handle:
             handle.write(",".join(given) + "\\n")
+        for path in attachments:  # V43: read in THIS (child) process, like 1.1.11
+            record = read_attachment(path)
+            with ATTACHMENTS.open("a") as handle:
+                handle.write(json.dumps(record) + "\\n")
+            if not record["exists"]:  # utl.js 103-105, before any Gmail call
+                return f"Error: File does not exist: {path}"
         if MODE == "async-sleep":
             await anyio.sleep(60)
         elif MODE == "blocking-sleep":
@@ -1301,3 +1339,733 @@ async def test_v33_real_send_timeout_after_call_is_classified_and_reaped(
     assert process_gone(pid), "the stdio server process was not reaped"
     # Start-up + the 1 s send timeout + at most mcp's 2 s termination wait.
     assert elapsed < 1.0 + TERMINATION_WAIT_S + 10
+
+
+# ================================================== T094: the attachment (EA-4..6)
+
+D_ONE_PATH = "the attachment must be one file path"
+D_NOT_PLAIN = "the attachment path is not a plain absolute path"
+D_SYMLINK = "the attachment path contains a symbolic link"
+D_NAME = "the attachment file name is not the fixed pattern"
+D_NOT_PRIVATE_DIR = "the attachment directory is not this app's private directory"
+D_OTHER_FILES = "the attachment directory holds other files"
+D_NOT_PRIVATE_FILE = "the attachment is not a private regular file"
+D_NOT_IDENTICAL = "the attachment is not identical to the HTML body"
+D_UNCHECKED = "the attachment file could not be checked"
+D_BODY_NOT_ASCII = "the HTML body is not ASCII"
+POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="POSIX modes only")
+HTML_BYTES = HTML_BODY.encode("ascii")
+PROPERTY_SEED = 20261108
+PROPERTY_RUNS = 200
+
+
+def _with_attachment(message: OutgoingEmail, value: object) -> OutgoingEmail:
+    """``message`` with ``attachment`` set to ``value``, even a wrong-typed one.
+
+    ``dataclasses.replace`` with a ``dict[str, Any]`` mapping keeps the frozen
+    dataclass intact and needs no type-checker suppression (the field is typed
+    ``Path``; the matrix must also feed ``str``, lists, tuples and ``None``).
+    """
+    changes: dict[str, Any] = {"attachment": value}
+    return dataclasses.replace(message, **changes)
+
+
+def _restaged(
+    tmp_path: Path, message: OutgoingEmail, html: str = HTML_BODY, **kw: str
+) -> OutgoingEmail:
+    """``message`` pointing at a NEW private copy of ``html`` under ``tmp_path``."""
+    return dataclasses.replace(
+        message, attachment=ef.stage_private_copy(tmp_path, html, **kw)
+    )
+
+
+def _restaged_as(name: str) -> Callable[[Path, OutgoingEmail], OutgoingEmail]:
+    """Builder: a correct private copy staged under the file name ``name``."""
+
+    def build(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+        return _restaged(tmp_path, message, name=name)
+
+    return build
+
+
+def _symlink_as_file(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A private directory whose entry is a symlink to the real staged copy."""
+    link = ef.stage_private_copy(tmp_path, HTML_BODY)
+    os.unlink(link)
+    os.symlink(message.attachment, link)
+    return dataclasses.replace(message, attachment=link)
+
+
+def _symlink_as_dir(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A prefixed symlink to the real private directory, used as the parent."""
+    link = tmp_path / f"{gmail_mcp.ATTACHMENT_DIR_PREFIX}link"
+    os.symlink(message.attachment.parent, link)
+    return dataclasses.replace(message, attachment=link / message.attachment.name)
+
+
+def _dir_as_file(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A private directory holding a DIRECTORY under the fixed file name."""
+    entry = ef.stage_private_copy(tmp_path, HTML_BODY)
+    os.unlink(entry)
+    os.mkdir(entry, 0o700)
+    return dataclasses.replace(message, attachment=entry)
+
+
+def _fifo_as_file(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A private directory holding a 0600 FIFO (one link) under the fixed name.
+
+    A FIFO has ``st_nlink == 1``, so only the regular-file test refuses it. Its
+    ``O_RDONLY`` open blocks until a writer opens it, so a daemon thread opens it
+    for writing (and closes it at once) to let check 7 reach ``fstat``.
+    """
+    entry = ef.stage_private_copy(tmp_path, HTML_BODY)
+    os.unlink(entry)
+    os.mkfifo(entry, 0o600)
+    os.chmod(entry, 0o600)
+
+    def writer() -> None:
+        os.close(os.open(entry, os.O_WRONLY))
+
+    threading.Thread(target=writer, daemon=True).start()
+    return dataclasses.replace(message, attachment=entry)
+
+
+def _non_ascii_dir(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A correct private copy below a directory with a non-ASCII name."""
+    base = tmp_path / "données"
+    base.mkdir()
+    return _restaged(base, message)
+
+
+def _plain_parent(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A correct 0700/0600 copy whose parent lacks ``ATTACHMENT_DIR_PREFIX``."""
+    parent = tmp_path / "private-dir"
+    os.mkdir(parent, 0o700)
+    os.chmod(parent, 0o700)
+    path = ef.write_private_file(parent, ef.DEFAULT_ATTACHMENT_NAME, HTML_BYTES)
+    return dataclasses.replace(message, attachment=path.resolve(strict=True))
+
+
+def _prefix_on_grandparent(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """The prefix is on the grandparent only; the direct parent is ``sub``."""
+    parent = tmp_path / f"{gmail_mcp.ATTACHMENT_DIR_PREFIX}outer" / "sub"
+    parent.mkdir(parents=True, mode=0o700)
+    os.chmod(parent, 0o700)
+    path = ef.write_private_file(parent, ef.DEFAULT_ATTACHMENT_NAME, HTML_BYTES)
+    return dataclasses.replace(message, attachment=path.resolve(strict=True))
+
+
+def _chmod_dir(mode: int) -> Callable[[Path, OutgoingEmail], OutgoingEmail]:
+    """Builder: the staged directory's mode changed to ``mode``."""
+
+    def build(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+        os.chmod(message.attachment.parent, mode)
+        return message
+
+    return build
+
+
+def _chmod_file(mode: int) -> Callable[[Path, OutgoingEmail], OutgoingEmail]:
+    """Builder: the staged file's mode changed to ``mode``."""
+
+    def build(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+        os.chmod(message.attachment, mode)
+        return message
+
+    return build
+
+
+def _extra_file(name: str) -> Callable[[Path, OutgoingEmail], OutgoingEmail]:
+    """Builder: a second file ``name`` next to the staged copy."""
+
+    def build(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+        ef.write_private_file(message.attachment.parent, name, b"x")
+        return message
+
+    return build
+
+
+def _hard_link(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A second hard link to the staged file, outside its directory."""
+    os.link(message.attachment, tmp_path / "second-link.html")
+    assert os.stat(message.attachment).st_nlink == 2
+    return message
+
+
+def _missing_file(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """The private directory exists but the staged file was removed."""
+    os.unlink(message.attachment)
+    return message
+
+
+def _missing_dir(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """A well-formed path in a prefixed directory that does not exist."""
+    parent = tmp_path / f"{gmail_mcp.ATTACHMENT_DIR_PREFIX}gone"
+    return dataclasses.replace(message, attachment=parent / ef.DEFAULT_ATTACHMENT_NAME)
+
+
+def _nul_in_path(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+    """An ASCII absolute path with an embedded NUL byte (os calls raise)."""
+    bad = Path(f"{message.attachment.parent}\x00x") / message.attachment.name
+    return dataclasses.replace(message, attachment=bad)
+
+
+def _restaged_body(html: str) -> Callable[[Path, OutgoingEmail], OutgoingEmail]:
+    """Builder: a private copy of ``html`` while ``html_body`` stays HTML_BODY."""
+
+    def build(tmp_path: Path, message: OutgoingEmail) -> OutgoingEmail:
+        return _restaged(tmp_path, message, html)
+
+    return build
+
+
+SAME_SIZE_OTHER_HTML = HTML_BODY.replace(HTML_MARKER, HTML_MARKER.lower())
+NON_ASCII_HTML = HTML_BODY.replace("first item", "première")
+
+PathCase = Callable[[Path, OutgoingEmail], OutgoingEmail]
+PATH_SAFETY_CASES: dict[str, tuple[PathCase, str]] = {
+    # check 1: exactly one Path
+    "str": (lambda t, m: _with_attachment(m, str(m.attachment)), D_ONE_PATH),
+    "empty-list": (lambda t, m: _with_attachment(m, []), D_ONE_PATH),
+    "two-paths": (
+        lambda t, m: _with_attachment(m, [m.attachment, m.attachment]),
+        D_ONE_PATH,
+    ),
+    "one-path-list": (lambda t, m: _with_attachment(m, [m.attachment]), D_ONE_PATH),
+    "tuple": (lambda t, m: _with_attachment(m, (m.attachment,)), D_ONE_PATH),
+    "none": (lambda t, m: _with_attachment(m, None), D_ONE_PATH),
+    "bytes": (lambda t, m: _with_attachment(m, bytes(m.attachment)), D_ONE_PATH),
+    # check 2: plain absolute ASCII path
+    "relative": (
+        lambda t, m: _with_attachment(
+            m, Path(m.attachment.parent.name) / m.attachment.name
+        ),
+        D_NOT_PLAIN,
+    ),
+    "dot-dot": (
+        lambda t, m: _with_attachment(
+            m,
+            m.attachment.parent / ".." / m.attachment.parent.name / m.attachment.name,
+        ),
+        D_NOT_PLAIN,
+    ),
+    "non-ascii-dir": (_non_ascii_dir, D_NOT_PLAIN),
+    # full-width digits are non-ASCII, so check 2 refuses them before check 4
+    "full-width-digits": (
+        _restaged_as("reading-list-２０２６-11-04.html"),
+        D_NOT_PLAIN,
+    ),
+    # check 3: no symlink anywhere
+    "symlink-file": (_symlink_as_file, D_SYMLINK),
+    "symlink-dir": (_symlink_as_dir, D_SYMLINK),
+    # check 4: the fixed name
+    "htm": (_restaged_as("reading-list-2026-11-04.htm"), D_NAME),
+    "trailing-newline": (_restaged_as("reading-list-2026-11-04.html\n"), D_NAME),
+    "credentials-json": (_restaged_as("credentials.json"), D_NAME),
+    "upper-case-ext": (_restaged_as("reading-list-2026-11-04.HTML"), D_NAME),
+    "double-ext": (_restaged_as("reading-list-2026-11-04.html.html"), D_NAME),
+    "short-month": (_restaged_as("reading-list-2026-1-04.html"), D_NAME),
+    # check 5: this app's private directory
+    "parent-without-prefix": (_plain_parent, D_NOT_PRIVATE_DIR),
+    "prefix-on-grandparent": (_prefix_on_grandparent, D_NOT_PRIVATE_DIR),
+    "parent-0755": (_chmod_dir(0o755), D_NOT_PRIVATE_DIR),
+    "parent-0750": (_chmod_dir(0o750), D_NOT_PRIVATE_DIR),
+    # check 6: nothing else in the directory
+    "extra-file": (_extra_file("other.txt"), D_OTHER_FILES),
+    "extra-hidden-file": (_extra_file(".hidden"), D_OTHER_FILES),
+    "file-missing": (_missing_file, D_OTHER_FILES),
+    # check 7: a private regular file with one link
+    "dir-as-file": (_dir_as_file, D_NOT_PRIVATE_FILE),
+    "file-0644": (_chmod_file(0o644), D_NOT_PRIVATE_FILE),
+    "file-0400": (_chmod_file(0o400), D_NOT_PRIVATE_FILE),
+    "hard-link": (_hard_link, D_NOT_PRIVATE_FILE),
+    "fifo-as-file": (_fifo_as_file, D_NOT_PRIVATE_FILE),
+    # check 8: byte-identical to html_body
+    "size-mismatch": (_restaged_body(HTML_BODY + "x"), D_NOT_IDENTICAL),
+    "truncated": (_restaged_body(HTML_BODY[:-1]), D_NOT_IDENTICAL),
+    "same-size-other-bytes": (_restaged_body(SAME_SIZE_OTHER_HTML), D_NOT_IDENTICAL),
+    # any error while checking
+    "dir-missing": (_missing_dir, D_UNCHECKED),
+    "nul-in-path": (_nul_in_path, D_UNCHECKED),
+    # the existing body checks run first (EA-4 "runs after")
+    "non-ascii-body": (
+        lambda t, m: dataclasses.replace(m, html_body=NON_ASCII_HTML),
+        D_BODY_NOT_ASCII,
+    ),
+    "non-ascii-body-and-str-attachment": (
+        lambda t, m: _with_attachment(
+            dataclasses.replace(m, html_body=NON_ASCII_HTML), str(m.attachment)
+        ),
+        D_BODY_NOT_ASCII,
+    ),
+}
+#: Cases that need POSIX modes (EA-4 checks 5 and 7 skip modes elsewhere) or FIFOs.
+POSIX_MODE_CASES = frozenset(
+    {"parent-0755", "parent-0750", "file-0644", "file-0400", "fifo-as-file"}
+)
+PATH_SAFETY_PARAMS = [
+    pytest.param(
+        build, detail, id=name, marks=POSIX_ONLY if name in POSIX_MODE_CASES else ()
+    )
+    for name, (build, detail) in PATH_SAFETY_CASES.items()
+]
+
+
+def test_same_size_case_really_has_the_same_size() -> None:
+    assert len(SAME_SIZE_OTHER_HTML) == len(HTML_BODY)
+    assert SAME_SIZE_OTHER_HTML != HTML_BODY
+    assert not NON_ASCII_HTML.isascii()
+
+
+@pytest.mark.parametrize(("build", "detail"), PATH_SAFETY_PARAMS)
+def test_attachment_problem_rejects_with_the_fixed_detail(
+    message: OutgoingEmail, tmp_path: Path, build: PathCase, detail: str
+) -> None:
+    bad = build(tmp_path, message)
+    with pytest.raises(GmailSendError) as info:
+        build_send_arguments(bad)
+    error = expect_error(info.value, GmailSendErrorKind.INVALID_MESSAGE)
+    assert error.detail == detail
+    assert error.session_starts == 0
+    assert error.not_on_path is False
+    assert str(tmp_path) not in str(error)  # fixed text, never the path
+
+
+@pytest.mark.parametrize(("build", "detail"), PATH_SAFETY_PARAMS)
+@pytest.mark.anyio
+async def test_attachment_problem_starts_no_session(
+    harness: Harness,
+    which_calls: list[str],
+    tmp_path: Path,
+    build: PathCase,
+    detail: str,
+) -> None:
+    bad = build(tmp_path, harness.message)
+    result = await harness.send([ef.send_script(), ef.send_script()], message=bad)
+    error = expect_error(result, GmailSendErrorKind.INVALID_MESSAGE)
+    assert error.detail == detail
+    assert error.session_starts == 0
+    assert harness.factories[0].clients == []  # 0 client_factory calls
+    assert harness.opened == 0  # 0 sessions
+    assert harness.calls == []
+    assert harness.log.events == []
+    assert harness.sleeps == []
+    assert which_calls == []  # refused before the PATH lookup
+
+
+def test_valid_staged_attachment_passes_every_check(message: OutgoingEmail) -> None:
+    assert gmail_mcp._attachment_problem(message) is None
+    directory = message.attachment.parent
+    assert os.listdir(directory) == [message.attachment.name]
+    if os.name == "posix":
+        assert stat.S_IMODE(os.lstat(directory).st_mode) == 0o700
+        assert stat.S_IMODE(os.lstat(message.attachment).st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("name", "matches"),
+    [
+        ("reading-list-2026-11-04.html", True),
+        ("reading-list-0001-01-01.html", True),
+        ("reading-list-２０２６-11-04.html", False),  # full-width
+        ("reading-list-٢٠٢٦-11-04.html", False),  # Arabic-Indic
+        ("reading-list-2026-11-04.html\n", False),
+        ("xreading-list-2026-11-04.html", False),
+        ("reading-list-2026-11-04xhtml", False),
+        ("reading-list-2026-11-04.htm", False),
+        ("credentials.json", False),
+    ],
+)
+def test_attachment_name_pattern_is_ascii_digits_and_fullmatch(
+    name: str, matches: bool
+) -> None:
+    assert (gmail_mcp.ATTACHMENT_NAME_RE.fullmatch(name) is not None) is matches
+
+
+def test_attachment_constants_and_six_pair_map() -> None:
+    assert gmail_mcp.ATTACHMENT_DIR_PREFIX == "newsletter-digest-email-"
+    assert gmail_mcp.ATTACHMENT_NAME_RE.pattern == (
+        r"reading-list-[0-9]{4}-[0-9]{2}-[0-9]{2}\.html"
+    )
+    assert GMAIL_SEND_ARG_MAP == {
+        "to": "to",
+        "subject": "subject",
+        "text_body": "body",
+        "html_body": "htmlBody",
+        "mime_type": "mimeType",
+        "attachment": "attachments",
+    }
+
+
+def test_outgoing_email_attachment_is_required() -> None:
+    field = {f.name: f for f in dataclasses.fields(OutgoingEmail)}["attachment"]
+    assert field.default is dataclasses.MISSING
+    assert field.default_factory is dataclasses.MISSING
+    without: dict[str, Any] = {
+        "to": ef.RECIPIENTS,
+        "subject": SUBJECT,
+        "text_body": TEXT_BODY,
+        "html_body": HTML_BODY,
+    }
+    with pytest.raises(TypeError, match="attachment"):
+        OutgoingEmail(**without)
+
+
+# ------------------------------------------------------ six keys, every branch
+
+
+def test_attachments_is_one_absolute_staged_path(message: OutgoingEmail) -> None:
+    arguments = build_send_arguments(message)
+    assert set(arguments) == ef.SEND_ARGUMENT_KEYS
+    assert not set(arguments) & ef.FORBIDDEN_SEND_KEYS
+    assert arguments["attachments"] == [str(message.attachment)]
+    sent = arguments["attachments"]
+    assert isinstance(sent, list) and len(sent) == 1
+    path = Path(sent[0])
+    assert path.is_absolute()
+    assert gmail_mcp.ATTACHMENT_NAME_RE.fullmatch(path.name)
+    assert path.parent.name.startswith(gmail_mcp.ATTACHMENT_DIR_PREFIX)
+    assert path.read_bytes() == HTML_BYTES == str(arguments["htmlBody"]).encode()
+
+
+@pytest.mark.parametrize("branch", BRANCHES)
+@pytest.mark.anyio
+async def test_every_branch_sends_the_private_copy_at_call_time(
+    harness: Harness, branch: str
+) -> None:
+    _, sessions, calls = BRANCHES[branch]
+    await harness.send([*_branch_scripts()[branch], ef.send_script()])
+    assert len(harness.calls) == calls
+    snapshots = [s for f in harness.factories for s in f.attachment_snapshots]
+    assert len(snapshots) == calls
+    for (_, arguments), snapshot in zip(harness.calls, snapshots, strict=True):
+        assert set(arguments) == ef.SEND_ARGUMENT_KEYS
+        for key in ef.FORBIDDEN_SEND_KEYS:
+            assert key not in arguments
+        assert arguments["attachments"] == [str(harness.message.attachment)]
+        assert snapshot.path == str(harness.message.attachment)
+        assert snapshot.exists and not snapshot.is_symlink
+        assert snapshot.data == HTML_BYTES == arguments["htmlBody"].encode()
+        if os.name == "posix":
+            assert snapshot.file_mode == 0o600
+            assert snapshot.dir_mode == 0o700
+    # gmail_mcp never removes or rewrites the copy; email_delivery owns cleanup
+    assert harness.message.attachment.read_bytes() == HTML_BYTES
+
+
+# ---------------------------------------------------------------- schema (EA-5)
+
+
+def _attachments_schema(value: Any) -> dict[str, Any]:
+    """The 1.1.11 schema with ``attachments`` replaced by ``value``."""
+    schema = _schema()
+    schema["properties"] = {**schema["properties"], "attachments": value}
+    return schema
+
+
+ATTACHMENT_SCHEMA_CHANGES: dict[str, tuple[dict[str, Any], str]] = {
+    "missing": (_schema(drop=["attachments"]), "missing: attachments"),
+    "string": (_attachments_schema({"type": "string"}), "wrong type: attachments"),
+    "array-of-objects": (
+        _attachments_schema({"type": "array", "items": {"type": "object"}}),
+        "wrong type: attachments",
+    ),
+    "array-without-items": (
+        _attachments_schema({"type": "array"}),
+        "wrong type: attachments",
+    ),
+    "items-not-a-dict": (
+        _attachments_schema({"type": "array", "items": "string"}),
+        "wrong type: attachments",
+    ),
+    "nullable-any-of": (
+        _attachments_schema(
+            {"anyOf": [{"type": "array", "items": {"type": "string"}}, {}]}
+        ),
+        "wrong type: attachments",
+    ),
+    "not-a-dict": (_attachments_schema("array"), "wrong type: attachments"),
+}
+
+
+@pytest.mark.parametrize(
+    ("schema", "detail"),
+    ATTACHMENT_SCHEMA_CHANGES.values(),
+    ids=ATTACHMENT_SCHEMA_CHANGES,
+)
+@pytest.mark.anyio
+async def test_attachment_schema_mismatch_never_sends(
+    harness: Harness, schema: dict[str, Any], detail: str
+) -> None:
+    scripts = [ef.send_script(send_schema=schema), ef.send_script()]
+    error = expect_error(
+        await harness.send(scripts), GmailSendErrorKind.TOOL_SCHEMA_CHANGED
+    )
+    assert error.detail == detail
+    assert error.session_starts == 1
+    assert harness.opened == 1  # one start, no retry, no fallback send
+    assert harness.calls == []
+    assert harness.sleeps == []
+    assert harness.log.events == ["open#1", "list#1", "close#1"]
+
+
+@pytest.mark.anyio
+async def test_required_attachments_is_accepted_and_sent(harness: Harness) -> None:
+    schema = _schema(required=["to", "subject", "body", "attachments"])
+    receipt = expect_receipt(await harness.send(ef.send_script(send_schema=schema)))
+    assert receipt.session_starts == 1
+    ((_, arguments),) = harness.calls
+    assert arguments["attachments"] == [str(harness.message.attachment)]
+    assert harness.factories[0].last_attachment_snapshot().data == HTML_BYTES
+
+
+def test_default_fixture_schema_has_a_plain_string_array() -> None:
+    schema = _schema()  # a plain-dict copy, the shape mcp's Tool.inputSchema has
+    prop = schema["properties"]["attachments"]
+    assert gmail_mcp._schema_mismatch(schema) == ""
+    assert prop["type"] == "array" and prop["items"] == {"type": "string"}
+
+
+# ------------------------------------------------------- failure matrix (EA-6)
+
+
+def _unlinking_factory(
+    factory: ef.FakeSendFactory, path: Path
+) -> Callable[[dict[str, Any]], ef.FakeSendClient]:
+    """A ``client_factory`` that removes ``path`` first (after the EA-4 check)."""
+
+    def build(connections: dict[str, Any]) -> ef.FakeSendClient:
+        if path.exists():
+            os.unlink(path)
+        return factory(connections)
+
+    return build
+
+
+@pytest.mark.anyio
+async def test_attachment_success_sends_the_copy(harness: Harness) -> None:
+    receipt = expect_receipt(await harness.send([ef.send_script(), ef.send_script()]))
+    assert receipt == GmailSendReceipt(ef.DEFAULT_MESSAGE_ID, 1)
+    ((_, arguments),) = harness.calls
+    assert arguments == build_send_arguments(harness.message)
+    snapshot = harness.factories[0].last_attachment_snapshot()
+    assert snapshot.exists and snapshot.data == HTML_BYTES
+
+
+@pytest.mark.anyio
+async def test_file_does_not_exist_reply_is_rejected(harness: Harness) -> None:
+    factory = harness.factory([ef.send_script(), ef.send_script()])
+    path = harness.message.attachment
+    result = await harness.send(client_factory=_unlinking_factory(factory, path))
+    error = expect_error(result, GmailSendErrorKind.REJECTED)
+    assert error.detail.startswith("File does not exist: ")
+    assert error.session_starts == 1
+    assert harness.opened == 1
+    assert len(harness.calls) == 1  # exactly one call, never retried
+    assert harness.sleeps == []
+    (snapshot,) = factory.attachment_snapshots
+    assert not snapshot.exists
+
+
+@pytest.mark.anyio
+async def test_eacces_reply_is_rejected(harness: Harness) -> None:
+    scripts = [ef.send_script(attachment_reply="eacces"), ef.send_script()]
+    error = expect_error(await harness.send(scripts), GmailSendErrorKind.REJECTED)
+    assert error.detail.startswith("EACCES: permission denied, open ")
+    assert error.session_starts == 1
+    assert harness.opened == 1
+    assert len(harness.calls) == 1
+    assert harness.sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("reply", "kind"),
+    [
+        (ef.Reply.hang(), GmailSendErrorKind.TIMEOUT_AFTER_SEND),
+        (
+            ef.Reply.raising(ConnectionError("pipe closed")),
+            GmailSendErrorKind.TRANSPORT_AFTER_SEND,
+        ),
+        (
+            ef.Reply.raising_group(ConnectionError("pipe closed")),
+            GmailSendErrorKind.TRANSPORT_AFTER_SEND,
+        ),
+    ],
+    ids=["timeout", "transport", "transport-group"],
+)
+@pytest.mark.anyio
+async def test_ambiguous_after_the_call_with_attachment(
+    harness: Harness, reply: ef.Reply, kind: GmailSendErrorKind
+) -> None:
+    error = expect_error(
+        await harness.send([ef.send_script(reply), ef.send_script()]), kind
+    )
+    assert error.ambiguous and error.call_issued
+    assert error.session_starts == 1
+    assert harness.opened == 1
+    assert len(harness.calls) == 1
+    snapshot = harness.factories[0].last_attachment_snapshot()
+    assert snapshot.data == HTML_BYTES
+    assert harness.message.attachment.read_bytes() == HTML_BYTES
+
+
+@pytest.mark.parametrize("fault", START_FAULTS)
+@pytest.mark.anyio
+async def test_start_retry_sends_the_same_path_once(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    checked: list[OutgoingEmail] = []
+    original = gmail_mcp._attachment_problem
+
+    def counting(message: OutgoingEmail) -> str | None:
+        checked.append(message)
+        return original(message)
+
+    monkeypatch.setattr(gmail_mcp, "_attachment_problem", counting)
+    scripts = [ef.send_script(**start_fault(fault)), ef.send_script()]
+    receipt = expect_receipt(await harness.send(scripts))
+    assert receipt.session_starts == 2
+    assert harness.opened == 2
+    assert harness.sleeps == [2.0]
+    ((_, arguments),) = harness.calls
+    assert arguments["attachments"] == [str(harness.message.attachment)]
+    (snapshot,) = [s for f in harness.factories for s in f.attachment_snapshots]
+    assert snapshot.path == str(harness.message.attachment)
+    assert snapshot.data == HTML_BYTES
+    assert checked == [harness.message]  # the EA-4 check runs once, before the loop
+
+
+# ------------------------------------------------------------- property-style
+
+
+_NAME_CHARS = "abcXYZ019 ._-~+=,@%"
+
+
+def _random_dir_name(rng: random.Random) -> str:
+    """An ASCII directory name with spaces, dots, ``~`` (never ``.`` or ``..``)."""
+    while True:
+        name = "".join(rng.choice(_NAME_CHARS) for _ in range(rng.randint(1, 12)))
+        if name not in {".", ".."}:
+            return name
+
+
+def _random_html(rng: random.Random) -> str:
+    """ASCII text with mixed line breaks and lines of at most 900 characters."""
+    lines = [
+        "".join(chr(rng.randint(0x20, 0x7E)) for _ in range(rng.randint(0, 900)))
+        for _ in range(rng.randint(1, 6))
+    ]
+    breaks = ("\r\n", "\n", "\r")
+    return "".join(line + rng.choice(breaks) for line in lines)
+
+
+def test_attachments_value_is_always_the_one_path_string(
+    message: OutgoingEmail, tmp_path: Path
+) -> None:
+    rng = random.Random(PROPERTY_SEED)
+    for run in range(PROPERTY_RUNS):
+        base = tmp_path / f"run{run}" / _random_dir_name(rng)
+        base.mkdir(parents=True)
+        end = date(2026, 11, 8) + timedelta(days=rng.randint(-400_000, 2_000_000))
+        html = _random_html(rng)
+        staged = ef.stage_private_copy(
+            base, html, name=f"reading-list-{end.isoformat()}.html"
+        )
+        current = dataclasses.replace(
+            message,
+            to=tuple(rng.sample(ef.RECIPIENTS, rng.randint(1, 3))),
+            subject=f"Digest {run}",
+            html_body=html,
+            attachment=staged,
+        )
+        first = build_send_arguments(current)
+        second = build_send_arguments(current)
+        assert first["attachments"] == [str(current.attachment)] == [str(staged)]
+        assert type(first["attachments"]) is list
+        assert first["attachments"] is not second["attachments"]
+        assert set(first) == ef.SEND_ARGUMENT_KEYS
+        assert Path(str(staged)).read_bytes() == html.encode("ascii")
+
+
+# ------------------------------------------- V43: the stdio child reads the file
+
+
+V43_MARKER_VAR = "NEWSLETTER_DIGEST_V43_NOT_INHERITED"
+
+
+def attachment_records(server: LocalServer) -> list[dict[str, Any]]:
+    """The JSON records the local server child wrote, one per attachment path."""
+    records = server.calls.with_name(server.calls.name + ".attachments.jsonl")
+    if not records.exists():
+        return []
+    return [json.loads(line) for line in records.read_text().splitlines()]
+
+
+@pytest.mark.anyio
+async def test_v43_stdio_child_reads_the_private_copy(
+    local_server_factory: Callable[[str], LocalServer],
+    message: OutgoingEmail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The marker is in the parent's environment only; mcp gives the child its
+    # minimal default environment (plus PASSTHROUGH_ENV_VARS), never the rest.
+    monkeypatch.setenv(V43_MARKER_VAR, "1")
+    server = local_server_factory("instant")
+    built: list[MultiServerMCPClient] = []
+    with anyio.fail_after(60):
+        result = await send_gmail_message(
+            server.settings,
+            message,
+            send_timeout=30.0,
+            start_timeout=30.0,
+            client_factory=real_client_factory(built),
+        )
+    assert result == GmailSendReceipt("local-123", 1)
+    assert server.call_lines() == [SENT_KEYS_LINE]  # attachments among the six
+    (record,) = attachment_records(server)
+    assert record["path"] == str(message.attachment)
+    assert record["exists"] is True
+    assert record["sha256"] == hashlib.sha256(HTML_BYTES).hexdigest()
+    assert record["sha256"] == hashlib.sha256(message.html_body.encode()).hexdigest()
+    assert record["uid"] == os.getuid()
+    assert record["mode"] == 0o600 and record["dir_mode"] == 0o700
+    allowed = set(DEFAULT_INHERITED_ENV_VARS) | set(gmail_mcp.PASSTHROUGH_ENV_VARS)
+    child_env = set(record["env"]) - {"LC_CTYPE"}  # Python may set it at start-up
+    assert child_env <= allowed, child_env - allowed
+    assert V43_MARKER_VAR not in record["env"]
+    assert all(process_gone(pid) for pid in server.pids())
+
+
+@pytest.mark.anyio
+async def test_v43_stdio_child_missing_file_is_rejected_once(
+    local_server_factory: Callable[[str], LocalServer], message: OutgoingEmail
+) -> None:
+    # The file disappears after the EA-4 check (the accepted check-then-use
+    # window): the real child answers 1.1.11's text and nothing is retried.
+    server = local_server_factory("instant")
+    built: list[MultiServerMCPClient] = []
+    real = real_client_factory(built)
+
+    def unlink_then_build(connections: dict[str, Any]) -> MultiServerMCPClient:
+        if message.attachment.exists():
+            os.unlink(message.attachment)
+        return real(connections)
+
+    with anyio.fail_after(60):
+        with pytest.raises(GmailSendError) as info:
+            await send_gmail_message(
+                server.settings,
+                message,
+                send_timeout=30.0,
+                start_timeout=30.0,
+                client_factory=unlink_then_build,
+            )
+    error = expect_error(info.value, GmailSendErrorKind.REJECTED)
+    assert error.detail.startswith("File does not exist: ")
+    assert error.session_starts == 1
+    assert len(built) == 1
+    assert server.call_lines() == [SENT_KEYS_LINE]
+    (record,) = attachment_records(server)
+    assert record["exists"] is False
+    (pid,) = server.pids()
+    assert process_gone(pid)

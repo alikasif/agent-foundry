@@ -552,3 +552,17 @@
   attachment must be byte-identical to `html_body`) breaks every
   `dataclasses.replace(message, html_body=...)` test that expects success: re-stage a
   copy of the new body (`ef.stage_private_copy(tmp_path, good.html_body)`) in that test.
+- (T094) pyrefly checks `dataclasses.replace(obj, **mapping)` keywords against the
+  field types: a `dict[str, object]` mapping fails on every field. To feed a
+  wrong-typed value without a suppression, type the mapping `dict[str, Any]`.
+- (T094) `ef.SEND_EMAIL_SCHEMA_1_1_11` is a read-only mapping, not a `dict`, so
+  `gmail_mcp._schema_mismatch` treats it as an empty schema (`missing: <all six>`).
+  The fake converts it with `dict(...)` when building the `Tool`. Call the function
+  on a plain-dict copy (the test's `_schema()`).
+- (T094) A "no `newsletter-digest-email-*` left in /tmp" count is meaningless while
+  other agents run suites in parallel: 12 entries appeared during my run, but each
+  file left 0 with `/usr/bin/env "TMPDIR=<empty scratch dir>" uv run pytest <file>`.
+  Isolate the temp root before blaming a test file.
+- (T094) A FIFO opened `O_RDONLY` without `O_NONBLOCK` blocks until a writer opens
+  it. A test that plants a FIFO where code opens a file needs a daemon writer thread
+  (`os.close(os.open(p, os.O_WRONLY))`), or the test hangs.
