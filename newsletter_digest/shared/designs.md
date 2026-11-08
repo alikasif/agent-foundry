@@ -3625,3 +3625,789 @@ schema check, `.env.example` commented, stderr format), with their recommended
 defaults.
 
 DESIGN_COMPLETE
+
+# Email HTML attachment (2026-11-08)
+
+Amendment design for PRD FR-073 to FR-084, NFR-E9 to NFR-E15, acceptance criteria 35 to
+43, the user decision D-A1 and Q-A1 to Q-A8. The user approved every recommended default
+(PRD "Approval record (2026-11-08, attachment amendment)"):
+- Q-A1: a private temporary directory, removed after the send.
+- Q-A2: the attachment is always included with `--email` (no new flag or env var).
+- Q-A3: the email variant is attached (the same string as the body).
+- Q-A4: the file name is `reading-list-YYYY-MM-DD.html`.
+- Q-A5: the empty-state email also carries the attachment.
+- Q-A6: the success stderr line says `with 1 attachment`.
+- Q-A7: the `From:` header, LF line endings and the unpinned `nodemailer` are accepted and
+  checked on the first real send.
+- Q-A8: the 95,000-byte body budget is unchanged.
+
+Everything above this line is approved. This section changes the 2026-11-04 design only
+where EA-14 says so. Subsection IDs are `EA-n`. Decision IDs are `DAn` (no hyphen, like
+`DMn`); they are design decisions and are distinct from the PRD's user decision `D-A1`.
+
+How the facts were checked (2026-11-08):
+- `shared/verified_facts.md`, section "Email attachments in 1.1.11 (read 2026-11-08)":
+  the `attachments` schema (array of path strings), the nodemailer code path (ignores
+  `mimeType`, `multipart/mixed` around `multipart/alternative`, quoted-printable HTML part,
+  base64 attachment, basename as file name, `text/html` from the extension), no path
+  checks on the server, `Error: File does not exist: <path>` and read errors returned as
+  `Error:` text before the Gmail call, the unchanged success text, and the size estimate.
+- The current sources, read for this design: `email_delivery.py`, the send half of
+  `gmail_mcp.py` (`GMAIL_SEND_ARG_MAP`, `OutgoingEmail`, `build_send_arguments`,
+  `send_gmail_message`, `_send_attempt`, `_call_send_tool`, `_schema_mismatch`,
+  `_reply_outcome`, `_message_problem`), `cli._deliver_by_email` and
+  `cli._run_email_delivery`, `render.write_reading_list` (the saved file is
+  `reading-list-<meta.end_date.isoformat()>.html`), `agent.run_digest` (`end_date` is the
+  run's local date).
+- The tests, read for this design: `tests/test_architecture.py` (`SEND_NAMES`,
+  `find_send_capability_violations` sub-rules (a) to (f), the synthetic email trees and
+  `_GMAIL_SEND_SIDE`), `tests/email_fixture.py` (`SEND_ARGUMENT_KEYS`,
+  `FORBIDDEN_SEND_KEYS`, `SEND_EMAIL_SCHEMA_1_1_11`, `FakeSendSession`, `_send_problem`),
+  `tests/test_gmail_mcp_send.py` (the `message` fixture, `SCHEMA_CHANGES`, the local
+  FastMCP `send_email`), `tests/test_email_delivery.py` (`RecordingSender`, the
+  `OutgoingEmail` equality assertion, `test_cancellation_is_not_swallowed`),
+  `tests/test_cli_email.py` and `tests/test_flag_off_identity.py` (the exact `Email: sent`
+  line).
+- **Not used:** `.env`, the `out/` directory and any real output. Every size number below
+  is an analytical estimate, or the synthetic-fixture figure already in `verified_facts.md`,
+  or is measured by a test on a synthetic fixture (EA-8).
+- Items marked **[re-verify]** must be checked by the implementing task and recorded in
+  `shared/implementation-notes.md`.
+
+## EA-1 Flow Design
+
+```mermaid
+sequenceDiagram
+    participant CLI as cli._run_email_delivery
+    participant ED as email_delivery.send_reading_list_email
+    participant ER as email_render.render_email (unchanged)
+    participant FS as private temp dir (0700) + file (0600)
+    participant GS as gmail_mcp.send_gmail_message
+    participant S2 as MCP session 2 (send only)
+    CLI->>ED: anyio.run(send_reading_list_email, reading_list, html_path, settings)
+    ED->>ER: render_email -> EmailContent(html, text, ...)
+    ER-->>ED: render failure -> FAILED, no directory created
+    ED->>ED: build_subject; name = attachment_name(meta.end_date)
+    ED->>FS: mkdtemp(prefix) -> verify 0700 -> O_EXCL write of html.encode("ascii") -> verify 0600 + size
+    FS-->>ED: any error -> FAILED "could not prepare the attachment", no session
+    ED->>GS: OutgoingEmail(to, subject, text, html, attachment=path)
+    GS->>GS: build_send_arguments: old checks + attachment checks + bytes == htmlBody
+    GS-->>ED: INVALID_MESSAGE -> FAILED, no session
+    GS->>S2: start (retry once on start failure, same file), list_tools, schema check (6 keys, attachments array of string)
+    GS->>S2: call_tool("send_email", exactly 6 keys) once
+    S2-->>GS: success text | "Error: File does not exist ..." | other Error: | timeout | transport
+    GS-->>ED: receipt | GmailSendError (session already closed, process terminated)
+    ED->>FS: finally: unlink file, rmdir directory (every outcome, cancellation included)
+    ED-->>CLI: EmailOutcome
+    CLI-->>CLI: "Email: sent to N recipients with 1 attachment (Gmail id ...)."
+```
+
+Steps with `--email` on (only steps 6a, 6b and 9 are new; the rest is ED-1):
+1. to 5. Config, digest, report, Telegram and the lazy import are unchanged (ED-1).
+6. **Render.** Unchanged: `render_email` returns one `EmailContent`. A render failure is
+   `failed` before any directory exists.
+   - 6a. **Name.** `attachment_name(reading_list.meta.end_date)` gives
+     `reading-list-YYYY-MM-DD.html`. It uses only the run's date, a `datetime.date` typed by
+     the model. It never uses a title, a summary, a URL, a newsletter name, model output,
+     `.env`, a CLI option or `html_path`.
+   - 6b. **Stage.** Create the private directory and write the file (EA-3). A failure here
+     is `failed` with the fixed reason of EA-7. No session is started and no
+     `client_factory` call is made.
+7. **Send.** `send_gmail_message` is unchanged in structure. `build_send_arguments` runs
+   first and re-checks the attachment (EA-4); then the session starts, with one start
+   retry; then the schema is checked (EA-5) and `call_tool` runs once with six keys.
+8. **Outcome.** As in ED-12, plus the attachment reason row and the new success wording
+   (EA-7).
+9. **Cleanup.** A `finally` block in `send_reading_list_email`, around steps 6b to 8, removes
+   the file and then the directory on every outcome (EA-6).
+
+With `--email` off nothing in this section runs. No directory is created and no file is
+written (EA-10).
+
+## EA-2 Where the code lives, imports and boundary rules
+
+**Split (DA1):**
+
+| Concern | Module | Why |
+|---|---|---|
+| File name, temp directory, binary write, permission and size checks, cleanup (`attachment_name`, `_stage_attachment` helpers, `_remove_staged`) | `email_delivery` | It owns the lifetime: the file must exist before the first session start and survive the start retry inside `send_gmail_message`, so it must be created and removed around the `sender` call. `email_delivery` is loaded only with `--email` (lazy import), so a flag-off run never loads the file code. FR-078 allows the email module to use `tempfile`, `os` and `pathlib`. |
+| The server argument name `attachments`, the list shape, the re-check of the path and bytes, the schema check (`GMAIL_SEND_ARG_MAP`, `OutgoingEmail.attachment`, `build_send_arguments`, `_attachment_problem`, `_schema_mismatch`, `ATTACHMENT_NAME_RE`, `ATTACHMENT_DIR_PREFIX`) | `gmail_mcp` | It is still the only module that knows server argument names (FR-056, FR-077). The last check before the call sits next to the call. |
+
+Rejected alternative: all of it in `gmail_mcp`. It would put file creation in a module
+that every run loads (inert, like the send helper), and the `sender` test seam of
+`email_delivery` could no longer observe the file at call time. Either option meets the
+PRD; the split keeps each module's job clear.
+
+**Imports.**
+- `email_delivery` adds the stdlib modules `os`, `stat` and `tempfile`. It already imports
+  `pathlib.Path`. It also adds `contextlib` only if a context manager is used, and
+  `datetime.date` for the type hint. Project imports are unchanged:
+  `{gmail_mcp, email_render, models, config}`. No new names come from `email_render`.
+  From `gmail_mcp` it takes only `SEND_NAMES` (extended below).
+- `gmail_mcp` adds the stdlib `stat` and `pathlib.Path`; `os` is already imported. It does
+  **not** import `tempfile` (EA-4 does not need the temp root). Both are already loaded at
+  interpreter start, so the flag-off import set does not change **[re-verify]** with the
+  ED-16 subprocess test.
+- No new dependency. No change to `config`, `models`, `render`, the templates, `agent`,
+  `tools`, `prompts`, `delivery`, `pdf` or `telegram`.
+
+**Layer order:** unchanged (ED-2). No project edge is added or removed.
+`test_detector_sees_the_known_project_edges` is unchanged.
+
+**`tests/test_architecture.py` changes.** Each new or changed sub-rule gets a
+synthetic-source self-test and a `RealTreeMutant`, as in ED-2:
+
+| Rule | Change |
+|---|---|
+| `SEND_NAMES` | add `"ATTACHMENT_NAME_RE"` and `"ATTACHMENT_DIR_PREFIX"`. Sub-rule (a) then keeps them out of every module except `gmail_mcp` and `email_delivery`, and `ONLY_IMPORTED_NAMES[(email_delivery, gmail_mcp)]` (which is `SEND_NAMES`) allows them |
+| new sub-rule (g) `_send_arg_map_violations` | `GMAIL_SEND_ARG_MAP` in `gmail_mcp` is one module-level dict literal with exactly the six constant pairs of EA-4. Mutants: add `"cc": "cc"`; drop `"attachment"` |
+| new sub-rule (h) `_attachment_source_violations` | (1) the string constant `"attachments"` appears in `src/` only as a value in the `GMAIL_SEND_ARG_MAP` literal (mutant: `email_delivery` builds `{"attachments": [...]}`). (2) `OutgoingEmail(...)` is called in exactly one place in `src/`, inside `email_delivery.send_reading_list_email`, with an `attachment=` keyword whose value is a bare name that is only ever assigned from a call to the staging helper (mutant: `attachment=settings.out_dir / name`). (3) `attachment_name` is called only with an argument whose source text ends in `.meta.end_date` (mutant: `attachment_name(item.title)`) |
+| new sub-rule (i) `_tempfile_violations` | in `src/`, only `email_delivery` imports or references `tempfile` (mutants: `gmail_mcp` imports `tempfile`; `agent` calls `tempfile.mkdtemp`) |
+| sub-rule (f), extended | `agent`, `tools` and `prompts` also never reference the identifiers `attachment_name`, `_stage_attachment`, `_write_private_file`, `_remove_staged`, `ATTACHMENT_NAME_RE` or `ATTACHMENT_DIR_PREFIX`, and never hold the string `"attachments"` (the FR-078 acceptance "agent, tools, prompts do not reference the attachment helper") |
+| `find_send_capability_violations` | calls (g), (h) and (i) as well; docstring and the module docstring item 9 updated |
+| synthetic trees | `_GMAIL_SEND_SIDE` gets the six-key map and the `attachment` field; `STUB_EMAIL_TREE` and `FINAL_EMAIL_TREE`'s `email_delivery` stage a file and pass `attachment=`, so every rule in `EMAIL_RULES` still allows both trees |
+
+The exact helper names (`_stage_attachment`, `_write_private_file`, `_remove_staged`) may
+change in implementation. Then the rule constants change with them, and the change is
+recorded in `implementation-notes.md`.
+
+## EA-3 Staging: private directory and file (FR-073 to FR-075, NFR-E10, NFR-E11)
+
+```python
+# email_delivery.py
+TempDirFactory = Callable[..., str]   # tempfile.mkdtemp-compatible: (prefix=...) -> str
+
+def attachment_name(end_date: date) -> str:
+    """'reading-list-YYYY-MM-DD.html' from the run date only (FR-073)."""
+    return f"reading-list-{end_date.isoformat()}.html"
+
+async def send_reading_list_email(
+    reading_list, html_path, settings, *,
+    sender=send_gmail_message, renderer=render_email,
+    make_temp_dir: TempDirFactory = tempfile.mkdtemp,   # new seam (NFR-E15)
+) -> EmailOutcome
+```
+
+The name is the same string `write_reading_list` uses for the saved page, because both
+come from `meta.end_date.isoformat()`. A test asserts they are equal. The name is not
+taken from `html_path`.
+
+**Directory.**
+- `raw = make_temp_dir(prefix=ATTACHMENT_DIR_PREFIX)`, with
+  `ATTACHMENT_DIR_PREFIX = "newsletter-digest-email-"`. No `dir=` is passed, so the
+  system temp location is used: `TMPDIR`, or `/tmp` on Linux and WSL.
+- `raw` is recorded for cleanup **immediately**, before any check that can fail.
+- `directory = Path(raw).resolve(strict=True)`. The path is then absolute and has no
+  symlink components; for example, macOS `/var` becomes `/private/var`.
+- On POSIX, `os.chmod(directory, 0o700)`. mkdtemp asks for 0700, but the umask can
+  remove bits, so the mode is set explicitly.
+- Checks on POSIX: `os.lstat(directory)` is a directory, `S_IMODE == 0o700` and
+  `st_uid == os.getuid()`. On other platforms only the
+  is-a-directory check runs; the project targets Linux and WSL.
+
+**File.**
+- `data = content.html.encode("ascii")`. Strict: the HTML is ASCII by construction (ED-8),
+  and a non-ASCII character is a preparation failure, not a silent replacement. For
+  ASCII text the UTF-8 bytes and the ASCII bytes are the same, so FR-073's "UTF-8
+  encoding of `htmlBody`" holds exactly.
+- `fd = os.open(directory / name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+  0o600)`. Use `getattr(os, flag, 0)` for flags a platform lacks. `O_EXCL` with `O_CREAT`
+  never follows or reuses an existing entry, including a planted symlink.
+- `os.fchmod(fd, 0o600)` on POSIX, so the umask cannot change the mode.
+- Write every byte (`os.fdopen(fd, "wb")`, `write`, `flush`, `close`). Binary mode means no
+  newline translation and no BOM (FR-074). No `fsync` is needed: the reader is a local
+  process on the same kernel.
+- Verify with `os.lstat`: a regular file, `st_size == len(data)` and, on POSIX,
+  `S_IMODE == 0o600`.
+- The returned value is the absolute `Path` `directory / name`. It is the only value that
+  can reach `OutgoingEmail.attachment` (EA-2 rule (h)).
+
+**One string, two uses (NFR-E11).** `content.html` is passed as
+`OutgoingEmail.html_body` (it becomes `htmlBody`) and is the only input to the file
+write. There is no second render and no re-read of the saved page.
+`build_send_arguments` also compares the file bytes with `html_body` (EA-4), so the
+property is checked at the last point before the call, not just assumed.
+
+**What the recipient gets.** nodemailer reads the file as raw bytes and base64-encodes it
+(verified facts), so the attachment decodes to exactly these bytes. The file is ASCII and
+the template has `<meta charset="utf-8">`, so the missing charset parameter on the part
+does not matter. It opens as a standalone page: inline styles, no external resources,
+no script.
+
+## EA-4 Argument map and the re-check in `build_send_arguments` (FR-076, FR-077, NFR-E9)
+
+```python
+# gmail_mcp.py
+# logical -> server argument name. The ONLY six keys ever sent (FR-056 as amended,
+# FR-077). "attachments" is a list holding exactly one fixed-code path (EA-3).
+GMAIL_SEND_ARG_MAP: dict[str, str] = {
+    "to": "to",
+    "subject": "subject",
+    "text_body": "body",
+    "html_body": "htmlBody",
+    "mime_type": "mimeType",
+    "attachment": "attachments",
+}
+ATTACHMENT_NAME_RE = re.compile(r"reading-list-[0-9]{4}-[0-9]{2}-[0-9]{2}\.html")  # fullmatch
+ATTACHMENT_DIR_PREFIX = "newsletter-digest-email-"
+
+@dataclass(frozen=True)
+class OutgoingEmail:
+    to: tuple[str, ...]
+    subject: str
+    text_body: str
+    html_body: str
+    attachment: Path      # new, REQUIRED: the private copy of html_body (EA-3)
+```
+
+- The regex uses `[0-9]`, not `\d`: in Python `\d` also matches non-ASCII digits. It is
+  applied with `fullmatch`, so no trailing newline can slip through.
+- `attachment` has **no default**. A message without an attachment cannot be built, so no
+  code path can send the five-key form ("no silent fallback").
+- `mimeType` stays `multipart/alternative`. The attachment path ignores it, but it keeps
+  the argument set fixed and the request valid (FR-077).
+- `build_send_arguments` returns
+  `{to: [...], subject, body, htmlBody, mimeType, attachments: [str(message.attachment)]}`.
+  The list always has exactly one element, by construction.
+- `cc`, `bcc`, `threadId` and `inReplyTo` are still never set.
+
+**`_message_problem` gains `_attachment_problem(message)`.** It runs after the existing
+checks, so a non-ASCII body is reported first. It returns the first fixed detail (which
+names no value) and raises `INVALID_MESSAGE` with `call_issued=False` and
+`session_starts=0`, before any session (FR-076):
+
+| # | Check | Fixed detail |
+|---|---|---|
+| 1 | `isinstance(attachment, Path)`. A `str`, a list (empty or with two entries), a tuple or `None` is refused | `the attachment must be one file path` |
+| 2 | `str(path)` is ASCII, `path.is_absolute()`, `".." not in path.parts`, `os.path.normpath(s) == s` | `the attachment path is not a plain absolute path` |
+| 3 | `os.path.realpath(s) == s` (no symlink in any component) | `the attachment path contains a symbolic link` |
+| 4 | `ATTACHMENT_NAME_RE.fullmatch(path.name)` | `the attachment file name is not the fixed pattern` |
+| 5 | `path.parent.name.startswith(ATTACHMENT_DIR_PREFIX)`; `os.lstat(parent)` is a directory; on POSIX, mode `0o700` and `st_uid == os.getuid()` | `the attachment directory is not this app's private directory` |
+| 6 | `os.listdir(parent) == [path.name]` | `the attachment directory holds other files` |
+| 7 | `fd = os.open(s, O_RDONLY \| O_NOFOLLOW \| O_CLOEXEC)`; `os.fstat(fd)` is a regular file with `st_nlink == 1` and, on POSIX, mode `0o600` and `st_uid == os.getuid()` | `the attachment is not a private regular file` |
+| 8 | `st_size == len(expected)` and `os.read(fd, len(expected) + 1) == expected`, where `expected = html_body.encode("ascii")` | `the attachment is not identical to the HTML body` |
+| - | any `OSError` while checking | `the attachment file could not be checked` |
+
+Check 8 goes beyond the PRD's size check (DA3). It makes the server-side risk small even
+if every other check had a bug. The only bytes that can leave through `attachments` are
+the bytes already sent as `htmlBody`. A file such as `~/.gmail-mcp/credentials.json`
+fails check 8 whatever its path. The read is at most 95 KB plus one byte, in well under
+1 ms.
+
+**Time between check and use.** The check runs once, at the start of
+`send_gmail_message`. The server reads the file seconds later (after `npx` starts). Only
+a process running as the same user could change a 0700 directory in that window, and
+such a process can already read the credentials directly. This is accepted, and the
+checks are not repeated before each attempt.
+
+**The temp root is not re-checked in `gmail_mcp`.** That would need `tempfile` in a module
+every run loads, and tests could not move it without patching. The "under the system
+temp root" property is enforced where the directory is made (EA-3: no `dir=`) and proved
+by an `email_delivery` test (EA-11). Checks 5 to 8 make "inside the directory the app
+just created" concrete.
+
+**Windows:** checks 5 and 7 skip mode and uid where `os.name != "posix"`. The project
+targets Linux and WSL; this is noted in `implementation-notes.md`.
+
+## EA-5 Strict schema check (FR-077, acceptance 38)
+
+`_schema_mismatch(schema)` is extended. There is still no silent fallback:
+1. `expected = set(GMAIL_SEND_ARG_MAP.values())` now has six names, so a schema without an
+   `attachments` property gives `missing: attachments` with no other code change.
+2. **New: a type check on `attachments`.** `properties["attachments"]` must be a dict with
+   `type == "array"` and `items` a dict with `type == "string"`. Anything else (a
+   string, an object, a missing `items`, `items` of another type) adds the part
+   `wrong type: attachments`.
+3. Unchanged: every `required` key must be one of the six. A server that makes
+   `attachments` required is now compatible, because the app always sends it.
+
+Any mismatch gives `TOOL_SCHEMA_CHANGED`. That means exit 3, the digest is saved, nothing
+is sent, there is no retry, and the reason row of ED-12 holds the detail (for example
+`(missing: attachments)` or `(wrong type: attachments)`). The type check covers only
+`attachments` (DA4). It is the one property whose meaning (a list of local paths) matters
+for safety; the others are checked by presence, as in 2026-11-04.
+
+## EA-6 Ordering, retry and cleanup (FR-075, FR-080, NFR-E12)
+
+**Order (fixed):**
+1. Render.
+2. Build the subject.
+3. Stage: create the directory, write and verify the file.
+4. `sender(...)`, which runs:
+   - `build_send_arguments` (the EA-4 re-check);
+   - the `which` check;
+   - start attempt 1, then a 2 s pause and attempt 2 only if the start failed;
+   - the schema check;
+   - `call_tool` once.
+5. Map the result to an outcome.
+6. `finally`: remove the file and the directory.
+
+**Cleanup (`_remove_staged(raw_directory, name)`, synchronous, never raises):**
+- `os.unlink(directory / name)`, then `os.rmdir(directory)`. A `FileNotFoundError` from
+  either is ignored.
+- There is **no** recursive delete (`shutil.rmtree`), so the cleanup can never remove more
+  than the one file it wrote (DA5). If something else appeared in the directory, `rmdir`
+  fails and the directory is left for the OS temp cleaner.
+- Any other `OSError` (or `Exception`) gives the WARNING
+  `Could not remove the temporary copy of the email attachment (<ExcClass>)`, with no path
+  in it, and a DEBUG line with the path. The outcome and the exit code are unchanged.
+- The `try`/`finally` starts **before** `make_temp_dir` is called, and the raw directory is
+  recorded as soon as `mkdtemp` returns. So a failure in any later staging step (resolve,
+  mode check, open, write, size check) still removes what exists.
+- The cleanup is plain synchronous code with no `await`. It runs on anyio cancellation (the
+  `test_cancellation_is_not_swallowed` case), on `KeyboardInterrupt` and on any exception
+  that escapes `sender`, without shielding. A `SIGKILL` or power loss leaves a 0700
+  directory in the temp location. That is accepted (EA-16): there is no sweep of old
+  directories, because matching by prefix could delete another run's live file.
+
+**Retry interaction (FR-080):**
+- The file is created once, before the first session start. Both start attempts use the
+  same path.
+- `build_send_arguments` runs once, before the loop, as today.
+- The file is removed only after `send_gmail_message` has returned or raised, which is
+  after the last attempt.
+- No retry ever follows an issued call, as before.
+
+**Deletion strictly after the server is gone.** `_send_attempt` leaves its
+`async with client.session(...)` (the stdio close, which terminates the server process
+within mcp's 2 s `PROCESS_TERMINATION_TIMEOUT`) before `send_gmail_message` returns. Only
+then does `email_delivery`'s `finally` delete the file. So a timeout or transport error
+after the call cannot be turned into a misleading `File does not exist` reply by our own
+cleanup. The outcome stays `unknown` (ED-12), as FR-080 requires.
+
+## EA-7 Failure mapping and stderr lines (FR-074, FR-080, Q-A6)
+
+New outcomes:
+
+| Situation | Where | Status | Reason (one line, no path, no address) | Session started? |
+|---|---|---|---|---|
+| `mkdtemp`, resolve, mode check, encode, open, write or size check fails | `email_delivery` | failed | `could not prepare the attachment (<ExcClass>); nothing was sent` | no; `sender` is not called |
+| `_attachment_problem` fails | `gmail_mcp` -> `INVALID_MESSAGE` | failed | existing row: `the email failed this app's own checks (<fixed detail>); nothing was sent` | no |
+| schema without `attachments`, or of the wrong type | `gmail_mcp` -> `TOOL_SCHEMA_CHANGED` | failed | existing row, detail `missing: attachments` / `wrong type: attachments` | 1 start, 0 calls |
+| reply `Error:` and the attachment could not be read | `gmail_mcp` -> `REJECTED` (unchanged kind) | failed | **new row:** `the mail server could not read the attachment file; nothing was sent` | 1 call |
+
+The preparation reason adds the exception class name, as the render-failure reason does
+(DA6). A class name (`PermissionError`, `OSError`, `UnicodeEncodeError`) holds no path.
+The PRD's fixed text "could not prepare the attachment" is kept as the start of the
+reason.
+
+**The new REJECTED row in `failure_reason` is matched first, before the permission row.**
+The texts are case-insensitive substrings of the redacted detail: `file does not exist`,
+`no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email
+with`. The order matters: nodemailer's `EACCES: permission denied, open '<path>'`
+contains `permission`, and would otherwise be reported as a Gmail login problem with a
+misleading "re-run auth" hint. The reason contains **no detail**, because the server's
+text holds the temp path (FR-080). The detail stays in `GmailSendError.detail` and goes
+to DEBUG only. The other REJECTED rows (permission, recipient, rate, other) are
+unchanged. **[re-verify]** the exact EACCES/EISDIR texts are read from source, not run;
+the test fixtures use the verified `File does not exist: <path>` and a nodemailer-style
+`EACCES: permission denied, open '<path>'`.
+
+**stderr lines (`markup=False`, `highlight=False`, `emoji=False`, `soft_wrap=True`,
+unchanged):**
+- sent: `Email: sent to 2 recipients with 1 attachment (Gmail id 18c2f0a1b2c3d4e5).`
+  - for one recipient: `Email: sent to 1 recipient with 1 attachment (Gmail id ...).`
+  - the omitted and over-budget suffixes of ED-12 are unchanged and follow the period.
+- failed and unknown: unchanged (`Email: FAILED (...)`, `Email: OUTCOME UNKNOWN (...)`).
+- The words `with 1 attachment` are a literal in `cli._deliver_by_email` (DA7). A `sent`
+  outcome always carried exactly one attachment, because `OutgoingEmail.attachment` is
+  required and `build_send_arguments` always sends one. So `EmailOutcome`, the cli
+  `_EmailResult` protocol and `_EmailImportFailed` are unchanged.
+- The `--email` help text gains one sentence: `The same HTML is attached as
+  reading-list-YYYY-MM-DD.html.` (FR-083 spirit; `ALL_OPTIONS` is unaffected).
+
+## EA-8 Empty state, budget and total size (FR-073, FR-079, Q-A5, Q-A8)
+
+- **Empty state:** the same code path. The short empty-state HTML is staged and attached.
+  There is no special case and no flag.
+- **Over budget:** an `over_budget=True` HTML (ED-10 stage 4) is attached as it is (the
+  same string).
+- **Budget:** `EMAIL_HTML_BUDGET = 95_000` and `render_email` are unchanged. The drop
+  order, the omitted-count line and compact mode are untouched. The 2026-11-04 email
+  golden stays byte-identical. Because the attachment is the body, it is also at most
+  95,000 bytes, except in the over-budget case, which is unchanged.
+- **Total size, logged and documented only.** No logic depends on it:
+
+  ```python
+  QP_FACTOR = 1.07            # quoted-printable HTML part (analytical; synthetic 95,000 B gave about 101 KB)
+  BASE64_FACTOR = 1.37        # 4/3 x 78/76 (base64 with CRLF every 76 chars)
+  MIME_OVERHEAD_BYTES = 2_048 # headers and boundaries (analytical)
+
+  def estimated_message_bytes(html_bytes: int, text_bytes: int) -> int:
+      return round(html_bytes * (QP_FACTOR + BASE64_FACTOR)) + text_bytes + MIME_OVERHEAD_BYTES
+  ```
+
+  - INFO: `Email size estimate: about <k> KB in total (HTML part, attachment, plain part)`.
+  - For a full-budget body this is about 242 KB, which agrees with the about 237 KB of
+    `verified_facts.md`. It is far below Gmail's 25 MB message limit, which is general
+    knowledge and not verified here.
+  - Gmail's clipping (about 102 KB) applies to the displayed HTML part, not to the
+    attachment. That is general knowledge, checked in acceptance 43.
+
+## EA-9 Logging and privacy (FR-082, NFR-E10)
+
+Rows added to ED-15. The existing rows are unchanged:
+
+| Logger / level | Text |
+|---|---|
+| `email_delivery` INFO | `Attaching the digest HTML as reading-list-YYYY-MM-DD.html (<n> bytes)` (the fixed file name only, never the directory) |
+| `email_delivery` INFO | `Email size estimate: about <k> KB in total (HTML part, attachment, plain part)` |
+| `email_delivery` DEBUG | `Staged the attachment at <absolute path>` |
+| `email_delivery` WARNING | `Could not remove the temporary copy of the email attachment (<ExcClass>)` |
+| `email_delivery` DEBUG | the path and exception text of a cleanup failure |
+
+Rules:
+- The attachment content is never logged, as with the body.
+- `send_gmail_message` still never logs `args`, which now hold the path.
+- The temp path appears only at DEBUG. That includes the server's `Error:` detail, which
+  holds the path; the user-facing reason is fixed text (EA-7).
+- Third-party DEBUG records (`mcp` JSON-RPC payloads) may contain the path, the body and
+  addresses, as before; DEBUG is the level where that is allowed.
+- The path itself holds no user name on Linux or WSL (`/tmp/newsletter-digest-email-
+  <random>/reading-list-<date>.html`). On macOS `TMPDIR` is a per-user random folder.
+
+## EA-10 Flag-off and other channels (FR-081, acceptance 40)
+
+- Without `--email`, `email_delivery` is never imported (ED-16). So no `tempfile` call,
+  no directory and no file, and the saved HTML and the goldens are byte-identical. The
+  `gmail_mcp` additions are inert constants, a dataclass field and functions that run
+  only on the send path.
+- `--telegram` alone and the Telegram part of `--email --telegram` are unchanged. The PDF
+  is still the only Telegram artefact, and `delivery`, `pdf` and `telegram` gain no import.
+- Nothing is written to `settings.out_dir` by the email step. The saved page there has the
+  same file name but is a different file, and it is never touched (FR-075).
+
+## EA-11 Tests (FR-084; all offline, synthetic only)
+
+Shared fixtures (`tests/email_fixture.py`):
+- `SEND_ARGUMENT_KEYS` becomes the six keys. `FORBIDDEN_SEND_KEYS` becomes
+  `{"cc", "bcc", "threadId", "inReplyTo"}`.
+- `stage_private_copy(base: Path, html: str, *, name=None) -> Path` creates
+  `base/newsletter-digest-email-<n>/` (0700) and the file (0600) the way EA-3 does. It
+  serves the `gmail_mcp` tests, which have no `email_delivery`.
+- `FakeSendSession.call_tool` emulates the server for `attachments`:
+  - `_send_problem` also requires a list of strings;
+  - it records an `AttachmentSnapshot(path, exists, bytes, file_mode, dir_mode, is_symlink)`
+    **at call time**, because the file is gone after delivery;
+  - a missing file returns the verified text `Error: File does not exist: <path>`;
+  - scripts can force `attachment_reply="eacces"`, which returns
+    `Error: EACCES: permission denied, open '<path>'`.
+- `SEND_EMAIL_SCHEMA_1_1_11` is unchanged. It already lists `attachments` as an array of
+  strings.
+
+`test_gmail_mcp_send.py`:
+- The `message` fixture builds `OutgoingEmail(..., attachment=stage_private_copy(tmp_path,
+  HTML_BODY))`.
+- The exact key set is the six keys. `attachments == [absolute path]`, and that path's
+  basename matches the pattern. `cc`, `bcc`, `threadId` and `inReplyTo` are absent from
+  every branch's recorded call.
+- The path-safety matrix (acceptance 37). Each case is `INVALID_MESSAGE`, with **0
+  `client_factory` calls** and 0 sessions:
+  - `str` instead of `Path`, `[]`, `[p, p]`, `None`;
+  - a relative path, a path with `..`, a non-ASCII directory;
+  - a symlink as the file, a symlink as the directory, a directory as the file;
+  - a wrong basename (`reading-list-2026-11-08.htm`, `reading-list-２０２６-11-08.html`
+    with full-width digits, a trailing newline, `credentials.json`);
+  - a parent without the prefix, a parent that is 0755 (POSIX), an extra file in the
+    parent;
+  - a file that is 0644 (POSIX), a hard link (`st_nlink == 2`);
+  - a size mismatch, same size but different bytes, a non-ASCII body.
+- Schema cases (acceptance 38): `attachments` missing gives `missing: attachments`;
+  `{"type": "string"}` and `{"type": "array", "items": {"type": "object"}}` give
+  `wrong type: attachments`; `attachments` marked required is **accepted**. The existing
+  `"new-required"` case in `SCHEMA_CHANGES` currently uses `attachments` as the unknown
+  required key. It must switch to a key outside the six (for example `threadId`) so that it
+  still proves the rule.
+- Failure matrix (acceptance 39), with the fake session:
+  - success with the attachment;
+  - `Error: File does not exist` and the EACCES reply give `REJECTED` with one call;
+  - a timeout after the call and a transport error after the call give exactly one call
+    and the ambiguous kinds;
+  - a start failure then success gives two sessions, one call and the same path in the
+    call.
+- Optional, recommended: the local FastMCP stdio `send_email` (already in the module)
+  accepts `attachments`, reads the file in the **child process** and writes its SHA-256
+  to the calls file. The test asserts it equals `sha256(htmlBody)`. This proves on the real
+  stdio path that a 0600 file in a 0700 directory is readable by the server child under
+  the minimal MCP environment. No npx and no Gmail.
+
+`test_email_delivery.py`:
+- `RecordingSender` records `build_send_arguments(message)` **inside** the fake call,
+  plus the file bytes and modes, because after `send_reading_list_email` returns the file
+  no longer exists. Existing assertions that call `build_send_arguments` after delivery
+  (for example the subject test near line 524) move into the recorded snapshot.
+- The `OutgoingEmail` equality assertion (`test_success_outcome_and_seam_calls`) gains
+  `attachment=<recorded path>`.
+- Byte identity: file bytes equal `htmlBody` equal `content.html.encode("ascii")` for the
+  standard list, a CJK and emoji list, the hostile list, the empty states, and the
+  300-item list (acceptance 41: both at most 95,000 bytes, Must read intact, omitted line
+  present).
+- Modes and location: with the default factory, the directory is under
+  `Path(tempfile.gettempdir()).resolve()`, is absolute, is 0700 at call time (POSIX), and
+  the file is 0600.
+- Cleanup (acceptance 36): the directory does not exist after success, `REJECTED`,
+  `TIMEOUT_AFTER_SEND`, `TRANSPORT_AFTER_SEND`, an unexpected exception from `sender`,
+  `INVALID_MESSAGE`, and **cancellation** (extend `test_cancellation_is_not_swallowed`).
+- Preparation failures (FR-074): a factory that raises, a factory returning a 0755
+  directory, `os.open` raising (monkeypatched), and a short write giving a size mismatch.
+  Each gives `failed` with the EA-7 reason, `sender` not called, `send_calls == 0`, and
+  the directory removed when it had been created.
+- Render failure: no factory call.
+- Cleanup failure: `os.rmdir` raising gives a WARNING with no path, and the outcome is
+  unchanged.
+- The name equals `write_reading_list(...)`'s file name for the same list. A
+  property-style test (seeded, about 200 lists with hostile titles, URLs, summaries and
+  newsletter names containing `/`, `..`, NUL, `\n` and `~`) shows the path is always
+  `<dir>/reading-list-<end_date>.html`.
+- Logs (`caplog`, INFO and above) hold no temp directory string, no address and no body
+  text, on success and failure.
+- `estimated_message_bytes` for 95,000 bytes is between 2.4 and 2.6 times the HTML. A
+  check against stdlib `quopri` and `base64` on the synthetic 300-item HTML agrees within
+  10%.
+
+`test_cli_email.py`:
+- The success-line helper adds `with 1 attachment`.
+- With `--email`, the fake session sees six keys and the snapshot bytes equal `htmlBody`.
+- `out_dir` holds only the saved HTML.
+- With `TMPDIR` set (monkeypatch `tempfile.tempdir` to `tmp_path/"tmp"`), no
+  `newsletter-digest-email-*` remains after success, FAILED and OUTCOME UNKNOWN.
+- A start failure then success gives one directory created and one call.
+- The ED-3 event-order test is unchanged.
+
+`test_flag_off_identity.py`:
+- `EMAIL_SENT_LINE` gains `with 1 attachment`.
+- The subprocess tests set `TMPDIR` for the child to an empty test directory and assert
+  it is still empty afterwards: without flags, with `--telegram` alone, and with `--email`
+  (because of cleanup).
+- The existing module-absence assertions are unchanged.
+
+`test_architecture.py`: the EA-2 rule changes, with self-tests and mutants.
+
+Unchanged and still green: the FR-057 agent tool-list test (`test_agent.py`, 19 offered
+tools, email on and off), `open_gmail_tools` subset tests, the disjoint-maps test, the
+T023 and flag-off goldens, the email HTML golden, and the Telegram suites.
+
+Tests changed beyond FR-084's "only the five-key tests" list (DA8; to record in
+`implementation-notes.md`):
+- the `OutgoingEmail` construction and equality sites (new required field);
+- the `build_send_arguments`-after-delivery assertions;
+- the `"new-required"` schema case;
+- the two exact success-line constants (Q-A6 accepted that change);
+- the synthetic architecture trees.
+
+`uv run pytest`, `uv run ruff check .` and `pyrefly check` must be clean.
+
+## EA-12 README requirements (FR-083)
+
+In `## Email delivery`:
+1. **What is sent.** With `--email`, the message also carries one attachment,
+   `reading-list-YYYY-MM-DD.html`, identical to the email body. It is the compact email
+   version, not the saved page: no "Read here" text, no mark-read checkbox, no script, and
+   not a PDF. It opens offline in any browser.
+2. **Same name, different file.** The saved page in the output folder has the same name
+   and is the full list. The attachment is a copy of the email, including the "M of N
+   items are shown" note when items were left out. It does not replace the saved page.
+3. **Privacy.**
+   - Every recipient receives the whole list as a file they can save and forward, with
+     the same content as the body.
+   - Attachments are not end-to-end encrypted, and anyone with the file can open it.
+   - A copy stays in the sender's Sent folder.
+4. **How the file is handled.**
+   - It is written to a new private temporary directory (owner-only permissions) and
+     deleted after the send, whatever the outcome.
+   - Nothing is written to the output folder.
+   - If the process is killed, a `newsletter-digest-email-*` folder holding that one copy
+     may stay in the system temp directory and can be deleted.
+5. **Security statement.**
+   - The agent still has only `search_emails` and `read_email`.
+   - The delivery code sends exactly one attachment, whose path is made by fixed code.
+   - The Gmail MCP server attaches **any** readable local file it is given a path to; it
+     has no path checks of its own. So the path is never taken from email, web or model
+     content, `.env` or a command-line option.
+   - Before the send, the app re-checks that the file is its own private copy and
+     byte-identical to the body.
+6. **Gmail notes.**
+   - The attachment does not count toward the about 102 KB clipping of the body.
+   - The total message is roughly 2.5 times the HTML size (about 240 KB at the full
+     budget).
+7. **The new failure meaning** `the mail server could not read the attachment file`:
+   nothing was sent. The usual cause is a `GMAIL_MCP_COMMAND` that runs a Windows-side
+   `node` from WSL, which cannot see Linux paths. Also mention
+   `could not prepare the attachment` (temp folder full or not writable). The pin is
+   unchanged.
+8. **Correct the 2026-11-04 wording.** "There is no Cc, Bcc or attachment" (README about
+   line 574) becomes "There is no Cc or Bcc; the HTML is attached once". Check the security
+   model, safety model and privacy sections for any other "no attachment" statement.
+9. Mention `with 1 attachment` in the stderr examples. Record deviations in
+   `shared/implementation-notes.md`.
+
+## EA-13 Non-Functional Considerations (attachment)
+
+- **Performance:** one `mkdtemp`, one write and one read-back of at most about 95 KB, plus
+  `lstat`/`listdir`, in well under 100 ms (NFR-E14). The attachment adds about
+  130 KB to the message. Flag-off cost is zero.
+- **Security:**
+  - The path is fixed code (EA-3).
+  - The re-check covers path, directory, file, size and **bytes** (EA-4).
+  - The six-key map and the single `OutgoingEmail` site are pinned by AST rules (EA-2).
+  - The schema type check refuses drift (EA-5).
+  - The agent is isolated as in ED-3; the file exists only after `run_digest` returned.
+- **Confidentiality:** a 0700 directory and a 0600 file, removed in `finally`, never in
+  the output folder, and the path only at DEBUG.
+- **Integrity:** one string feeds both `htmlBody` and the file, and the bytes are compared
+  before the call.
+- **Reliability:**
+  - preparation failures are pre-send, with no session;
+  - there is no retry after the call;
+  - deletion happens only after the server process is closed;
+  - cleanup never changes the outcome.
+- **Dependencies:** none new.
+
+## EA-14 What this amends in the 2026-11-04 design
+
+| 2026-11-04 item | Amended to |
+|---|---|
+| ED-1 step 7 and the diagram: "exactly five arguments" | six arguments; new steps 6a, 6b and 9 (EA-1) |
+| ED-2 `email_delivery` row "External: `anyio`, stdlib" | stdlib now explicitly includes `os`, `stat` and `tempfile` (file staging). `gmail_mcp` adds `stat` and `pathlib` |
+| ED-2 `SEND_NAMES` | adds `ATTACHMENT_NAME_RE` and `ATTACHMENT_DIR_PREFIX` |
+| ED-3 layer 4, `find_send_capability_violations` | gains sub-rules (g), (h) and (i), and extends (f) (EA-2) |
+| ED-4 `GMAIL_SEND_ARG_MAP` comment "The ONLY five keys" and the `build_send_arguments` docstring "never ... attachments" | six keys including `attachment -> attachments`; `OutgoingEmail.attachment: Path` is required; `_attachment_problem` is added to the re-validation (EA-4) |
+| ED-4 schema check "properties contain the five, required within them" | six, plus the `attachments` array-of-string type check (EA-5) |
+| ED-8 rationale "the server declares every part 7bit ... the renderer guarantees ASCII and short lines" | with `attachments` set, the server uses nodemailer, which picks quoted-printable for the HTML part, so the 7bit hazard does not apply. ASCII-only and the 900-character limit are **kept unchanged** as defence in depth and because the file must be ASCII for byte identity (FR-059 as amended) |
+| ED-11 empty state | also attaches its HTML |
+| ED-12 sent line | adds `with 1 attachment`; new reason row checked before the permission row; new preparation-failure reason (EA-7) |
+| ED-15 logging | rows added (EA-9) |
+| ED-16 flag-off | also: no temp directory is created without `--email` (EA-10) |
+| ED-17 tests: "the key set is exactly the five ... `attachments` never present" | six keys, and `attachments` is present with one fixed path (EA-11) |
+| ED-18 README: no PDF, no attachment | corrected (EA-12) |
+| ED-19 Security "no `cc`, `bcc` or attachments" | no `cc` or `bcc`; one fixed-path attachment whose bytes equal the body |
+| ED-20 **DM4** "never ... `attachments`" | superseded by DA2: `attachments` is always set, with exactly one fixed-code path |
+| ED-21 risk "LF-only line endings and 7bit"; its fallback `mimeType="text/html"` | the attachment path builds the message with nodemailer (`newline: 'unix'`, LF). The `mimeType` fallback no longer works on this path, because the server ignores `mimeType` there. If the first real send shows a problem, the fix is in the arguments or the server choice, never a silent send without the attachment (EA-16) |
+
+Unchanged: DM1 to DM3, DM5 to DM18 (except the wording above); the budget (DM10); the
+outcomes and retry rules (DM12); the exit codes (DM13); the recipient rules; the subject;
+the template; the renderer; the plain-text part; and the agent isolation tests.
+
+## EA-15 Decisions (attachment)
+
+- **DA1 Placement:**
+  - `email_delivery` stages and cleans up the file;
+  - `gmail_mcp` maps the argument and re-checks the path and bytes;
+  - no new module, and no change to the layer order.
+- **DA2 Arguments:**
+  - exactly `to`, `subject`, `body`, `htmlBody`, `mimeType` and `attachments`;
+  - `attachments` is always a one-element list holding the staged absolute path;
+  - `OutgoingEmail.attachment` is required, so there is no five-key send path.
+- **DA3 Re-check:**
+  - all FR-076 checks, plus symlink-free `realpath`, a private parent with the fixed
+    prefix, a single entry, a single link (`st_nlink == 1`), and **byte equality with
+    `htmlBody`**;
+  - fixed details; `INVALID_MESSAGE` before any session.
+- **DA4 Schema:**
+  - `attachments` must be present and an array of strings;
+  - only `attachments` is type-checked;
+  - a missing or wrong property is `TOOL_SCHEMA_CHANGED`, with no fallback.
+- **DA5 Lifetime:**
+  - `mkdtemp(prefix="newsletter-digest-email-")` in the system temp location, resolved;
+    0700 directory; `O_EXCL`/`O_NOFOLLOW` file with `fchmod` 0600;
+  - created once before the first start; removed by unlink plus rmdir (never `rmtree`) in
+    a synchronous `finally` after the session closed;
+  - no sweep of stale directories.
+- **DA6 Failures:**
+  - preparation: `could not prepare the attachment (<ExcClass>); nothing was sent`, with
+    no session;
+  - server cannot read the file: `REJECTED`, mapped by a new first-checked row to
+    `the mail server could not read the attachment file; nothing was sent`, with no detail
+    and no retry;
+  - everything else as in ED-12.
+- **DA7 Messages:**
+  - the success line `Email: sent to N recipient(s) with 1 attachment (Gmail id ...).`,
+    with the literal in `cli`;
+  - the `--email` help gains one sentence;
+  - `EmailOutcome` is unchanged.
+- **DA8 Tests:**
+  - six-key fixtures and call-time snapshots in the fakes;
+  - the path, schema, failure and cleanup matrices;
+  - a child-process read via local FastMCP;
+  - TMPDIR-empty subprocess checks;
+  - the tests changed beyond the PRD's list are named in EA-11.
+- **DA9 Size:**
+  - the body budget is unchanged;
+  - the total-size estimate (`QP_FACTOR + BASE64_FACTOR`, about 2.44 times the HTML, plus
+    the plain part and 2 KB) is logged at INFO and documented, with no logic attached.
+
+## EA-16 Open Architecture Decisions and Risks (attachment)
+
+None of these blocks planning. Recommended defaults are marked.
+
+**Design-raised items for user confirmation:**
+1. **Placement (DA1).**
+   - Options: (a) staging in `email_delivery`, re-check in `gmail_mcp`; (b) everything in
+     `gmail_mcp`.
+   - **Recommended: (a)**, for the reasons in EA-2.
+2. **Byte-equality re-check (DA3).** This goes beyond FR-076's size check.
+   - Options: (a) read the file back and compare it with `htmlBody` before the call;
+     (b) size only.
+   - **Recommended: (a).** It limits what can leave through `attachments` to the body
+     itself and costs under 1 ms.
+3. **Required `OutgoingEmail.attachment` field (DA2, DA8).** This changes more tests than
+   FR-084 lists (EA-11).
+   - Options: (a) required field, no default, and update those tests; (b) optional with a
+     `None` default rejected at runtime, which needs the same test changes and leaves a
+     type-level path to the five-key form.
+   - **Recommended: (a).**
+4. **Preparation-failure reason (DA6).**
+   - Options: (a) `could not prepare the attachment (<ExcClass>); nothing was sent`;
+     (b) the PRD's bare `could not prepare the attachment`.
+   - **Recommended: (a)**, the same style as the render-failure reason. The class name holds
+     no path.
+5. **Cleanup by unlink plus rmdir, never `rmtree`, with no stale-directory sweep (DA5).**
+   - **Recommended: yes.**
+   - Cost: after a `SIGKILL`, a 0700 directory with one file stays in the temp location
+     until the OS cleans it (WSL and Linux `/tmp` is usually cleared at boot). The README
+     says this.
+6. **Schema type check only on `attachments` (DA4).**
+   - Options: (a) only `attachments`; (b) all six.
+   - **Recommended: (a).** It is the only argument whose type changes what the server does
+     with local files. Checking all six adds failure modes for harmless drift.
+7. **Same file name as the saved page (from approved Q-A4).** A recipient sees an
+   attachment named exactly like the "full list" file mentioned in the omitted-count line
+   ("The full list is in reading-list-YYYY-MM-DD.html on the computer that ran the
+   digest"). When items were dropped, the attachment is **not** the full list.
+   - Options: (a) keep the name and the line unchanged, and explain in the README (EA-12
+     item 2); (b) rename the attachment `...-email.html` (reopens Q-A4); (c) change the
+     omitted-line wording, which changes the email golden that FR-079 keeps identical.
+   - **Recommended: (a).** The line already says "on the computer that ran the digest".
+8. **Non-ASCII temp path.** A `TMPDIR` with non-ASCII characters makes check 2 fail, so
+   `--email` fails before any send with `INVALID_MESSAGE`.
+   - **Recommended: accept and document.** The PRD requires an ASCII path; the default
+     `/tmp` is ASCII.
+
+**Risks:**
+- **`From:` header probably omitted on the nodemailer path** (verified facts, read from
+  source). Gmail is expected to fill in the authenticated account. Accepted (Q-A7);
+  acceptance 43 checks "Show original".
+- **LF line endings** (`newline: 'unix'`) in the raw message. Gmail is expected to accept
+  them. Accepted (Q-A7); acceptance 43. There is no in-app fallback that drops the
+  attachment.
+- **Unpinned `nodemailer ^7.0.3`,** resolved by `npx` at install time. This is the first
+  feature to depend on it. Behaviour was read from 7.0.13. Accepted (Q-A7). A future
+  nodemailer could change the encodings, but not which file is read: the path and bytes
+  are fixed by EA-3 and EA-4.
+- **The server attaches any readable path.** Mitigated: fixed-code path, AST rules (EA-2),
+  the re-check with byte equality (EA-4), and a private directory. The residual risk is
+  a same-user process racing the private directory between check and read. That is out of
+  scope, because such a process can read the credentials directly.
+- **Windows-side `node` under WSL** cannot resolve the Linux path. The result is
+  `could not read the attachment file` (failed, nothing sent), with a README
+  troubleshooting row. The default `npx` under WSL is Linux-side.
+- **Gmail's treatment of `.html` attachments** (shown as a chip, not blocked) is general
+  knowledge, not verified here. Checked by acceptance 43.
+- **`[re-verify]`** the exact nodemailer error texts for EACCES and EISDIR (EA-7), and that
+  `stat`, `pathlib` and `os` add nothing to the flag-off `sys.modules` (EA-2).
+
+Items for the orchestrator to append to the PRD "Open Questions" (this agent was told to
+edit only `designs.md`): the eight design-raised items above, with their recommended
+defaults.
+
+DESIGN_COMPLETE

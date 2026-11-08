@@ -421,3 +421,14 @@ Each has a recommended default; none blocks planning.
 
 ### Approval record (2026-11-08, attachment amendment)
 The user approved this amendment with all recommended defaults: Q-A1 private temp dir; Q-A2 always attach with `--email`; Q-A3 attach the email variant; Q-A4 filename `reading-list-YYYY-MM-DD.html`; Q-A5 attach in the empty-state email too; Q-A6 add "with 1 attachment" to the success stderr line; Q-A7 `From:` header, LF endings and unpinned nodemailer accepted, to confirm on the first real send; Q-A8 keep the 95 KB body budget.
+
+### Design-raised items (2026-11-08, from designs.md EA-1..EA-16; to confirm at plan approval)
+Each has a recommended default that the design already assumes.
+1. File handling lives in `email_delivery`; the re-check lives in `gmail_mcp` (not all in `gmail_mcp`).
+2. Before the call, read the file back and compare its bytes with `htmlBody` (beyond FR-076's size check).
+3. `OutgoingEmail.attachment` is required; this touches more tests than FR-084 lists (construction/equality sites, `build_send_arguments` assertions, the "new-required" schema case, two success-line constants, synthetic architecture trees).
+4. The preparation-failure reason includes the exception class name.
+5. Cleanup is unlink plus rmdir, never recursive, with no sweep of old folders; a SIGKILL can leave a 0700 folder behind.
+6. The schema check type-checks only `attachments`, not all six keys.
+7. The attachment has the same name as the saved full page that the "items omitted" line points to; keep name and wording, explain in the README (rewording would break the golden).
+8. A non-ASCII temp path fails before sending; accept and document.
