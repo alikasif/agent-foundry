@@ -41,7 +41,11 @@ is imported or executed. The rules:
    most once, and `email_render` only by `email_delivery`.
    `find_send_capability_violations` keeps the send names, the Gmail write-tool name
    literals and `call_tool` inside `gmail_mcp`'s send path and `email_delivery`, and
-   away from the agent's read-only tools.
+   away from the agent's read-only tools. For the HTML attachment (EA-2, T090): the
+   string `"attachments"` appears only as a value of the `GMAIL_SEND_ARG_MAP` literal
+   ((h)(1)); `attachment_name` is called only with a `....meta.end_date` argument
+   ((h)(3)); only `email_delivery` imports or references `tempfile` ((i)); and
+   agent, tools and prompts never name the attachment helpers ((f), extended).
 
 Each checker is a pure function over parsed modules, so the self-tests at the end feed
 it synthetic sources and prove that every rule can fail.
@@ -249,6 +253,9 @@ SEND_NAMES = frozenset(
         "send_gmail_message",
         "redact_addresses",
         "_default_send_client",
+        # EA-2 (T090): the attachment re-check names (gmail_mcp, email_delivery only)
+        "ATTACHMENT_NAME_RE",
+        "ATTACHMENT_DIR_PREFIX",
     }
 )
 WRITE_TOOL_NAMES = frozenset(
@@ -280,6 +287,26 @@ EMAIL_DELIVERY_BANNED_NAMES = frozenset(
     {"open_gmail_tools", "filter_read_only", "load_mcp_tools"}
 )
 NO_EMAIL_IMPORTERS = frozenset({"agent", "tools", "prompts"})
+
+# ---- Email HTML attachment (EA-2, T090 negative rules; T097 adds the positive ones)
+SEND_ARG_MAP = "GMAIL_SEND_ARG_MAP"
+ATTACHMENTS_ARGUMENT = "attachments"
+ATTACHMENT_NAME_HELPER = "attachment_name"
+ATTACHMENT_NAME_PARAMETER = "end_date"
+ATTACHMENT_NAME_ARGUMENT_SUFFIX = ".meta.end_date"
+ATTACHMENT_HELPER_NAMES = frozenset(
+    {
+        ATTACHMENT_NAME_HELPER,
+        "_stage_attachment",
+        "_write_private_file",
+        "_remove_staged",
+        "ATTACHMENT_NAME_RE",
+        "ATTACHMENT_DIR_PREFIX",
+    }
+)
+"""EA-2 helper names the agent side never references (FR-078); T097 aligns them."""
+TEMPFILE_MODULE = "tempfile"
+TEMPFILE_OWNER = "email_delivery"
 
 
 class ImportRef(NamedTuple):
@@ -1324,6 +1351,170 @@ def _agent_email_import_violations(modules: Modules) -> list[str]:
     ]
 
 
+def _agent_attachment_violations(modules: Modules) -> list[str]:
+    """(f, extended) Report agent, tools or prompts naming the attachment helpers.
+
+    FR-078: the agent side never references `ATTACHMENT_HELPER_NAMES` (as a name,
+    attribute, imported name or string) and never holds the string `"attachments"`.
+    """
+    violations: list[str] = []
+    for name in sorted(NO_EMAIL_IMPORTERS):
+        module = modules.get(name)
+        if module is None:
+            continue
+        violations.extend(
+            f"{name}.py:{line}: {name} references {ident}; the agent side never "
+            "touches the attachment helpers"
+            for ident, line in _node_identifiers(module.tree)
+            if ident in ATTACHMENT_HELPER_NAMES
+        )
+        violations.extend(
+            f"{name}.py:{node.lineno}: {name} holds string {node.value!r}; the agent "
+            "side never names the attachment helpers or argument"
+            for node in _code_string_nodes(module, module.tree)
+            if node.value == ATTACHMENTS_ARGUMENT
+            or node.value in ATTACHMENT_HELPER_NAMES
+        )
+    return violations
+
+
+def _send_arg_map_value_ids(gmail: SourceModule) -> set[int]:
+    """Return the ids of the string values of module-level `GMAIL_SEND_ARG_MAP` dicts.
+
+    Only a dict literal assigned at module level counts; keys, nested values and
+    `dict(...)` calls are never allowed sites.
+    """
+    allowed: set[int] = set()
+    for stmt in gmail.tree.body:
+        if isinstance(stmt, ast.Assign):
+            targets, value = stmt.targets, stmt.value
+        elif isinstance(stmt, ast.AnnAssign):
+            targets, value = [stmt.target], stmt.value
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == SEND_ARG_MAP for t in targets):
+            continue
+        if not isinstance(value, ast.Dict):
+            continue
+        allowed.update(
+            id(item)
+            for item in value.values
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        )
+    return allowed
+
+
+def _attachment_literal_violations(modules: Modules) -> list[str]:
+    """(h)(1) Report the string `"attachments"` outside the send-argument map values.
+
+    The server argument name is a code string only as a value of gmail_mcp's
+    module-level `GMAIL_SEND_ARG_MAP` literal; docstrings are skipped and longer
+    strings (`"wrong type: attachments"`) are not equal to it.
+    """
+    gmail = modules.get(GMAIL_MODULE)
+    allowed = _send_arg_map_value_ids(gmail) if gmail is not None else set()
+    return [
+        f"{name}.py:{node.lineno}: string {ATTACHMENTS_ARGUMENT!r} outside the "
+        f"{SEND_ARG_MAP} values; only that map names the server argument"
+        for name, module in modules.items()
+        for node in _code_string_nodes(module, module.tree)
+        if node.value == ATTACHMENTS_ARGUMENT
+        and not (name == GMAIL_MODULE and id(node) in allowed)
+    ]
+
+
+def _attachment_name_aliases(module: SourceModule) -> set[str]:
+    """Return the local names bound to `attachment_name` (itself and import aliases)."""
+    return {ATTACHMENT_NAME_HELPER} | {
+        local
+        for local, origin in import_bindings(module).items()
+        if origin.rpartition(".")[2] == ATTACHMENT_NAME_HELPER
+    }
+
+
+def _attachment_name_problem(call: ast.Call) -> str | None:
+    """Return why an `attachment_name(...)` call breaks (h)(3), else None."""
+    values = [*call.args, *(keyword.value for keyword in call.keywords)]
+    keywords_ok = all(k.arg == ATTACHMENT_NAME_PARAMETER for k in call.keywords)
+    if len(values) != 1 or not keywords_ok or isinstance(values[0], ast.Starred):
+        return "must take exactly one argument"
+    text = ast.unparse(values[0])
+    if not text.endswith(ATTACHMENT_NAME_ARGUMENT_SUFFIX):
+        return f"argument {text!r} does not end in {ATTACHMENT_NAME_ARGUMENT_SUFFIX!r}"
+    return None
+
+
+def _attachment_name_call_violations(modules: Modules) -> list[str]:
+    """(h)(3) Report `attachment_name` calls not taking only `....meta.end_date`.
+
+    Zero calls are fine (the stub tree). The helper is never used as a value or
+    rebound, which would hide a call with another argument.
+    """
+    violations: list[str] = []
+    for name, module in modules.items():
+        aliases = _attachment_name_aliases(module)
+        called: set[int] = set()
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                (isinstance(func, ast.Name) and func.id in aliases)
+                or (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == ATTACHMENT_NAME_HELPER
+                )
+            ):
+                continue
+            called.add(id(func))
+            problem = _attachment_name_problem(node)
+            if problem is not None:
+                violations.append(
+                    f"{name}.py:{node.lineno}: {ast.unparse(node)}: "
+                    f"{ATTACHMENT_NAME_HELPER} {problem}; the name comes from the "
+                    "run date only"
+                )
+        violations.extend(
+            f"{name}.py:{node.lineno}: {ATTACHMENT_NAME_HELPER} used as a value "
+            f"({ast.unparse(node)}), not called with the run date"
+            for node in ast.walk(module.tree)
+            if id(node) not in called
+            and (
+                (isinstance(node, ast.Name) and node.id in aliases)
+                or (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == ATTACHMENT_NAME_HELPER
+                )
+            )
+        )
+    return violations
+
+
+def _tempfile_violations(modules: Modules) -> list[str]:
+    """(i) Report `tempfile` imported or referenced outside email_delivery."""
+    violations: list[str] = []
+    owner = f"only {TEMPFILE_OWNER} may use {TEMPFILE_MODULE}"
+    for name, module in modules.items():
+        if name == TEMPFILE_OWNER:
+            continue
+        violations.extend(
+            f"{name}.py:{ref.line}: {name} imports {ref.target}; {owner}"
+            for ref in module.imports
+            if _root(ref.target) == TEMPFILE_MODULE
+        )
+        violations.extend(
+            f"{name}.py:{line}: {name} references {TEMPFILE_MODULE}; {owner}"
+            for ident, line in _node_identifiers(module.tree)
+            if ident == TEMPFILE_MODULE
+        )
+        violations.extend(
+            f"{name}.py:{node.lineno}: string {node.value!r}; {owner}"
+            for node in _code_string_nodes(module, module.tree)
+            if node.value == TEMPFILE_MODULE
+        )
+    return violations
+
+
 def find_send_capability_violations(modules: Modules) -> list[str]:
     """Report send capability outside gmail_mcp's send path (ED-3 layer 4).
 
@@ -1333,7 +1524,12 @@ def find_send_capability_violations(modules: Modules) -> list[str]:
     string only in the `GMAIL_SEND_TOOL_MAP` literal (and its `"send_email"` lookup
     on the send path); (d) `call_tool` only in `send_gmail_message` and its private
     helpers; (e) email_delivery never touches the agent's tool loaders; (f) agent,
-    tools and prompts never import an email module.
+    tools and prompts never import an email module, never reference the attachment
+    helpers (`ATTACHMENT_HELPER_NAMES`) and never hold the string `"attachments"`;
+    (h)(1) `"attachments"` is a code string only as a value of gmail_mcp's
+    `GMAIL_SEND_ARG_MAP` literal; (h)(3) `attachment_name` is only called, with one
+    argument ending in `.meta.end_date`; (i) only email_delivery imports or
+    references `tempfile`. T097 adds the positive (g) and (h)(2).
     """
     return [
         *_send_name_reference_violations(modules),
@@ -1342,6 +1538,10 @@ def find_send_capability_violations(modules: Modules) -> list[str]:
         *_call_tool_violations(modules),
         *_email_delivery_read_side_violations(modules),
         *_agent_email_import_violations(modules),
+        *_agent_attachment_violations(modules),
+        *_attachment_literal_violations(modules),
+        *_attachment_name_call_violations(modules),
+        *_tempfile_violations(modules),
     ]
 
 
@@ -1555,9 +1755,11 @@ _GMAIL_READ_SIDE = """
         """
 
 _GMAIL_SEND_SIDE = """
+        import re
         import shutil
         from dataclasses import dataclass
         from enum import StrEnum
+        from pathlib import Path
 
         import anyio
 
@@ -1571,8 +1773,13 @@ _GMAIL_SEND_SIDE = """
             "text_body": "body",
             "html_body": "htmlBody",
             "mime_type": "mimeType",
+            "attachment": "attachments",
         }
         SEND_MIME_TYPE = "multipart/alternative"
+        ATTACHMENT_NAME_RE = re.compile(
+            r"reading-list-[0-9]{4}-[0-9]{2}-[0-9]{2}\\.html"
+        )
+        ATTACHMENT_DIR_PREFIX = "newsletter-digest-email-"
 
         @dataclass(frozen=True)
         class OutgoingEmail:
@@ -1580,6 +1787,7 @@ _GMAIL_SEND_SIDE = """
             subject: str
             text_body: str
             html_body: str
+            attachment: Path
 
         class GmailSendErrorKind(StrEnum):
             INVALID_MESSAGE = "invalid_message"
@@ -1599,14 +1807,41 @@ _GMAIL_SEND_SIDE = """
                 raise GmailSendError(GmailSendErrorKind.INVALID_MESSAGE)
             if not all(EMAIL_ADDRESS_RE.fullmatch(a) for a in message.to):
                 raise GmailSendError(GmailSendErrorKind.INVALID_MESSAGE)
+            if _attachment_problem(message) is not None:
+                raise GmailSendError(GmailSendErrorKind.INVALID_MESSAGE)
             values = {
                 "to": list(message.to),
                 "subject": message.subject,
                 "text_body": message.text_body,
                 "html_body": message.html_body,
                 "mime_type": SEND_MIME_TYPE,
+                "attachment": [str(message.attachment)],
             }
             return {GMAIL_SEND_ARG_MAP[key]: value for key, value in values.items()}
+
+        def _attachment_problem(message: OutgoingEmail) -> str | None:
+            path = message.attachment
+            if not isinstance(path, Path):
+                return "the attachment must be one file path"
+            if not ATTACHMENT_NAME_RE.fullmatch(path.name):
+                return "the attachment file name is not the fixed pattern"
+            if not path.parent.name.startswith(ATTACHMENT_DIR_PREFIX):
+                return "the attachment directory is not this app's private directory"
+            if path.read_bytes() != message.html_body.encode("ascii"):
+                return "the attachment is not identical to the HTML body"
+            return None
+
+        def _schema_mismatch(schema: dict[str, object]) -> str:
+            properties = schema.get("properties", {})
+            parts = [
+                f"missing: {name}"
+                for name in GMAIL_SEND_ARG_MAP.values()
+                if name not in properties
+            ]
+            listed = properties.get(GMAIL_SEND_ARG_MAP["attachment"], {})
+            if listed.get("type") != "array":
+                parts.append("wrong type: attachments")
+            return ", ".join(parts)
 
         def redact_addresses(text: str, extra=()) -> str:
             return text
@@ -1744,12 +1979,22 @@ FINAL_EMAIL_TREE: dict[str, str] = {
             return template.render(rl=rl, html_name=html_name)
         """,
     "email_delivery": """
-        '''Sends through gmail_mcp.send_gmail_message, never load_mcp_tools.'''
+        '''Sends through gmail_mcp.send_gmail_message, never load_mcp_tools.
+
+        The HTML is attached from a private temp copy (EA-3); the server argument
+        name "attachments" lives only in gmail_mcp.
+        '''
+        import os
+        import stat
+        import tempfile
+        from collections.abc import Callable
+        from datetime import date
         from pathlib import Path
 
         from newsletter_digest.config import Settings
         from newsletter_digest.email_render import render_email
         from newsletter_digest.gmail_mcp import (
+            ATTACHMENT_DIR_PREFIX,
             GmailSendError,
             GmailSendErrorKind,
             GmailSendReceipt,
@@ -1761,10 +2006,41 @@ FINAL_EMAIL_TREE: dict[str, str] = {
 
         __all__ = ["EmailOutcome", "redact_addresses", "send_reading_list_email"]
 
+        TempDirFactory = Callable[..., str]
+
+        def attachment_name(end_date: date) -> str:
+            return f"reading-list-{end_date.isoformat()}.html"
+
         def failure_reason(err: GmailSendError, settings: Settings) -> str:
             if err.kind is GmailSendErrorKind.START_FAILED:
                 return "the Gmail MCP server did not start"
             return redact_addresses(err.detail, extra=settings.email_to)
+
+        def _write_private_file(path: Path, data: bytes) -> None:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+
+        def _stage_attachment(raw_directory: str, name: str, html: str) -> Path:
+            directory = Path(raw_directory).resolve(strict=True)
+            os.chmod(directory, 0o700)
+            if stat.S_IMODE(os.lstat(directory).st_mode) != 0o700:
+                raise PermissionError("directory mode")
+            path = directory / name
+            _write_private_file(path, html.encode("ascii"))
+            return path
+
+        def _remove_staged(raw_directory: str, name: str) -> None:
+            try:
+                os.unlink(os.path.join(raw_directory, name))
+            except OSError:
+                pass
+            try:
+                os.rmdir(raw_directory)
+            except OSError:
+                pass
 
         async def send_reading_list_email(
             reading_list: ReadingList,
@@ -1773,16 +2049,36 @@ FINAL_EMAIL_TREE: dict[str, str] = {
             *,
             sender=send_gmail_message,
             renderer=render_email,
+            make_temp_dir: TempDirFactory = tempfile.mkdtemp,
         ):
             content = renderer(reading_list, html_name=html_path.name)
-            message = OutgoingEmail(settings.email_to, "s", content.text, content.html)
-            receipt: GmailSendReceipt = await sender(
-                settings, message, send_timeout=settings.email_send_timeout
-            )
+            name = attachment_name(reading_list.meta.end_date)
+            raw_directory: str | None = None
+            try:
+                raw_directory = make_temp_dir(prefix=ATTACHMENT_DIR_PREFIX)
+                attachment = _stage_attachment(raw_directory, name, content.html)
+                message = OutgoingEmail(
+                    settings.email_to,
+                    "s",
+                    content.text,
+                    content.html,
+                    attachment=attachment,
+                )
+                receipt: GmailSendReceipt = await sender(
+                    settings, message, send_timeout=settings.email_send_timeout
+                )
+            finally:
+                if raw_directory is not None:
+                    _remove_staged(raw_directory, name)
             return receipt.message_id
         """,
 }
-"""A synthetic tree shaped like the EP-5 email contracts; every rule must allow it."""
+"""A synthetic tree shaped like the EP-5 email contracts; every rule must allow it.
+
+Since T090 it has the EA-3/EA-4 attachment shape: the six-key send map, a required
+`OutgoingEmail.attachment` and an email_delivery that stages the file via
+`tempfile.mkdtemp` and passes `attachment=` from the staging helper.
+"""
 
 EMAIL_RULES: tuple[Checker, ...] = (
     find_forbidden_project_imports,
@@ -1798,6 +2094,14 @@ EMAIL_RULES: tuple[Checker, ...] = (
     find_cycles,
 )
 """The rules T069 adds or extends; each must allow both email trees."""
+
+ATTACHMENT_SUB_RULES: tuple[Checker, ...] = (
+    _agent_attachment_violations,
+    _attachment_literal_violations,
+    _attachment_name_call_violations,
+    _tempfile_violations,
+)
+"""The EA-2 sub-rules T090 adds to `find_send_capability_violations` (negative)."""
 
 
 VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
@@ -2847,6 +3151,272 @@ VIOLATION_CASES: list[tuple[Checker, dict[str, str], str]] = [
         {"prompts": "from .email_render import render_email\n"},
         "prompts -> email_render: the agent side never imports",
     ),
+    # ---- Email HTML attachment (EA-2, T090): (a) send names, (f), (h)(1), (h)(3), (i)
+    (
+        find_send_capability_violations,
+        {"tools": "from newsletter_digest.gmail_mcp import ATTACHMENT_NAME_RE\n"},
+        "tools.py:1: tools imports ATTACHMENT_NAME_RE from gmail_mcp; only gmail_mcp "
+        "and email_delivery may use the send names",
+    ),
+    (
+        find_send_capability_violations,
+        {"cli": "from newsletter_digest.gmail_mcp import ATTACHMENT_DIR_PREFIX\n"},
+        "cli.py:1: cli imports ATTACHMENT_DIR_PREFIX from gmail_mcp",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_render": (
+                "from newsletter_digest import gmail_mcp\n"
+                "p = gmail_mcp.ATTACHMENT_DIR_PREFIX\n"
+            ),
+            "gmail_mcp": "",
+        },
+        "email_render.py:2: email_render references gmail_mcp.ATTACHMENT_DIR_PREFIX",
+    ),
+    (
+        find_send_capability_violations,
+        {"cli": "NAME = 'ATTACHMENT_NAME_RE'\n"},
+        "cli.py:1: string 'ATTACHMENT_NAME_RE' names a send name",
+    ),
+    (
+        find_imported_name_violations,
+        {
+            "email_delivery": (
+                "from newsletter_digest.gmail_mcp import ATTACHMENT_DIR_PREFIX, "
+                "open_gmail_tools\n"
+            ),
+            "gmail_mcp": "",
+        },
+        "email_delivery takes open_gmail_tools from gmail_mcp",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "def f(p: str) -> dict:\n    return {'attachments': [p]}\n"},
+        "email_delivery.py:2: string 'attachments' outside the GMAIL_SEND_ARG_MAP "
+        "values",
+    ),
+    (
+        find_send_capability_violations,
+        {"cli": "LABEL = 'attachments'\n"},
+        "cli.py:1: string 'attachments' outside the GMAIL_SEND_ARG_MAP values",
+    ),
+    (
+        find_send_capability_violations,
+        {"cli": "LABEL = f'attachments'\n"},
+        "cli.py:1: string 'attachments' outside",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "GMAIL_SEND_ARG_MAP = {'attachments': 'attachments'}\n"},
+        "gmail_mcp.py:1: string 'attachments' outside the GMAIL_SEND_ARG_MAP values",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "GMAIL_SEND_ARG_MAP = dict(attachment='attachments')\n"},
+        "gmail_mcp.py:1: string 'attachments' outside",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "OTHER_MAP = {'attachment': 'attachments'}\n"},
+        "gmail_mcp.py:1: string 'attachments' outside",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "def f() -> None:\n"
+                "    GMAIL_SEND_ARG_MAP = {'attachment': 'attachments'}\n"
+            )
+        },
+        "gmail_mcp.py:2: string 'attachments' outside",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "GMAIL_SEND_ARG_MAP = {'attachment': 'attachments'}\n"
+                "def _schema_mismatch(schema: dict) -> object:\n"
+                "    return schema['properties']['attachments']\n"
+            )
+        },
+        "gmail_mcp.py:3: string 'attachments' outside",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_delivery": "def f(item: object) -> str:\n"
+            "    return attachment_name(item.title)\n"
+        },
+        "email_delivery.py:2: attachment_name(item.title): attachment_name argument "
+        "'item.title' does not end in '.meta.end_date'",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name(meta.end_date)\n"},
+        "argument 'meta.end_date' does not end in '.meta.end_date'",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name(rl.meta.end_date.replace(day=1))\n"},
+        "does not end in '.meta.end_date'",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name(end_date=rl.meta.start_date)\n"},
+        "argument 'rl.meta.start_date' does not end in",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name()\n"},
+        "attachment_name(): attachment_name must take exactly one argument",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name(rl.meta.end_date, rl.meta.end_date)\n"},
+        "attachment_name must take exactly one argument",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name(*rl.meta.end_date)\n"},
+        "attachment_name must take exactly one argument",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name(date=rl.meta.end_date)\n"},
+        "attachment_name must take exactly one argument",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "n = attachment_name(**{'end_date': rl.meta.end_date})\n"},
+        "attachment_name must take exactly one argument",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "cli": (
+                "from newsletter_digest.email_delivery import attachment_name as an\n"
+                "n = an(item.title)\n"
+            ),
+            "email_delivery": "",
+        },
+        "cli.py:2: an(item.title): attachment_name argument 'item.title'",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "cli": (
+                "from newsletter_digest import email_delivery\n"
+                "n = email_delivery.attachment_name(item.title)\n"
+            ),
+            "email_delivery": "",
+        },
+        "cli.py:2: email_delivery.attachment_name(item.title): attachment_name "
+        "argument",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "names = map(attachment_name, titles)\n"},
+        "email_delivery.py:1: attachment_name used as a value (attachment_name)",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_delivery": "attachment_name = str\n"},
+        "email_delivery.py:1: attachment_name used as a value",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "import tempfile\n"},
+        "gmail_mcp.py:1: gmail_mcp imports tempfile; only email_delivery may use "
+        "tempfile",
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "from tempfile import mkdtemp\n"},
+        "gmail_mcp.py:1: gmail_mcp imports tempfile; only email_delivery",
+    ),
+    (
+        find_send_capability_violations,
+        {"agent": "import tempfile\nd = tempfile.mkdtemp()\n"},
+        "agent.py:2: agent references tempfile; only email_delivery may use tempfile",
+    ),
+    (
+        find_send_capability_violations,
+        {"agent": "def f() -> str:\n    return tempfile.mkdtemp()\n"},
+        "agent.py:2: agent references tempfile",
+    ),
+    (
+        find_send_capability_violations,
+        {"cli": "import tempfile as tf\nd = tf.mkdtemp()\n"},
+        "cli.py:1: cli imports tempfile",
+    ),
+    (
+        find_send_capability_violations,
+        {"cli": "import shutil\nd = shutil.tempfile.mkdtemp()\n"},
+        "cli.py:2: cli references tempfile",
+    ),
+    (
+        find_send_capability_violations,
+        {"__init__": "from tempfile import TemporaryDirectory as T\n"},
+        "__init__.py:1: __init__ imports tempfile; only email_delivery",
+    ),
+    (
+        find_send_capability_violations,
+        {"email_render": "M = 'tempfile'\n"},
+        "email_render.py:1: string 'tempfile'; only email_delivery",
+    ),
+    (
+        find_send_capability_violations,
+        {"agent": "def f(m: object) -> object:\n    return m._stage_attachment\n"},
+        "agent.py:2: agent references _stage_attachment; the agent side never "
+        "touches the attachment helpers",
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "agent": (
+                "from newsletter_digest.email_delivery import _stage_attachment\n"
+            ),
+            "email_delivery": "",
+        },
+        "agent.py:1: agent references _stage_attachment",
+    ),
+    (
+        find_send_capability_violations,
+        {"tools": "from newsletter_digest.gmail_mcp import ATTACHMENT_NAME_RE\n"},
+        "tools.py:1: tools references ATTACHMENT_NAME_RE; the agent side never",
+    ),
+    (
+        find_send_capability_violations,
+        {"tools": "def f(m: object) -> object:\n    return m.attachment_name\n"},
+        "tools.py:2: tools references attachment_name",
+    ),
+    (
+        find_send_capability_violations,
+        {"prompts": "def f(m: object) -> object:\n    return m._write_private_file\n"},
+        "prompts.py:2: prompts references _write_private_file",
+    ),
+    (
+        find_send_capability_violations,
+        {"agent": "import x as _remove_staged\n"},
+        "agent.py:1: agent references _remove_staged",
+    ),
+    (
+        find_send_capability_violations,
+        {"prompts": "WORDS = ('attachments',)\n"},
+        "prompts.py:1: prompts holds string 'attachments'; the agent side never "
+        "names the attachment helpers or argument",
+    ),
+    (
+        find_send_capability_violations,
+        {"tools": "H = 'ATTACHMENT_DIR_PREFIX'\n"},
+        "tools.py:1: tools holds string 'ATTACHMENT_DIR_PREFIX'",
+    ),
+    (
+        find_send_capability_violations,
+        {"agent": "H = getattr(m, '_stage_attachment')\n"},
+        "agent.py:1: agent holds string '_stage_attachment'",
+    ),
     (
         find_gmail_parameters,
         {"email_delivery": "async def f(gmail_session: object) -> None: ...\n"},
@@ -3101,6 +3671,97 @@ ALLOWED_CASES: list[tuple[Checker, dict[str, str]]] = [
         },
     ),
     (find_send_capability_violations, {"gmail_mcp": "", "email_delivery": ""}),
+    # ---- Email HTML attachment (EA-2, T090): every sub-rule allows both email trees
+    *(
+        (checker, dict(tree))
+        for checker in ATTACHMENT_SUB_RULES
+        for tree in (STUB_EMAIL_TREE, FINAL_EMAIL_TREE)
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "gmail_mcp": (
+                "GMAIL_SEND_ARG_MAP: dict[str, str] = {\n"
+                "    'html_body': 'htmlBody',\n"
+                "    'attachment': 'attachments',\n"
+                "}\n"
+                "def _schema_mismatch(schema: dict) -> str:\n"
+                "    listed = schema['properties'][GMAIL_SEND_ARG_MAP['attachment']]\n"
+                "    if listed.get('type') != 'array':\n"
+                "        return 'wrong type: attachments'\n"
+                "    return 'missing: attachments'\n"
+            )
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {"gmail_mcp": "GMAIL_SEND_ARG_MAP = {'attachment': 'attachments'}\n"},
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_delivery": (
+                "def build(reading_list: object) -> str:\n"
+                "    return attachment_name(reading_list.meta.end_date)\n"
+                "def build_keyword(rl: object) -> str:\n"
+                "    return attachment_name(end_date=rl.meta.end_date)\n"
+            )
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_delivery": (
+                "def attachment_name(end_date: object) -> str:\n"
+                "    return f'reading-list-{end_date}.html'\n"
+            )
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "email_delivery": (
+                "import os\n"
+                "import tempfile\n"
+                "from tempfile import mkdtemp\n"
+                "from newsletter_digest.gmail_mcp import (\n"
+                "    ATTACHMENT_DIR_PREFIX,\n"
+                "    ATTACHMENT_NAME_RE,\n"
+                ")\n"
+                "def stage(make_temp_dir=tempfile.mkdtemp) -> str:\n"
+                "    return make_temp_dir(prefix=ATTACHMENT_DIR_PREFIX) or mkdtemp()\n"
+            ),
+            "gmail_mcp": "",
+        },
+    ),
+    (
+        find_imported_name_violations,
+        {
+            "email_delivery": (
+                "from newsletter_digest.gmail_mcp import ATTACHMENT_DIR_PREFIX, "
+                "ATTACHMENT_NAME_RE\n"
+            ),
+            "gmail_mcp": "",
+        },
+    ),
+    (
+        find_send_capability_violations,
+        {
+            "agent": (
+                '"""attachments"""\n'
+                "# never tempfile, attachment_name or _stage_attachment here\n"
+                "def f(attachment: object, attachment_names: list[str]) -> object:\n"
+                '    """Never calls tempfile.mkdtemp or attachment_name."""\n'
+                "    return (attachment, attachment_names, 'attachment')\n"
+            ),
+            "prompts": "TEXT = 'Do not mention attachments or tempfile files.'\n",
+            "cli": (
+                "SENT = 'Email: sent to 1 recipient(s) with 1 attachment (id x).'\n"
+                "HELP = 'The same HTML is attached as reading-list-YYYY-MM-DD.html.'\n"
+            ),
+            "tools": "def f(m: object) -> object:\n    return m.attachment_names\n",
+        },
+    ),
 ]
 
 
@@ -3114,6 +3775,133 @@ def test_checker_allows_permitted_source(
 ) -> None:
     violations = checker(make_modules(**sources))
     assert violations == [], violations
+
+
+# ------------------------------- attachment rules on the final tree shape (T090)
+
+
+class TreeMutant(NamedTuple):
+    """One anchored text change to a module of `FINAL_EMAIL_TREE` (synthetic)."""
+
+    module: str
+    anchor: str
+    replacement: str
+    expected: str
+
+
+_FINAL_ED_NAME = "attachment_name(reading_list.meta.end_date)"
+_FINAL_ED_FACTORY = "TempDirFactory = Callable[..., str]"
+_FINAL_GMAIL_IMPORT = "import shutil\n"
+_FINAL_GMAIL_MAP_ENTRY = '"attachment": "attachments",'
+_FINAL_GMAIL_LOOKUP = 'GMAIL_SEND_ARG_MAP["attachment"]'
+_FINAL_AGENT = FINAL_EMAIL_TREE["agent"]
+
+FINAL_TREE_ATTACHMENT_MUTANTS: dict[str, TreeMutant] = {
+    "email-delivery-builds-attachments": TreeMutant(
+        "email_delivery",
+        _FINAL_ED_FACTORY,
+        _FINAL_ED_FACTORY + "\n        EXTRA = {'attachments': []}",
+        "string 'attachments' outside the GMAIL_SEND_ARG_MAP values",
+    ),
+    "name-from-item-title": TreeMutant(
+        "email_delivery",
+        _FINAL_ED_NAME,
+        "attachment_name(reading_list.items[0].title)",
+        "argument 'reading_list.items[0].title' does not end in '.meta.end_date'",
+    ),
+    "name-from-html-path": TreeMutant(
+        "email_delivery",
+        _FINAL_ED_NAME,
+        "attachment_name(html_path.stem)",
+        "argument 'html_path.stem' does not end in",
+    ),
+    "gmail-imports-tempfile": TreeMutant(
+        "gmail_mcp",
+        _FINAL_GMAIL_IMPORT,
+        _FINAL_GMAIL_IMPORT + "        import tempfile\n",
+        "gmail_mcp imports tempfile; only email_delivery may use tempfile",
+    ),
+    "gmail-map-key-is-attachments": TreeMutant(
+        "gmail_mcp",
+        _FINAL_GMAIL_MAP_ENTRY,
+        '"attachments": "attachments",',
+        "string 'attachments' outside the GMAIL_SEND_ARG_MAP values",
+    ),
+    "gmail-schema-literal": TreeMutant(
+        "gmail_mcp",
+        _FINAL_GMAIL_LOOKUP,
+        '"attachments"',
+        "string 'attachments' outside the GMAIL_SEND_ARG_MAP values",
+    ),
+    "agent-calls-mkdtemp": TreeMutant(
+        "agent",
+        _FINAL_AGENT,
+        _FINAL_AGENT + "import tempfile\nSCRATCH = tempfile.mkdtemp()\n",
+        "agent references tempfile",
+    ),
+    "agent-stages-attachment": TreeMutant(
+        "agent",
+        _FINAL_AGENT,
+        _FINAL_AGENT
+        + "from newsletter_digest.email_delivery import _stage_attachment\n",
+        "agent references _stage_attachment",
+    ),
+    "prompts-holds-attachments": TreeMutant(
+        "prompts",
+        FINAL_EMAIL_TREE["prompts"],
+        FINAL_EMAIL_TREE["prompts"] + "ARGUMENT = 'attachments'\n",
+        "prompts holds string 'attachments'",
+    ),
+    "tools-imports-name-re": TreeMutant(
+        "tools",
+        FINAL_EMAIL_TREE["tools"],
+        "from newsletter_digest.gmail_mcp import ATTACHMENT_NAME_RE\n",
+        "tools imports ATTACHMENT_NAME_RE from gmail_mcp",
+    ),
+}
+"""EA-2 mutants of the synthetic final tree; each is reported by the extended rule."""
+
+
+@pytest.mark.parametrize("mutant_id", sorted(FINAL_TREE_ATTACHMENT_MUTANTS))
+def test_attachment_rule_fails_on_mutated_final_tree(mutant_id: str) -> None:
+    mutant = FINAL_TREE_ATTACHMENT_MUTANTS[mutant_id]
+    source = FINAL_EMAIL_TREE[mutant.module]
+    assert source.count(mutant.anchor) == 1, mutant.anchor
+    tree = {
+        **FINAL_EMAIL_TREE,
+        mutant.module: source.replace(mutant.anchor, mutant.replacement, 1),
+    }
+    assert find_send_capability_violations(make_modules(**FINAL_EMAIL_TREE)) == []
+    violations = find_send_capability_violations(make_modules(**tree))
+    reported = [v for v in violations if v.startswith(f"{mutant.module}.py:")]
+    assert any(mutant.expected in v for v in reported), violations
+
+
+@pytest.mark.parametrize("checker", ATTACHMENT_SUB_RULES, ids=lambda c: c.__name__)
+def test_package_source_obeys_attachment_sub_rule(
+    package: dict[str, SourceModule], checker: Checker
+) -> None:
+    violations = checker(package)
+    assert violations == [], _report(violations)
+
+
+def test_detector_sees_the_send_arg_map_values(
+    package: dict[str, SourceModule],
+) -> None:
+    """The (h)(1) allowed sites are found on the real tree (stub-safe: 5 or 6)."""
+    gmail = package[GMAIL_MODULE]
+    allowed = _send_arg_map_value_ids(gmail)
+    values = [
+        node
+        for node in ast.walk(gmail.tree)
+        if isinstance(node, ast.Constant) and id(node) in allowed
+    ]
+    assert len(values) in (5, 6), [v.value for v in values]
+    assert {"to", "subject", "body", "htmlBody", "mimeType"} <= {
+        v.value for v in values
+    }
+    final = _send_arg_map_value_ids(make_modules(**FINAL_EMAIL_TREE)[GMAIL_MODULE])
+    assert len(final) == 6
 
 
 def test_relative_imports_resolve_to_the_package() -> None:

@@ -5281,3 +5281,104 @@ snapshots not recorded, utf-8 instead of ascii, empty list emulated, text-mode w
 Removing only one of the two resolves (base or result) is an equivalent mutant (the
 other one still resolves); removing both is killed by the relative- and symlinked-base
 tests.
+
+## T090 — Architecture guard rules first (attachment): SEND_NAMES, tempfile owner, 'attachments' literal, attachment_name argument, extended sub-rule (f)
+
+Only `tests/test_architecture.py` changed (plus this section). All new rules are
+negative and stub-safe: they pass on today's five-key tree and on the six-key synthetic
+`FINAL_EMAIL_TREE`. Positive (g), (h)(2), the `RealTreeMutant`s and the kill matrix are
+left to T097.
+
+What was added:
+- `SEND_NAMES` += `ATTACHMENT_NAME_RE`, `ATTACHMENT_DIR_PREFIX` (sub-rule (a) and
+  `ONLY_IMPORTED_NAMES[(email_delivery, gmail_mcp)]`, which is the same object).
+- New constants: `SEND_ARG_MAP`, `ATTACHMENTS_ARGUMENT`, `ATTACHMENT_NAME_HELPER`,
+  `ATTACHMENT_NAME_PARAMETER` (`end_date`), `ATTACHMENT_NAME_ARGUMENT_SUFFIX`,
+  `ATTACHMENT_HELPER_NAMES` (one constant, the EA-2 names, for T097 to align with
+  T092's real helper names), `TEMPFILE_MODULE`, `TEMPFILE_OWNER`.
+- New sub-rules, called from `find_send_capability_violations` (docstring and module
+  docstring item 9 updated): `_agent_attachment_violations` ((f), extended),
+  `_attachment_literal_violations` ((h)(1), with helper `_send_arg_map_value_ids`),
+  `_attachment_name_call_violations` ((h)(3), helpers `_attachment_name_aliases`,
+  `_attachment_name_problem`), `_tempfile_violations` ((i)). `ATTACHMENT_SUB_RULES`
+  lists the four.
+- Tests: 43 new `VIOLATION_CASES`, 15 new `ALLOWED_CASES` (each sub-rule × stub and
+  final tree, plus the listed allowed shapes), 10 synthetic final-tree mutants
+  (`FINAL_TREE_ATTACHMENT_MUTANTS`, `test_attachment_rule_fails_on_mutated_final_tree`),
+  a real-tree test per sub-rule (`test_package_source_obeys_attachment_sub_rule`) and
+  `test_detector_sees_the_send_arg_map_values` (the (h)(1) allowed sites are found on
+  the real map: 5 values today, 6 after T092; 6 on the final tree).
+
+Decisions not covered by the spec:
+- **(f) extended as a separate function** (`_agent_attachment_violations`), not by
+  editing `_agent_email_import_violations`; that keeps the pre-existing function and its
+  T083 mutants untouched. It flags the helper names as names, attributes, imported names
+  and asnames, and as exactly-equal code strings (like sub-rule (a) does for send names,
+  so `getattr(m, "_stage_attachment")` is caught), plus the string `"attachments"`.
+  `"attachments"` in the agent side is therefore reported twice ((f) and (h)(1)); the
+  messages differ, which helps the kill matrix.
+- **(h)(1)** allows only string values of a module-level `GMAIL_SEND_ARG_MAP` dict
+  literal (`Assign` or `AnnAssign`). Keys, a `dict(...)` call, a map inside a function,
+  other dicts and `schema["properties"]["attachments"]` are violations. An f-string
+  `f"attachments"` is caught (its `Constant` part). Splitting the literal
+  (`"attach" + "ments"`) is not caught; out of scope for an AST rule.
+- **(h)(3)** accepts one positional argument or one `end_date=` keyword; rejects zero or
+  two arguments, `*args`, `**kwargs` and other keyword names. The text check uses
+  `ast.unparse(arg).endswith(".meta.end_date")`, so `meta.end_date` (no leading dot) and
+  `rl.meta.end_date.replace(day=1)` fail. Calls are found by plain name, by import
+  alias (`import ... attachment_name as an`) and by attribute
+  (`email_delivery.attachment_name(...)`). **Addition:** any other use of the name
+  (`map(attachment_name, ...)`, `attachment_name = str`) is reported as "used as a
+  value", because passing or rebinding the helper would hide a call with another
+  argument. Consequence for T092: a local variable must not be named `attachment_name`.
+- **(i)** reports, outside `email_delivery`: any import whose root is `tempfile`, any
+  name/attribute/imported name `tempfile` (so `tempfile.mkdtemp()` without an import and
+  `shutil.tempfile` are caught), and the exact code string `"tempfile"`. Docstrings and
+  comments are fine.
+- **`STUB_EMAIL_TREE` is unchanged.** EA-2 and the task text say the stub and final
+  trees' `email_delivery` stage a file. The stub's `email_delivery` is the T068
+  docstring-only stub; it has no `OutgoingEmail` call to pass `attachment=` to, and
+  `POSITIVE_EMAIL_CASES` rely on it failing every positive check. It already satisfies
+  every new negative rule (zero `attachment_name` calls, no literal, no tempfile), and
+  `ALLOWED_CASES` now runs each new sub-rule on it explicitly. Only `FINAL_EMAIL_TREE`
+  (and `_GMAIL_SEND_SIDE`) got the staging/six-key shape. Deviation from the literal
+  EA-2 table row; recorded here for T097/T100.
+- `_GMAIL_SEND_SIDE` gained a small `_attachment_problem` and a `_schema_mismatch` that
+  reads the name via `GMAIL_SEND_ARG_MAP["attachment"]` (AP-5 plan addition) and holds
+  the longer string `"wrong type: attachments"`, so the final tree proves those shapes
+  are allowed. The final `email_delivery` imports `ATTACHMENT_DIR_PREFIX` (and uses it,
+  so the T083 "imported but never used" positive check stays green), defines
+  `attachment_name`, `_write_private_file`, `_stage_attachment`, `_remove_staged`, the
+  `make_temp_dir: TempDirFactory = tempfile.mkdtemp` seam and a `try/finally` around
+  the staging and the `sender` call. It is parsed only, never run.
+
+Pre-existing hunks modified (AP-6 item 2; `git diff 118f707 -- tests/test_architecture.py`):
+1. Module docstring item 9: last sentence extended (attachment rules).
+2. `SEND_NAMES`: two names appended.
+3. `find_send_capability_violations`: docstring (f) sentence extended and (h)(1),
+   (h)(3), (i) added; four calls appended to the returned list.
+4. `_GMAIL_SEND_SIDE`: `import re`, `from pathlib import Path`, the sixth map pair,
+   `ATTACHMENT_NAME_RE`, `ATTACHMENT_DIR_PREFIX`, `attachment: Path`, the
+   `_attachment_problem` call and the `"attachment"` value in `build_send_arguments`,
+   new `_attachment_problem` and `_schema_mismatch`.
+5. `FINAL_EMAIL_TREE["email_delivery"]`: docstring, stdlib imports, the
+   `ATTACHMENT_DIR_PREFIX` import, the staging helpers and the staged
+   `OutgoingEmail(..., attachment=attachment)` in a `try/finally` (replaces the
+   four-argument `OutgoingEmail` line); the tree's docstring gained one paragraph.
+Everything else is additive (new constants after `NO_EMAIL_IMPORTERS`, new functions
+after `_agent_email_import_violations`, `ATTACHMENT_SUB_RULES` after `EMAIL_RULES`,
+cases appended inside `VIOLATION_CASES`/`ALLOWED_CASES`, new tests after
+`test_checker_allows_permitted_source`). No existing case, checker body or mutant was
+changed.
+
+Verification:
+- `tests/test_architecture.py`: 399 -> 472 passed. Full suite: 5060 passed,
+  2 xfailed, 2 deselected (includes T091's new fixture tests, committed in 83520b7).
+- Scratch mutation probe (`-p` plugin replacing one sub-rule with `lambda m: []`, one
+  process per rule): `_agent_attachment_violations` -> 11 failures,
+  `_attachment_literal_violations` -> 11, `_attachment_name_call_violations` -> 15,
+  `_tempfile_violations` -> 10; dropping the two `SEND_NAMES` entries -> 7 failures
+  (four (a) cases, two allowed cases, one final-tree mutant). Every new violation case
+  and final-tree mutant is killed by the rule it targets.
+- `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyrefly check`
+  (and `pyrefly check tests/test_architecture.py`): clean.

@@ -525,3 +525,13 @@
 - (T091) Two redundant guards (resolving both the base dir and the returned path) make
   each single-removal mutant equivalent; mutate both together to show the tests pin the
   property, and record the single ones as equivalent rather than adding fake tests.
+- (T090) A mutation probe that calls `pytest.main(..., plugins=[...])` several times in
+  one process keeps the patched test module in `sys.modules`, so the failure counts add
+  up across rules (11, 22, 37, 47 instead of 11, 11, 15, 10). Run one process per
+  mutant. Also: when matching a helper by import alias, compare `ast.Attribute.attr`
+  with the real helper name only, never with the local aliases (`x.an(...)` is not the
+  helper).
+- (T090) EA-2's "STUB_EMAIL_TREE and FINAL_EMAIL_TREE's email_delivery stage a file"
+  cannot apply to the docstring-only stub: `POSITIVE_EMAIL_CASES` need it to fail every
+  positive check. Keep the stub unchanged and run each new negative sub-rule on it
+  explicitly in `ALLOWED_CASES` (implementation-notes T090).
