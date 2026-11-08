@@ -33,6 +33,7 @@ packages = ["src/newsletter_digest"]
 
 [tool.ruff]
 line-length = 88
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

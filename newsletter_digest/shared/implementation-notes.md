@@ -59,6 +59,18 @@
 | V37 | Measured bytes per item on `tests/email_fixture.py` (newsletter-only, fetched with 5 key points, CJK) vs the ED-10 estimate; the unbudgeted 300-item size; renders needed by the binary search | T073 (re-measured in T078) | `tests/email_fixture.py` at dadcc2c; template and renderer of the T073 commit | Scratch script (synthetic fixtures only): per-item bytes = (render of `make_list(40)` minus `make_list(20)`) / 20 for one item kind, ASCII-encoded before wrapping; `render_email_html` wrapped to count renders per `render_email` call | Per item: newsletter-only 1,420 B (ED-10 estimate 1.0-1.3 KB; the fixture is at the model caps: 300-char summary, 200-char reason, 150-300-char URLs whose `&` become `&amp;` in the href); compact newsletter-only 1,119 B; fetched with 5 key points 3,638 B (estimate about 3.5 KB); CJK newsletter-only 5,083 B; CJK fetched 20,678 B; empty-list document 1,710 B. So about 65 plain items fit in 95,000 bytes (estimate 70-90). `size_300` unbudgeted 464,860 B; budgeted 94,592 B, 41 shown (10 must + 31 worth), 259 omitted (all 200 skim, then 59 worth), 9 renders (1 full + 8 search; estimate about 10). `unranked_300` 94,497 B, 52 shown, 9 renders. 100 items (10/40/50, 10 fetched): 94,682 B, 48 shown, 8 renders, 66 ms. `must_heavy`: 2 renders, compact, `over_budget=True` at 245,360 B. `cjk_heavy` (60): compact, 53,207 B, 5 shown. **T078 re-measure** (same method, `tests/email_fixture.py` at dadcc2c, renderer at 6c15e04, `html_name=reading-list-2026-11-04.html`): identical per-item bytes (newsletter-only 1,420 / compact 1,119; fetched 3,638 / compact 2,019; CJK 5,083 / compact 3,509; CJK fetched 20,678 / compact 10,141; empty document 1,710). `size_300`: unbudgeted 464,860 B (asserted > 95,000 by measurement in `test_size_300`), final 94,592 B, 41 shown, 259 omitted, 9 renders, 108 ms; `unranked_300` 94,497 B, 52 shown, 9 renders; 100 items 94,682 B, 48 shown, 8 renders, 56 ms (NFR-E6 test asserts < 1 s); `must_heavy` 2 renders, compact + `over_budget` at 245,360 B; `cjk_heavy` (60) compact 53,207 B, 5 shown, 8 renders; golden (`standard_list`) 24,299 B, 1 render. |
 | V38 | click 8.5: `--email` `is_flag` without `envvar` ignores env; three `anyio.run` calls in one process (`run_digest`, Telegram, email); `ctx.exit(3)` after both channels | T075 | click 8.5.0, anyio 4.15.1 (uv.lock) | Scratch pytest smoke `t075_smoke_test.py` (scratchpad, offline: sockets blocked, `gmail_mcp.shutil.which` patched, `gmail_mcp._default_send_client` = T072 fake factory, Telegram on `httpx.MockTransport` via `delivery.deliver_reading_list` partial, `cli.run_digest` = `FakeRunDigest`), CliRunner in-process; `cli.digest.make_context(...).params` and the option's `.envvar` | Confirmed. The `--email` option has `envvar is None`, the command sets no `auto_envvar_prefix`, so no env value can turn it on; the resolved default is `False`. One process runs `anyio.run(run_digest)`, the Telegram `anyio.run` and the email `anyio.run` in sequence without error (`--telegram --email`, all four success/failure combinations): both channels are attempted every time, the Telegram line precedes the `Email:` line, stdout is the HTML plus the PDF path, exit 0 only when both succeed, else 3 from the single merged `ctx.exit(3)` after both. Caveat: the email `anyio.run` was exercised with the fake send client only; the real-session nesting defect T077 found in T071 (V33) is not visible through fakes. |
 
+## Library verification (Email attachment, 2026-11-08)
+
+| ID | Item | Owner task | Version | How checked | Result/consequence |
+|---|---|---|---|---|---|
+| V39 | No new dependency: `os`, `stat`, `tempfile`, `pathlib` are stdlib; `uv lock --check` passes; `pyproject.toml`/`uv.lock` unchanged | T089 | CPython 3.13.5 stdlib; uv.lock (114 packages) | `sys.stdlib_module_names` membership for the four modules; `uv lock --check`; `git status` on uv.lock; no `uv add` run | Confirmed. All four are in `sys.stdlib_module_names`; `uv lock --check` passes (Resolved 114 packages); uv.lock is unchanged. The only pyproject.toml change is the user-approved ruff setting `extend-exclude = ["*.md"]` under `[tool.ruff]` (no dependency change; see the T089 section). |
+| V40 | `tempfile.mkdtemp(prefix=...)` honours `TMPDIR` / `tempfile.tempdir` at call time, creates 0700 under the current umask, returns an absolute path; `Path.resolve(strict=True)` of it equals itself under `/tmp` on WSL | T092 |  |  | TODO |
+| V41 | `os.O_NOFOLLOW`, `O_CLOEXEC` exist on Linux/WSL; `O_CREAT|O_EXCL` refuses a planted symlink (`FileExistsError`) and an existing file; `fchmod` 0600 survives umask 077 and 022 (scratch probe under the scratchpad) | T092 |  |  | TODO |
+| V42 | Flag-off `sys.modules` after `import newsletter_digest.cli` (empty cwd, `uv run --project`): `stat`/`pathlib`/`os` already present at interpreter start; whether `tempfile` is present (record, assert only what is true); no `newsletter_digest.email_*` | T096 |  |  | TODO |
+| V43 | The local FastMCP stdio child under mcp's minimal environment reads a 0600 file in a 0700 directory; its SHA-256 equals `sha256(htmlBody)` (no npx, no Gmail) | T094 |  |  | TODO |
+| V44 | Error-text markers for "server could not read the attachment" (`file does not exist`, `no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email with`): verified `File does not exist: <path>` from source; Node `EACCES`/`EISDIR` texts are general knowledge, not run; confirm on the manual send | T092 (re-checked by T099) |  |  | TODO |
+| V45 | `estimated_message_bytes(95_000, t)` is 2.4-2.6 x the HTML; stdlib `quopri` + `base64` of the synthetic 300-item email HTML agree within 10% | T095 |  |  | TODO |
+
 ## Task notes
 
 ### T001 — Scaffold
@@ -5148,3 +5160,27 @@ never read or touched.
 - **Tradeoff.** `task_list.json` had uncommitted status updates (T068-T087 `done`) from
   earlier tasks. They are committed with T088 because the task requires the file in this
   commit; T088 is the only status this task set.
+
+## T089 — Scaffold (email attachment): identity and baseline pre-check, no-new-dependency check, V39-V45 table
+
+- **Pre-check passed.** `git diff --quiet 77b6728 -- newsletter_digest/src
+  newsletter_digest/tests newsletter_digest/README.md` succeeds (HEAD 8ec7f19).
+  **Baseline: `uv run pytest -q` gives 4933 passed, 2 deselected, 2 xfailed (81 s).**
+  `uv run pytest tests/test_flag_off_identity.py tests/test_agent.py -q` gives 108 passed.
+- **Temp baseline (for T101).** `tempfile.gettempdir()` is `/tmp`; entries named
+  `newsletter-digest-email-*`: **0** (names only listed, no contents read).
+- **V39.** Filled (see the table). `uv lock --check` passes; no `uv add`; uv.lock unchanged.
+- **V40-V45.** Inserted with Result `TODO`, exactly as AP-7; owners fill them.
+- **User-approved addition: ruff config.** Added `extend-exclude = ["*.md"]` under
+  `[tool.ruff]` in `pyproject.toml` (one added line, nothing else). After it:
+  `uv lock --check` passes (uv.lock unchanged), `uv run ruff format --check .` reports
+  64 files already formatted (the whole repo, markdown no longer checked),
+  `uv run ruff check .` passes, `uv run pyrefly check` reports 0 errors. This is a
+  deviation from the plan's "pyproject.toml unchanged" statement (AP-2, EA-13), made on
+  the user's instruction; it changes ruff config only, not dependencies. The T089 commit
+  therefore stages `pyproject.toml` and this notes file.
+- **Decision (staging).** `shared/task_list.json` is not staged here (the task says
+  stage only own files); its T089 status change is left to the caller's commit.
+- **Tradeoff.** `extend-exclude = ["*.md"]` also stops ruff from formatting Python code
+  blocks inside Markdown; accepted, the drift in `shared/designs.md` was the reason.
+- No file under `src/` or `tests/` was created or modified.
