@@ -300,3 +300,231 @@ The success line, the FAILED and OUTCOME UNKNOWN lines, the size-budget suffixes
 the large-window run and the ED-21 questions (steps 3, 4 and 6 above) exist only in this summary
 and in the T087 notes. Not stated in the README: Ctrl-C during a send exits 1 although the
 outcome is unknown (T085 N-2).
+
+## Email HTML attachment (T089-T102), 2026-11-08
+
+Status: ALL_DONE (T089-T102 done). `--email` now also attaches the same compact email HTML,
+named `reading-list-YYYY-MM-DD.html`, to the message. The file is a private copy (directory
+0700, file 0600) in a fresh `newsletter-digest-email-*` directory under the system temp
+location, removed after the send whatever the outcome. The `send_email` call carries six keys
+(`attachments` added); the agent side is unchanged and never sees the send tool. With the
+flag off nothing email-related is imported and no temp file is made. The amendment ran on
+2026-11-08 (T099/T100 reviews, T101 gate). All commits are local and not pushed. The one
+step still open is the user's manual end-to-end send (acceptance 43, below).
+
+### Tasks
+| ID | Title | Assigned to | Status | Commit |
+|----|-------|-------------|--------|--------|
+| T089 | Scaffold: identity and baseline pre-check, no-new-dependency check, V39-V45 table, ruff `extend-exclude` | project_structure | done | 118f707 |
+| T090 | Architecture guard rules first (SEND_NAMES, tempfile owner, `attachments` literal, `attachment_name` argument) | python_test | done | 70119d5, 0cdaa68 |
+| T091 | Shared fixtures (`stage_private_copy`, `AttachmentSnapshot`, `FakeSendSession` attachment emulation) | python_test | done | 0928349 |
+| T092 | Atomic switch: six-key map, required `OutgoingEmail.attachment`, re-check, schema type check, staging, cleanup, failure mapping, legacy test migration | python_coder | done | 93b556a |
+| T093 | cli.py: `with 1 attachment` success line, `--email` help sentence, success-line test constants | python_coder | done | 85f4ec3 |
+| T094 | gmail_mcp send tests (six keys, path-safety, schema and failure matrices, child-process read) | python_test | done | d0de61f |
+| T095 | email_delivery tests (byte identity, modes, cleanup matrix, preparation failures, logs, size estimate) | python_test | done | 94b94f6 |
+| T096 | CLI and flag-off tests (six keys end to end, TMPDIR left empty, out dir untouched, subprocess checks) | python_test | done | 433b46a |
+| T097 | Architecture positive rules (six-pair map, single `OutgoingEmail` site, real-tree mutants) | python_test | done | 7ddfbe7 |
+| T098 | README: attachment behaviour, filename, privacy, security statement, failure meanings | documentation | done | 519ac28 |
+| T099 | Backend and security review | backend_reviewer | done | 7494dbc |
+| T100 | Architecture review | architecture_reviewer | done | 9434f2b |
+| T101 | Final verification gate | python_test | done | 4e5077c |
+| T102 | Execution summary and amendment wrap-up | documentation | done | this section's commit |
+
+### Key commits
+- 8ec7f19 docs: email attachment plan T089-T102 and approvals (PRD approval record)
+- 118f707 scaffold; 70119d5 and 0928349 guard rules and fixtures first
+- 93b556a the atomic switch (`gmail_mcp.py`, `email_delivery.py`, legacy test hunks);
+  85f4ec3 cli success line and help sentence; 519ac28 README
+- d0de61f, 94b94f6, 433b46a, 7ddfbe7 tests; 9434f2b and 7494dbc reviews; 4e5077c final gate
+- `chore(newsletter_digest): task list status ...` commits (5d1daf7, 1119a15, e9194ee, 2a953d4,
+  33dfdf8) only record task statuses.
+
+### Review_feedback rounds
+None. T099 and T100 were both APPROVED with no CRITICAL or MAJOR finding, and T101 found no
+defect, so no task was reopened.
+
+### Review verdicts
+- **T099 backend + security: APPROVED.** 0 critical, 0 major, 3 minor, 2 info. FR-073 to FR-082,
+  NFR-E9 to NFR-E12 all assessed Met. Mutation probes: the listed mutants M1-M12 (path checks,
+  size and byte re-check, cleanup on every path, O_EXCL, fchmod, rmdir-only cleanup, the
+  attachment row before the permission row) were each killed by a named test. V44 was
+  re-checked against the server source. Findings are under "Open items".
+- **T100 architecture: APPROVED.** 0 blocking; F1-F2 LOW, F3-F6 INFO, plus design-doc
+  corrections C1-C9. Placement (DA1), import graph and layer order, the 25 AST checkers and
+  their self-tests, flag-off, the `make_temp_dir` seam, the unchanged read half of
+  `gmail_mcp.py` and the test-scope discipline all hold. No project edge was added or removed.
+  Scratch probes with 12 mutants showed (h)(2) does not pin `_stage_attachment`'s arguments (F1).
+
+### Final verification (T101, HEAD 2a953d4, offline)
+- `uv sync` and `uv lock --check`: ok (114 packages; `uv.lock` unchanged since 77b6728).
+- `uv run pytest -q`: **5373 passed, 2 deselected (integration), 2 xfailed, 0 failed**
+  (baseline at T089: 4933 passed). The 2 xfails are the known T053 limitations. Same counts on a
+  repeat run.
+- Focused 10-file subset (identity, architecture, send, delivery, cli email, fixture, agent,
+  gmail_mcp, render, cli telegram): **1790 passed**. `tests/test_architecture.py` alone: 519 passed.
+- `uv run ruff format --check .` (whole repo, as amended): 64 files clean. `ruff check .`: clean.
+  `uv run pyrefly check`: 0 errors (18 suppressed; the one new comment is a justified test-only
+  write to a frozen dataclass inside `pytest.raises`, no suppression in `src/`).
+- `newsletter-digest --help` from an empty cwd shows the new sentence on `--email`.
+- `newsletter-digest-email-*` entries in the system temp dir: 0 before, 0 after, equal to the
+  T089 baseline.
+- Smoke with fakes (5 modes, 131 checks, all pass): flag off (HTML byte-equal to the golden, no
+  email module, temp root empty); `--email` success (exactly six keys, attachment 0600 in 0700,
+  bytes equal to `htmlBody`, `with 1 attachment` line, temp root empty afterwards, out dir holds
+  only the HTML); same with the flag-off list (saved page still golden); `File does not exist`
+  reply (exit 3, fixed reason, no temp path on stderr, HTML kept, temp root empty);
+  `--email --telegram` (both lines, PDF only on Telegram).
+- Diff scope against 77b6728: `src/` only `cli.py` (+4/-3), `email_delivery.py`, `gmail_mcp.py`;
+  `tests/` only `email_fixture.py`, `test_architecture.py`, `test_cli_email.py`,
+  `test_email_delivery.py`, `test_email_fixture.py`, `test_flag_off_identity.py`,
+  `test_gmail_mcp_send.py`, every removed line in an AP-6 item 2 hunk; goldens, templates,
+  `config.py`, `models.py`, `render.py`, `email_render.py`, `agent.py`, `tools.py`, `prompts.py`,
+  `delivery.py`, `pdf.py`, `telegram.py`, `conftest.py`, `test_agent.py`, `test_gmail_mcp.py`,
+  Telegram tests, `.env.example`, `uv.lock` and `shared/designs.md` unchanged. No `.env`, `out/`,
+  credential or token path is tracked; address-shaped strings use reserved domains only.
+
+### Deviations from the design and plan (collected from the T089-T101 notes)
+- **`pyproject.toml` changed (user-approved, 2026-11-08):** one added line,
+  `extend-exclude = ["*.md"]` under `[tool.ruff]` (T089). The plan (AP-2, EA-13) said
+  `pyproject.toml` stays unchanged. It is a ruff-config change only, no dependency. It makes
+  `ruff format --check .` clean on the whole repo again (it had failed only on `shared/designs.md`
+  since fa28154) and resolves the "designs.md ruff-format note" of the 2026-11-04 section. The
+  tradeoff: ruff no longer formats Python blocks inside Markdown.
+- **`ValueError` joins `OSError`** in EA-4's "could not be checked" mapping: an embedded NUL passes
+  the ASCII check and then raises `ValueError` from `realpath`/`lstat` (T092; T100 C3).
+- **Check order:** the directory prefix is tested before `lstat(parent)` (T092). A full-width-digit
+  file name is refused by check 2 ("not a plain absolute path") before check 4 (T092, T094).
+- **A 0755 factory directory is not a preparation failure** by itself: staging chmods it to 0700
+  first. It fails only when the chmod has no effect (T095; T100 C4).
+- **Helper names:** none renamed. EA-2/AP-5 names (`attachment_name`, `_stage_attachment`,
+  `_write_private_file`, `_remove_staged`) exist as designed. Extra private helpers:
+  `_send_once`, `_owner_only` (duplicated in both modules, F3), `_attachment_problem`,
+  `_attachment_file_problem`, `_is_string_array`. Test renames: `..._exact_five_keys` became
+  `..._exact_six_keys` (T093).
+- **Legacy test hunks beyond FR-084's list (DA8)**, each recorded in its task's notes and none
+  loosening an assertion (T100 F6): the five-to-six-key constant flip and `FakeSendSession.call_tool`
+  docstring in `email_fixture.py`; `SentCall`/`RecordingSender`, the post-delivery
+  `build_send_arguments` call, the `FakeSend` docstring and `test_cancellation_is_not_swallowed` in
+  `test_email_delivery.py`; the `sent_line` helper in `test_cli_email.py`; `EMAIL_SENT_LINE` in
+  `test_flag_off_identity.py`; module docstring, `message` fixture, five-to-six-key test, the
+  `new-required` schema case and `attachments: list[str] = []` in the local FastMCP server of
+  `test_gmail_mcp_send.py`; seven docstring lines, `find_send_capability_violations` and
+  `FINAL_EMAIL_TREE` in `test_architecture.py`.
+- **Rule placement:** rules (g) and (h)(2) are "exactly one" rules and live in the positive
+  `find_missing_attachment_wiring`; only (f), (h)(1), (h)(3) and (i) are in
+  `find_send_capability_violations` (T097; T100 C2). `STUB_EMAIL_TREE` stays docstring-only (C1).
+- **V42:** `tempfile` is loaded in flag-off runs by python-dotenv, and `pathlib` is not loaded at
+  interpreter start, so the flag-off proofs assert effects (no email module, nothing under an empty
+  `TMPDIR`), not module absence (T096; T100 C6).
+- **Non-ASCII `TMPDIR`** surfaces as the app's own check
+  `the attachment path is not a plain absolute path`, not as `could not prepare the attachment`;
+  the README says so (T098).
+- **V43 test:** the local FastMCP child writes the SHA-256 to `<calls file>.attachments.jsonl`
+  instead of the calls file (T094).
+- **T101 smoke:** the private temp root is passed as `T101_TMP` and set inside the script,
+  because `uv run` writes its own lock file into `TMPDIR` first; an extra `email_golden` mode was
+  added; `uv build --wheel` was not repeated (no packaged file changed, V35).
+- **PRD:** `shared/prd.md` gained the approval record in 8ec7f19 (orchestrator, not a task edit).
+
+### Library verification outcomes (V39-V45; no cell left TODO)
+| ID | Outcome |
+|----|---------|
+| V39 | Confirmed: `os`, `stat`, `tempfile`, `pathlib` are stdlib; no new dependency; `uv lock --check` passes; only the approved ruff line changed in `pyproject.toml` |
+| V40 | Confirmed: `mkdtemp(prefix=...)` honours `tempfile.tempdir` at call time, returns an absolute resolved path under `/tmp` on WSL; mode is filtered by the umask (0500 under 277), so the explicit `chmod 0700` is needed |
+| V41 | Confirmed: `O_NOFOLLOW` and `O_CLOEXEC` exist; `O_CREAT\|O_EXCL` refuses a planted or dangling symlink and an existing file; `fchmod(0o600)` restores the mode under any umask |
+| V42 | Recorded: flag-off `import newsletter_digest.cli` loads no email module and writes nothing; `tempfile` is loaded by python-dotenv, `pathlib` not at start |
+| V43 | Confirmed: the real local FastMCP stdio child, under mcp's minimal environment, reads the 0600 file in the 0700 directory and its SHA-256 equals `sha256(htmlBody)` |
+| V44 | Recorded, not fully confirmed: only `File does not exist: <path>` is verified from server source; the Node `EACCES`/`EISDIR` texts are general knowledge. T099 re-checked the eight markers against file states. Settled only by the manual run |
+| V45 | Confirmed: `estimated_message_bytes(95_000, t)` is 2.46 x the HTML; stdlib `quopri` and `base64` of the synthetic 300-item HTML agree within 1.3% |
+
+### Open items (non-blocking; nothing here was fixed, "fix nothing in src")
+New in this amendment, with suggested follow-ups:
+- **T099 MINOR 1 (T092 code, T094 test):** check 7 opens the file without `O_NONBLOCK`, so a FIFO
+  planted at the staged path with no writer blocks the run (still blocked after 3 s in the probe).
+  Needs a same-user process, so it is hardening, not a vulnerability. Follow-up: add
+  `getattr(os, "O_NONBLOCK", 0)` to `_READ_FLAGS`; the existing regular-file check then refuses it.
+- **T099 MINOR 2 (T092 code):** Node errno texts outside the eight markers (`EMFILE`, `ENFILE`,
+  `ENAMETOOLONG`, `ENXIO`, `ETXTBSY`) fall through to detail-bearing rows. `EMFILE: too many open
+  files, open '<path>'` matches the rate-limit row (`too many`), so a wrong class is shown and the
+  temp path can reach WARNING and stderr. Very low likelihood. Follow-up: replace the attachment
+  path and its directory with `<attachment>` in the detail before any REJECTED row is matched, or
+  add a row for the shape `^E[A-Z]+: .*, open '`.
+- **T099 MINOR 3 (tests):** legacy send tests without the opt-in `temp_root` fixtures stage in the
+  real `/tmp`; clean while the suite is green, but a cleanup regression or a mutation run litters
+  it. Follow-up: an autouse, module-scoped `tempfile.tempdir` redirect to an empty `tmp_path` in
+  `test_email_delivery.py` and `test_cli_email.py`, with an empty-at-teardown assertion and the
+  system-location test kept explicit.
+- **T099 INFO 4:** a deleted staged file reads "the attachment directory holds other files"
+  (fails closed, misleading wording; T100 C8). **INFO 5:** the marker `failed to send email with`
+  can never match (harmless).
+- **T100 F1 (LOW):** rule (h)(2) does not constrain `_stage_attachment`'s directory and name
+  arguments. A `mkdtemp(dir=out_dir)` or a name from `html_path` is not caught by AST (the runtime
+  re-check still refuses a foreign path). Follow-up: pin both arguments in
+  `tests/test_architecture.py` (T100 C9).
+- **T100 F2 (LOW):** cleanup and the chmod act on `<raw_directory>/<name>` even if the seam
+  directory was not freshly created, so "cleanup removes only what it wrote" holds only under the
+  contract "`make_temp_dir` returns a new, empty directory". Follow-up: state the contract (C5) or
+  create the file first and clean up only after the create succeeded.
+- **T100 F3-F6 (INFO):** duplicated `_POSIX`/`_owner_only` (fails closed if they diverge);
+  AST rules intentionally broad (`tempfile` in `store`, any `.attachment_name`); `_rejected_reason`
+  now logs at DEBUG (a side effect in a former pure mapping); test edits beyond the literal AP-6
+  list (recorded above).
+- **Design-doc corrections T100 C1-C9 (not applied; `shared/designs.md` untouched):** C1 synthetic
+  trees; C2 where (g)/(h)(2) live; C3 `ValueError`; C4 the 0755 case; C5 the seam contract; C6
+  `tempfile` and `pathlib` start-up claims; C7 full-width-digit name; C8 missing-file wording;
+  C9 pin the `_stage_attachment` arguments.
+
+Carried forward from the 2026-11-04 section (all unchanged and kept as is, per AP-6 item 8):
+- **T085 M-1** start timeout with a launcher command leaves the real server running (it exits on
+  stdin EOF); **T085 M-3** network-like `Error:` replies reported FAILED, so a re-run could send a
+  duplicate (the attachment row is REJECTED-only and does not make this worse); **T085 N-1..N-4**.
+- **T086 M1-M4, I1-I7**, and the design-doc corrections **C1-C10** of that review.
+- **T065 finding 2:** `emoji=False` still missing on the Telegram lines in
+  `cli._deliver_to_telegram`.
+- **FR-070 `--email-dry-run`** deferred (`render_email` and `build_subject` remain the seams).
+- **ED-21 risks:** 95,000-byte budget against real clipping; LF-only parts surviving the server;
+  the granted token scope; the real `Error:` texts. Now also EA-16 `[re-verify]` items: Q-A7
+  (`From:` shown), LF line endings accepted with an attachment, the message size (about 2.5 x the
+  HTML), and V44 texts.
+- **`shared/designs.md` ruff-format note:** resolved by the T089 `extend-exclude`; designs.md
+  itself is still not reformatted, by design.
+- **Wrong commit trailer** on 2c034d8 and 949bd5f (`Claude Opus 5.5`); history not rewritten.
+- Ctrl-C during a send exits 1 although the outcome is unknown (T085 N-2).
+
+### README cross-check
+README > Email delivery (the attachment subsection, "Exit codes and stderr lines",
+"Troubleshooting email", "Trying it end to end", the options table and Privacy) was compared
+with `cli._deliver_by_email` (`Email: sent to <n> recipient(s) with 1 attachment (Gmail id <id>).`),
+`email_delivery.failure_reason` (`the mail server could not read the attachment file; nothing was
+sent`, `could not prepare the attachment (<ExcClass>); nothing was sent`, `the email failed this
+app's own checks (...)`, `could not build the email (...)`) and the `--email` help sentence. All
+match; no mismatch, so T098 stays done and no review_feedback was routed. The README steps are a
+subset of the manual steps below: the temp-directory check, the large-window run and the report-back
+items exist only here and in the T101 notes.
+
+### Manual end-to-end acceptance 43 (NOT run; it sends real mail; the user must run it)
+1. In the `.env` of the directory you run from, set `EMAIL_TO=<your own address>`, one address
+   only. The Gmail MCP login must be the one the digest reads with. Never paste `.env` contents
+   or tokens anywhere.
+2. `uv run newsletter-digest --window 1w --max-emails 5 --email`, then `echo $?`. Expect exit 0,
+   one stdout line (the HTML path), and stderr ending
+   `Email: sent to 1 recipient with 1 attachment (Gmail id ...).`
+3. `ls -d /tmp/newsletter-digest-email-* 2>/dev/null | wc -l` must print `0`. The output folder
+   holds only `reading-list-YYYY-MM-DD.html`.
+4. In Gmail web and in the phone app: the body renders as before (legible, links tappable, no dead
+   controls, readable in forced dark mode); exactly one chip `reading-list-YYYY-MM-DD.html`
+   opens in a browser and matches the body (same items, and the "M of N items are shown" note if
+   items were left out); no "Read here" text, checkbox or script.
+5. "Show original": top-level `multipart/mixed` wrapping `multipart/alternative` with intact
+   `text/plain` and `text/html` parts; one base64 `text/html` attachment part with the filename;
+   `From:` shows your own address (Q-A7); LF line endings accepted (no garbling, no bounce).
+6. Repeat with a large window (`--window 1m --max-emails 60 --email`): no `[Message clipped]`, a
+   normal chip, the omitted-count suffix on stderr if items were dropped, and the message size
+   from "Show original" (expected about 2.5 x the HTML, at most about 240 KB).
+7. If the line is `Email: FAILED (the mail server could not read the attachment file; ...)`:
+   nothing was sent. Check that `GMAIL_MCP_COMMAND` runs a Linux-side `node`/`npx`, not a Windows
+   one under WSL. For V44 re-run with `--log-level debug` and copy only the server's `Error: ...`
+   text, with the temp path and any address replaced. On a permission error, re-run
+   `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth`.
+8. Report back the exact text of any `Error:` reply (V44, T085 M-3), the `From:` result, the
+   line-ending result and the clipping result. They settle the EA-16 `[re-verify]` items.

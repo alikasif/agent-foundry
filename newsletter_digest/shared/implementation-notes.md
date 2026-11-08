@@ -6166,3 +6166,18 @@ T102 should carry them.
 8. Report back the exact text of any `Error:` reply (V44, T085 M-3), the `From:` header
    result, the line-ending result and the clipping result. They settle the EA-16
    `[re-verify]` items in these notes.
+
+## T102 — Execution summary and amendment wrap-up for the email attachment
+
+- Appended "## Email HTML attachment (T089-T102), 2026-11-08" to `shared/execution_summary.md`;
+  earlier sections untouched. Docs only: no source, test or config file edited.
+- **README cross-check:** the success line, failure reasons, help sentence and steps match
+  `cli.py` and `email_delivery.py`. No mismatch, so nothing was routed to T098.
+- **Decisions not in the spec:** (1) the "Tasks" table lists the T089 commit as 118f707 and
+  T090 as 70119d5 plus 0cdaa68 (a later reorder commit), taken from `git log`; (2) the
+  T099/T100 findings keep their own labels (MINOR 1-3, INFO 4-5, F1-F6, C1-C9) rather than being
+  renumbered as "T089+ findings"; (3) the manual steps are the T101 list with the V44 and
+  EA-16 report-back items kept in full, because the README only carries a subset.
+- **Tradeoff:** the legacy test hunks are summarised per file (full lists live in the T091-T096
+  notes and T100 F6) to keep the summary readable.
+- The commit trailer follows the instruction given for this task (Sonnet 5.5).

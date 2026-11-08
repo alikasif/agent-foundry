@@ -609,3 +609,8 @@
   project import. Also, Telegram success on stderr is `Sent <name>.pdf to Telegram.`,
   with no `Telegram:` prefix. The fake send server records an `AttachmentSnapshot` with
   `exists=False` for a missing file, so "no snapshot" is the wrong check there.
+- (T102) When a summary cites a task's commit, take it from `git log --name-only` per task,
+  not from the task order: a task can have a follow-up commit (T090 has 70119d5 and 0cdaa68)
+  and status-only `chore` commits carry no work. Also read each review's own severity labels
+  before summarising; they differ per review (MINOR/INFO vs LOW/INFO and C-numbered
+  corrections).
