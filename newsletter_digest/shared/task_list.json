@@ -2094,7 +2094,7 @@
       "find_send_capability_violations calls the new sub-rules; docstrings updated",
       "`uv run pytest -q` passes with 0 failures; only tests/test_architecture.py and implementation-notes changed"
     ],
-    "test_results": "commit c5c22d1; tests/test_architecture.py 472 passed (was 399); full suite 5060 passed, 2 xfailed, 2 deselected; ruff format --check ., ruff check ., pyrefly check clean"
+    "test_results": "commits c5c22d1 + a213675 (case order fix); tests/test_architecture.py 472 passed (was 399); full suite 5060 passed, 2 xfailed, 2 deselected; ruff format --check ., ruff check ., pyrefly check clean"
   },
   {
     "id": "T091",
