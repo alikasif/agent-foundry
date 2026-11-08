@@ -348,3 +348,76 @@ Read from the template. **Correction 2026-11-04:** the first draft of this secti
   and a combined exit-code rule.
 - `anyio.run` can be called a second time after `run_digest` (V29), so a second MCP session
   in delivery code is feasible.
+
+## Email attachments in 1.1.11 (read 2026-11-08, for the "attach the email HTML as a file" amendment)
+Source: `npm pack @gongrzhe/server-gmail-autoauth-mcp@1.1.11`, extracted earlier into
+`<scratchpad>/gmailpkg/x/package` (tarball sha256
+`ef33ac0ea7f0ce38254863a3e34067995016f1e0bd1681c31cd5c6c80144035a`, same as the 2026-11-04 entry).
+Read only `dist/index.js` and `dist/utl.js`; the tarball ships no `node_modules` and no lockfile.
+Its dependency `nodemailer` is `^7.0.3` (package.json line 55); the 7.x line was also packed (`nodemailer@7.0.13`, newest
+7.x on 2026-11-08) into its own new directory and read for MIME behaviour. Nothing was executed, so every behaviour below
+is **read from source, not run**; the manual send in the acceptance criteria is the confirmation.
+
+**Verdict: 1.1.11 can send an HTML body plus one `.html` attachment correctly. The pin stays.**
+
+- **Schema** (index.js 147): `attachments: z.array(z.string()).optional()`, described "List of file paths to attach to the
+  email". Plain local paths; no inline content, no base64 input.
+- **A second code path is used.** `handleEmailAction` (index.js 368-419): when `attachments` is a non-empty array it calls
+  `createEmailWithNodemailer` (utl.js 87-128); otherwise the older `createEmailMessage` (the hand-built 7bit string of the
+  2026-11-04 entry). Differences that matter, all in the attachment path:
+  - `mimeType` is **ignored** (utl.js 112-123 passes `text: body`, `html: htmlBody`). HTML is present only if `htmlBody`
+    is a non-empty string, so `htmlBody` must always be sent.
+  - Nodemailer decides each part's transfer encoding itself (mime-node `getTransferEncoding`, index.js 448-465): pure
+    ASCII with all lines <= 76 chars stays `7bit`; ASCII with a longer line, or non-ASCII, becomes `quoted-printable`
+    (or `base64`). The reading-list HTML has lines up to 880 chars, so its part is **quoted-printable**, and the "declared
+    7bit but raw UTF-8" and 998-character hazards of the old path **do not apply**. (The ASCII-only and 900-char rules of
+    FR-059 become belt and braces; they stay.)
+  - Header values have CR/LF replaced by a space before writing (mime-node `_encodeHeaderValue`, index.js 1148-1154) and
+    non-ASCII is RFC 2047 encoded, so a subject cannot inject headers on this path. The app's own stripping stays.
+  - `createEmailWithNodemailer` validates `to` with the same `validateEmail` regex (comma still passes it; nodemailer's
+    address parser then splits it). Our strict validation stays the real check. `cc`, `bcc` are passed through here too.
+  - `From: 'me'` is not a valid address: `addressparser` returns `address ''`, and `_convertAddresses` skips entries with no
+    address, so the **`From:` header is probably omitted** (read from source; not run). Gmail normally fills in the
+    authenticated account for a missing From, which is general knowledge, not verified here. This is a risk to confirm on
+    the first real send ("Show original" must show the user's own address).
+  - Line endings: `newline: 'unix'` (utl.js 97), so the raw message uses LF, not CRLF (the old path joined with CRLF).
+    Gmail accepting LF-only raw input is general knowledge, not verified here. Same manual check.
+- **MIME tree** (nodemailer mail-composer `_useAlternative`/`_useMixed`, index.js 28-31, 370-405): with `text` + `html` and
+  exactly one attachment: `multipart/mixed` > [ `multipart/alternative` > [ `text/plain`, `text/html` ], attachment ].
+  So the mixed part wraps the alternative part correctly; clients that show the HTML body still do so, and the attachment
+  is listed beside it. No `multipart/related` (no `cid`).
+- **Attachment part:** `filename` = `path.basename(filePath)` (utl.js 106), so any directory is dropped and the name is
+  the file's own. `Content-Type` = detected from the filename extension (`mimeFuncs.detectMimeType`,
+  mime-types.js 2071-2088; `html` maps to `text/html`), with `; name=<filename>`; `Content-Disposition: attachment;
+  filename=<filename>`; `Content-Transfer-Encoding: base64` (mail-composer index.js 103-112 default). Bytes are read with
+  `fs.createReadStream(path)` (mime-node index.js 986) and base64-encoded with 76-character lines (base64/index.js:
+  `lineLength` default 76, "\r\n" inserted), so attachment bytes are preserved exactly and no 998-character line problem
+  can arise. The attachment has no charset parameter; the app's HTML is ASCII-only so this is harmless.
+- **Path rules: none.** `createEmailWithNodemailer` only does `fs.existsSync(filePath)` and throws
+  `File does not exist: <path>` otherwise (utl.js 103-105). No allowlist, no base directory, no `..` or symlink check,
+  no size check, no extension check. `disableFileAccess` is not set, so nodemailer reads whatever path it is given. **Any
+  readable local file can be emailed to the recipients by passing its path**, for example `~/.gmail-mcp/credentials.json`.
+  This is why the path must come from fixed code only (the amendment's FR-076).
+- **Does it delete or keep the file?** Keeps it; nothing in the server removes a file. The app must remove its own copy.
+- **Can the server process read the path?** The server is a child of the app (stdio). Python's MCP client gives it a
+  minimal environment (HOME, LOGNAME, PATH, SHELL, TERM, USER, plus the `PASSTHROUGH_ENV_VARS` set in `gmail_mcp.py`), and
+  the same OS user and the same filesystem view, so an absolute path to a 0600 file owned by the same user is readable. The
+  path must be absolute (the server's working directory is the app's, but nothing resolves relative paths for us). `TMPDIR`
+  is not needed because the app creates the file and passes the full path. Caveat: if `GMAIL_MCP_COMMAND` were a Windows-side
+  `node` started from WSL, a Linux path would not resolve; the default `npx` under WSL is Linux-side, so it does.
+- **Result and failure text.** Success is the same `Email sent successfully with ID: <id>` (index.js 372-383). Failure still
+  does not set `isError`: any throw, including `File does not exist: <path>`, is caught at index.js 1000-1010 and returned
+  as text `Error: <message>`. A file that exists but cannot be read (permission, directory) fails while nodemailer streams it,
+  before the Gmail call, and surfaces the same way (`Error: EACCES ...` or similar; exact text not run). Because the file is
+  read before `gmail.users.messages.send`, a missing or unreadable attachment means **the message was not sent**. The server
+  also writes `Failed to send email with N attachments: <message>` to its own stderr (index.js 466-469).
+- **Size limits.** The server applies none of its own. It base64url-encodes the whole raw message and sends it in the JSON
+  `raw` field (index.js 372-379). Google's `users.messages.send` reference page (fetched 2026-11-08) states no size limit;
+  the often-quoted 25 MB Gmail message limit is general knowledge, not verified here. Synthetic estimate (generated
+  filler HTML of exactly 95,000 bytes, stdlib `quopri` and `base64`, no real data): HTML part about 101 KB quoted-printable,
+  attachment about 128 KB base64, plain part up to 8 KB, total raw message about 237 KB, request `raw` field about 316 KB.
+  That is roughly 1% of 25 MB, so the limit does not matter for this feature. Gmail's roughly 102 KB "clipping" applies to the
+  displayed HTML body, not to attachments (general knowledge; confirm in the manual check).
+- **Unpinned transitive dependency.** `npx` resolves `nodemailer ^7.0.3` at install time (no lockfile in the package), so
+  the exact nodemailer version is not controlled by our pin. The attachment path is the first time this app depends on it.
+  Behaviour above was read from 7.0.13; the risk is accepted and noted (same class as the other transitive packages).
