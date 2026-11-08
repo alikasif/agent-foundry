@@ -12,10 +12,12 @@ import math
 import os
 import re
 import shutil
+import stat
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -526,14 +528,20 @@ def _sole_leaf(exc: BaseException, stop: BaseException | None = None) -> BaseExc
 
 # logical -> server tool name. Never merged into GMAIL_TOOL_MAP (agent allowlist).
 GMAIL_SEND_TOOL_MAP: dict[str, str] = {"send_email": "send_email"}
-# logical -> server argument name. The ONLY five keys ever sent (FR-056).
+# logical -> server argument name. The ONLY six keys ever sent (FR-056 as amended,
+# FR-077). "attachment" maps to a list holding exactly one fixed-code path (EA-3).
 GMAIL_SEND_ARG_MAP: dict[str, str] = {
     "to": "to",
     "subject": "subject",
     "text_body": "body",
     "html_body": "htmlBody",
     "mime_type": "mimeType",
+    "attachment": "attachments",
 }
+# EA-4: the staged attachment's file name (used with fullmatch; [0-9] never matches
+# non-ASCII digits, unlike \d) and its private directory's name prefix.
+ATTACHMENT_NAME_RE = re.compile(r"reading-list-[0-9]{4}-[0-9]{2}-[0-9]{2}\.html")
+ATTACHMENT_DIR_PREFIX = "newsletter-digest-email-"
 SEND_MIME_TYPE = "multipart/alternative"
 SEND_SUCCESS_RE = re.compile(
     r"\s*Email sent successfully with ID:\s*([A-Za-z0-9_-]{1,64})\s*"
@@ -549,18 +557,25 @@ _MAX_BODY_LINE_CHARS = 900  # ED-8
 _LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 _NOT_PRINTABLE_RE = re.compile(r"[^\x20-\x7e]")
 _MAX_TOOL_PAGES = 10
+_POSIX = os.name == "posix"  # mode and owner checks only where they exist (EA-4)
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 _Phase = Literal["start", "call", "done"]
 
 
 @dataclass(frozen=True)
 class OutgoingEmail:
-    """One digest email: validated bare addresses, ASCII subject and bodies."""
+    """One digest email: validated bare addresses, ASCII subject and bodies.
+
+    ``attachment`` is required (no default, DA2): the private staged copy of
+    ``html_body`` (EA-3), so no message can be sent without it.
+    """
 
     to: tuple[str, ...]  # validated bare addresses (ED-5)
     subject: str  # printable ASCII, <= 150 chars (ED-6)
     text_body: str  # ASCII plain part (ED-9)
     html_body: str  # ASCII HTML part (ED-7, ED-8)
+    attachment: Path  # absolute path of the private copy of html_body (EA-3)
 
 
 class GmailSendErrorKind(StrEnum):
@@ -637,17 +652,20 @@ class _AttemptState:
 
 
 def build_send_arguments(message: OutgoingEmail) -> dict[str, object]:
-    """Return exactly ``{to, subject, body, htmlBody, mimeType}`` for ``send_email``.
+    """Return exactly the six keys of :data:`GMAIL_SEND_ARG_MAP` for ``send_email``.
 
-    ``cc``, ``bcc``, ``threadId``, ``inReplyTo`` and ``attachments`` are never set
-    (attachments would make the server read local files). The message is checked
-    again here (defence in depth; config.py is the primary check).
+    That is ``{to, subject, body, htmlBody, mimeType, attachments}``, where
+    ``attachments`` is a one-element list holding ``str(message.attachment)``.
+    ``cc``, ``bcc``, ``threadId`` and ``inReplyTo`` are never set. The message is
+    checked again here (defence in depth; config.py is the primary check), and so
+    is the attachment, because the server reads whatever path it is given: it must
+    be this app's private copy, byte-identical to ``html_body`` (EA-4).
 
     Raises:
         GmailSendError: ``INVALID_MESSAGE`` with a fixed detail that names no
             value, before any session is started.
     """
-    problem = _message_problem(message)
+    problem = _message_problem(message) or _attachment_problem(message)
     if problem:
         raise GmailSendError(
             GmailSendErrorKind.INVALID_MESSAGE,
@@ -661,6 +679,7 @@ def build_send_arguments(message: OutgoingEmail) -> dict[str, object]:
         "text_body": message.text_body,
         "html_body": message.html_body,
         "mime_type": SEND_MIME_TYPE,
+        "attachment": [str(message.attachment)],
     }
     return {GMAIL_SEND_ARG_MAP[key]: value for key, value in values.items()}
 
@@ -826,10 +845,12 @@ async def _list_all_tools(session: Any) -> list[Any]:
 def _schema_mismatch(schema: object) -> str:
     """Describe how ``send_email``'s input schema differs from 1.1.11, or ``""``.
 
-    Every mapped argument must be a property, and every required key must be
-    one this app sends.
+    Every mapped argument must be a property, the attachment argument must be an
+    array of strings (EA-5; the only type-checked one, DA4), and every required key
+    must be one this app sends.
     """
     expected = set(GMAIL_SEND_ARG_MAP.values())
+    attachment_key = GMAIL_SEND_ARG_MAP["attachment"]
     schema = schema if isinstance(schema, dict) else {}
     properties = schema.get("properties")
     offered = set(properties) if isinstance(properties, dict) else set()
@@ -838,9 +859,28 @@ def _schema_mismatch(schema: object) -> str:
     parts = []
     if missing := sorted(expected - offered):
         parts.append(f"missing: {', '.join(missing)}")
+    listed = properties.get(attachment_key) if isinstance(properties, dict) else None
+    if attachment_key in offered and not _is_string_array(listed):
+        parts.append(f"wrong type: {attachment_key}")
     if unknown := sorted(needed - expected):
         parts.append(f"new required: {', '.join(unknown)}")
     return "; ".join(parts)
+
+
+def _is_string_array(prop: object) -> bool:
+    """True for a JSON-schema array of strings (EA-5); extra keys are allowed.
+
+    That is ``{"type": "array", "items": {"type": "string"}}`` plus, for example,
+    a ``description``. An ``anyOf`` or a missing ``items`` is not accepted.
+    """
+    if not isinstance(prop, dict):
+        return False
+    items = prop.get("items")
+    return (
+        prop.get("type") == "array"
+        and isinstance(items, dict)
+        and items.get("type") == "string"
+    )
 
 
 def _attempt_outcome(
@@ -921,6 +961,72 @@ def _message_problem(message: OutgoingEmail) -> str:
         if any(len(line) > _MAX_BODY_LINE_CHARS for line in _LINE_BREAK_RE.split(body)):
             return f"the {label} body has a line over {_MAX_BODY_LINE_CHARS} characters"
     return ""
+
+
+def _attachment_problem(message: OutgoingEmail) -> str | None:
+    """Return the first EA-4 fixed detail for ``message.attachment``, or None.
+
+    Runs after :func:`_message_problem`, so ``html_body`` is already ASCII. The
+    details name no value (no path). Checks 1-2 are on the path itself; checks 3-8
+    look at the file system (:func:`_attachment_file_problem`), and any error there
+    is reported as one fixed detail.
+    """
+    path = message.attachment
+    if not isinstance(path, Path):  # 1: a str, list, tuple or None is refused
+        return "the attachment must be one file path"
+    text = str(path)
+    plain = (
+        text.isascii()
+        and path.is_absolute()
+        and ".." not in path.parts
+        and os.path.normpath(text) == text
+    )
+    if not plain:  # 2
+        return "the attachment path is not a plain absolute path"
+    try:
+        return _attachment_file_problem(path, message.html_body.encode("ascii"))
+    except (OSError, ValueError):  # ValueError: an embedded NUL byte
+        return "the attachment file could not be checked"
+
+
+def _attachment_file_problem(path: Path, expected: bytes) -> str | None:
+    """EA-4 checks 3-8, or None; may raise OSError (the caller maps it).
+
+    No symlink in the path, the fixed file name, this app's private directory
+    holding only that file, a private regular file with one link, and bytes equal
+    to ``expected`` (read at most ``len(expected) + 1`` bytes).
+    """
+    text = str(path)
+    if os.path.realpath(text) != text:  # 3
+        return "the attachment path contains a symbolic link"
+    if not ATTACHMENT_NAME_RE.fullmatch(path.name):  # 4
+        return "the attachment file name is not the fixed pattern"
+    parent = path.parent
+    named = parent.name.startswith(ATTACHMENT_DIR_PREFIX)
+    info = os.lstat(parent) if named else None
+    if info is None or not stat.S_ISDIR(info.st_mode) or not _owner_only(info, 0o700):
+        return "the attachment directory is not this app's private directory"  # 5
+    if os.listdir(parent) != [path.name]:  # 6
+        return "the attachment directory holds other files"
+    fd = os.open(text, _READ_FLAGS)
+    try:
+        info = os.fstat(fd)
+        regular = stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+        if not regular or not _owner_only(info, 0o600):  # 7
+            return "the attachment is not a private regular file"
+        same = info.st_size == len(expected)
+        if not same or os.read(fd, len(expected) + 1) != expected:  # 8
+            return "the attachment is not identical to the HTML body"
+    finally:
+        os.close(fd)
+    return None
+
+
+def _owner_only(info: os.stat_result, mode: int) -> bool:
+    """On POSIX: exactly ``mode`` and owned by this user; elsewhere always True."""
+    if not _POSIX:
+        return True
+    return stat.S_IMODE(info.st_mode) == mode and info.st_uid == os.getuid()
 
 
 def _exception_text(exc: BaseException) -> str:

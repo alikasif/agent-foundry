@@ -5,9 +5,9 @@ sessions come from the scripted fakes of ``tests/email_fixture.py`` through the
 ``client_factory`` seam. Waits go through a recording ``sleep`` and 0.05 s
 timeouts, so nothing really waits. Every send run goes through :class:`Harness`,
 which after each run asserts the cross-branch invariants: at most one
-``call_tool``, always ``send_email`` with exactly the five FR-056 keys (``to`` a
-list, never ``cc``/``bcc``/``threadId``/``inReplyTo``/``attachments``), and every
-session that was entered is closed exactly once.
+``call_tool``, always ``send_email`` with exactly the six FR-056 keys (``to`` a
+list, ``attachments`` included, never ``cc``/``bcc``/``threadId``/``inReplyTo``),
+and every session that was entered is closed exactly once.
 
 The V33 group runs the real ``send_gmail_message`` through a real
 ``MultiServerMCPClient`` against a local FastMCP stdio script with a sleeping
@@ -137,10 +137,14 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def message() -> OutgoingEmail:
+def message(tmp_path: Path) -> OutgoingEmail:
     """A valid digest email to the reserved-domain test recipients."""
     return OutgoingEmail(
-        to=ef.RECIPIENTS, subject=SUBJECT, text_body=TEXT_BODY, html_body=HTML_BODY
+        to=ef.RECIPIENTS,
+        subject=SUBJECT,
+        text_body=TEXT_BODY,
+        html_body=HTML_BODY,
+        attachment=ef.stage_private_copy(tmp_path, HTML_BODY),
     )
 
 
@@ -282,9 +286,16 @@ START_FAULTS = (
 # ------------------------------------------------------------ build_send_arguments
 
 
-def test_build_send_arguments_exact_five_keys(message: OutgoingEmail) -> None:
+def test_build_send_arguments_exact_six_keys(message: OutgoingEmail) -> None:
     arguments = build_send_arguments(message)
-    assert set(arguments) == {"to", "subject", "body", "htmlBody", "mimeType"}
+    assert set(arguments) == {
+        "to",
+        "subject",
+        "body",
+        "htmlBody",
+        "mimeType",
+        "attachments",
+    }
     assert set(arguments) == set(GMAIL_SEND_ARG_MAP.values()) == ef.SEND_ARGUMENT_KEYS
     assert not set(arguments) & ef.FORBIDDEN_SEND_KEYS
     assert arguments == {
@@ -293,6 +304,7 @@ def test_build_send_arguments_exact_five_keys(message: OutgoingEmail) -> None:
         "body": TEXT_BODY,
         "htmlBody": HTML_BODY,
         "mimeType": "multipart/alternative",
+        "attachments": [str(message.attachment)],
     }
     assert SEND_MIME_TYPE == "multipart/alternative"
 
@@ -386,9 +398,12 @@ VALID_EDGES: dict[str, dict[str, Any]] = {
 
 @pytest.mark.parametrize("change", VALID_EDGES.values(), ids=VALID_EDGES)
 def test_build_send_arguments_accepts_edges(
-    message: OutgoingEmail, change: dict[str, Any]
+    message: OutgoingEmail, change: dict[str, Any], tmp_path: Path
 ) -> None:
     good = dataclasses.replace(message, **change)
+    if "html_body" in change:  # the attachment must stay a copy of the body
+        staged = ef.stage_private_copy(tmp_path, good.html_body)
+        good = dataclasses.replace(good, attachment=staged)
     arguments = build_send_arguments(good)
     assert arguments["to"] == list(good.to)
     assert arguments["subject"] == good.subject
@@ -629,8 +644,8 @@ SCHEMA_CHANGES: dict[str, tuple[dict[str, Any], tuple[str, ...]]] = {
         ("to",),
     ),
     "new-required": (
-        _schema(required=["to", "subject", "body", "attachments"]),
-        ("attachments",),
+        _schema(required=["to", "subject", "body", "threadId"]),
+        ("threadId",),
     ),
     "no-properties": ({"type": "object"}, ("to", "subject", "body")),
 }
@@ -1091,7 +1106,7 @@ LOCAL_SEND_SERVER_SCRIPT = textwrap.dedent(
         bcc: list[str] | None = None,
         threadId: str | None = None,
         inReplyTo: str | None = None,
-        attachments: list[str] | None = None,
+        attachments: list[str] = [],  # a plain array schema, like 1.1.11's zod
     ) -> str:
         given = sorted(k for k, v in locals().items() if v is not None)
         with CALLS.open("a") as handle:

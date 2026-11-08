@@ -53,8 +53,8 @@ Fake MCP send side (ED-17, ED-3):
   ``@gongrzhe/server-gmail-autoauth-mcp@1.1.11`` in the server's list order.
   ``WRITE_TOOL_NAMES``: the 13 ED-3 write-tool names. ``SEND_EMAIL_SCHEMA_1_1_11``:
   ``zodToJsonSchema(SendEmailSchema)`` (``to``, ``subject``, ``body`` required).
-  ``SEND_ARGUMENT_KEYS`` / ``FORBIDDEN_SEND_KEYS``: the five keys the app may send and
-  the five it must never send.
+  ``SEND_ARGUMENT_KEYS`` / ``FORBIDDEN_SEND_KEYS``: the six keys the app may send and
+  the four it must never send.
 - ``Fault`` (``raising``, ``raising_group``, ``hang``) and ``Reply`` (``success``,
   ``server_error``, ``error_result``, ``unknown``, ``text_reply``, ``raising``,
   ``raising_group``, ``hang``) describe what an enter, list, call or exit does.
@@ -205,8 +205,10 @@ WRITE_TOOL_NAMES = frozenset(
 )
 
 #: The only argument keys the app ever sends (FR-056) and the ones it never sends.
-SEND_ARGUMENT_KEYS = frozenset({"to", "subject", "body", "htmlBody", "mimeType"})
-FORBIDDEN_SEND_KEYS = frozenset({"cc", "bcc", "threadId", "inReplyTo", "attachments"})
+SEND_ARGUMENT_KEYS = frozenset(
+    {"to", "subject", "body", "htmlBody", "mimeType", "attachments"}
+)
+FORBIDDEN_SEND_KEYS = frozenset({"cc", "bcc", "threadId", "inReplyTo"})
 SEND_MIME_TYPES = ("text/plain", "text/html", "multipart/alternative")
 
 

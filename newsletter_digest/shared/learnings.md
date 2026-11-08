@@ -540,3 +540,15 @@
   test changes into its commit. Fixed with `git reset --soft <their sha>` (their commit
   restored unchanged, my changes still staged) and a separate follow-up commit. Make
   follow-ups new commits, and check `git log -1` right before any history edit.
+- (T092) FastMCP (pydantic) turns `attachments: list[str] | None = None` into an
+  `anyOf: [array, null]` schema, which EA-5's strict "array of strings" check refuses
+  (`wrong type: attachments`). The real 1.1.11 zod schema is a plain array. A local
+  test server that should mirror 1.1.11 needs `attachments: list[str] = []`.
+- (T092) In a scratch probe, `monkeypatch`-style `mod.os.chmod = noop` patches the
+  global `os` module, so the probe's own `os.chmod` became a no-op too and the
+  "0755 directory" case falsely passed. Save the real function first and call it
+  explicitly in the probe's helpers (or patch the module attribute with a proxy).
+- (T092) A required dataclass field that is checked against file contents (the
+  attachment must be byte-identical to `html_body`) breaks every
+  `dataclasses.replace(message, html_body=...)` test that expects success: re-stage a
+  copy of the new body (`ef.stage_private_copy(tmp_path, good.html_body)`) in that test.

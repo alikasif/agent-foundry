@@ -64,11 +64,11 @@
 | ID | Item | Owner task | Version | How checked | Result/consequence |
 |---|---|---|---|---|---|
 | V39 | No new dependency: `os`, `stat`, `tempfile`, `pathlib` are stdlib; `uv lock --check` passes; `pyproject.toml`/`uv.lock` unchanged | T089 | CPython 3.13.5 stdlib; uv.lock (114 packages) | `sys.stdlib_module_names` membership for the four modules; `uv lock --check`; `git status` on uv.lock; no `uv add` run | Confirmed. All four are in `sys.stdlib_module_names`; `uv lock --check` passes (Resolved 114 packages); uv.lock is unchanged. The only pyproject.toml change is the user-approved ruff setting `extend-exclude = ["*.md"]` under `[tool.ruff]` (no dependency change; see the T089 section). |
-| V40 | `tempfile.mkdtemp(prefix=...)` honours `TMPDIR` / `tempfile.tempdir` at call time, creates 0700 under the current umask, returns an absolute path; `Path.resolve(strict=True)` of it equals itself under `/tmp` on WSL | T092 |  |  | TODO |
-| V41 | `os.O_NOFOLLOW`, `O_CLOEXEC` exist on Linux/WSL; `O_CREAT|O_EXCL` refuses a planted symlink (`FileExistsError`) and an existing file; `fchmod` 0600 survives umask 077 and 022 (scratch probe under the scratchpad) | T092 |  |  | TODO |
+| V40 | `tempfile.mkdtemp(prefix=...)` honours `TMPDIR` / `tempfile.tempdir` at call time, creates 0700 under the current umask, returns an absolute path; `Path.resolve(strict=True)` of it equals itself under `/tmp` on WSL | T092 | CPython 3.13.5 stdlib, Linux 6.6 WSL2 | Scratch probe `<scratchpad>/T092_probe.py` run with `python3 -I`, `TMPDIR` unset, cwd = scratchpad; every directory removed afterwards | Confirmed. `gettempdir()` is `/tmp`; the default `mkdtemp(prefix=...)` returns an absolute path directly under `/tmp`, `Path(d).resolve(strict=True) == d`, mode 0700. Mode 0700 under umask 077 and 022, but **0500 under umask 277**: mkdtemp's mode is filtered by the umask, so EA-3's explicit `os.chmod(directory, 0o700)` is needed. `tempfile.tempdir = X` is honoured at call time; `TMPDIR` is honoured only while `tempfile.tempdir` is None (it caches the first lookup), so tests should set `tempfile.tempdir` (AP-6 item 4). |
+| V41 | `os.O_NOFOLLOW`, `O_CLOEXEC` exist on Linux/WSL; `O_CREAT|O_EXCL` refuses a planted symlink (`FileExistsError`) and an existing file; `fchmod` 0600 survives umask 077 and 022 (scratch probe under the scratchpad) | T092 | CPython 3.13.5 stdlib, Linux 6.6 WSL2 | Same probe, inside a scratch work directory (never the project tree) | Confirmed. Both flags exist. `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC` raises `FileExistsError` for a planted symlink to an existing file, for a **dangling** symlink (the target is not created) and for an existing file. Under umask 077 and 022 the open gives 0600; under umask 777 it gives 0000 and `fchmod(fd, 0o600)` restores 0600 in all three cases. |
 | V42 | Flag-off `sys.modules` after `import newsletter_digest.cli` (empty cwd, `uv run --project`): `stat`/`pathlib`/`os` already present at interpreter start; whether `tempfile` is present (record, assert only what is true); no `newsletter_digest.email_*` | T096 |  |  | TODO |
 | V43 | The local FastMCP stdio child under mcp's minimal environment reads a 0600 file in a 0700 directory; its SHA-256 equals `sha256(htmlBody)` (no npx, no Gmail) | T094 |  |  | TODO |
-| V44 | Error-text markers for "server could not read the attachment" (`file does not exist`, `no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email with`): verified `File does not exist: <path>` from source; Node `EACCES`/`EISDIR` texts are general knowledge, not run; confirm on the manual send | T092 (re-checked by T099) |  |  | TODO |
+| V44 | Error-text markers for "server could not read the attachment" (`file does not exist`, `no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email with`): verified `File does not exist: <path>` from source; Node `EACCES`/`EISDIR` texts are general knowledge, not run; confirm on the manual send | T092 (re-checked by T099) | server 1.1.11 (read from source, `verified_facts.md`), nodemailer 7.x not run | `email_delivery._UNREADABLE_ATTACHMENT_MARKERS` holds exactly these eight lower-case markers, matched case-insensitively against the redacted detail **before** the permission row; scratch probe: `File does not exist: /tmp/x` and `EACCES: permission denied, open '/tmp/x'` both map to `the mail server could not read the attachment file; nothing was sent`, `Insufficient Permission` still maps to the permission row | Recorded. Only `File does not exist: <path>` is verified (utl.js 103-105). The `EACCES`/`EISDIR` (and `ENOENT`/`EPERM`/`ENOTDIR`) texts are Node/nodemailer general knowledge and were **not run** (no Node, no npx); `failed to send email with` is the server's stderr text, listed defensively. Confirm on the manual send (acceptance 43). |
 | V45 | `estimated_message_bytes(95_000, t)` is 2.4-2.6 x the HTML; stdlib `quopri` + `base64` of the synthetic 300-item email HTML agree within 10% | T095 |  |  | TODO |
 
 ## Task notes
@@ -5387,3 +5387,136 @@ Verification:
   unchanged. The old `ALLOWED_CASES` (78) keep their checker names and order; the only
   changed entries are the 11 `EMAIL_RULES` x `FINAL_EMAIL_TREE` cases (the tree
   content, by design). `STUB_EMAIL_TREE` is byte-identical.
+
+## T092 — Atomic switch: gmail_mcp six-key map, required OutgoingEmail.attachment, re-check and schema type check; email_delivery staging, cleanup, failure mapping, logging; legacy test migration
+
+- **Result.** One commit with `gmail_mcp.py` (send half), `email_delivery.py` and the
+  legacy test hunks below. Full suite **5060 passed, 2 deselected, 2 xfailed** (same
+  count as before: no test added or removed); `ruff format --check .` (64 files),
+  `ruff check .` and `pyrefly check` (0 errors) clean. `tests/test_architecture.py`
+  (472) passes on the real tree, so the T090 rules allow the new code. No
+  `newsletter-digest-email-*` entry in `/tmp` before or after the full suite (0 / 0).
+- **V40, V41 filled, V44 recorded** (table above). Probes:
+  `<scratchpad>/T092_probe.py` (V40/V41), `T092_behaviour.py` and `T092_mode.py`
+  (an EA-4 matrix, schema, reason and cleanup smoke check for T094/T095 to turn into
+  tests; nothing committed from them).
+- **Helper names (EA-2): unchanged.** `attachment_name`, `_stage_attachment`,
+  `_write_private_file`, `_remove_staged` exist in `email_delivery` exactly as named in
+  EA-2/AP-5, so T097 needs no rename in `ATTACHMENT_HELPER_NAMES`. Extra private
+  helpers: `_send_once` (the sender call and its ED-12 mapping, moved out of
+  `send_reading_list_email` unchanged) and `_owner_only` (mode + uid on POSIX).
+  `OutgoingEmail(...)` is still built in one place, inside `send_reading_list_email`,
+  with `attachment=attachment`, where the bare local `attachment` is assigned only
+  from `_stage_attachment(...)` (rule (h)(2) of T097). `gmail_mcp` adds
+  `_attachment_problem`, `_attachment_file_problem` (checks 3-8), `_owner_only` and
+  `_is_string_array`.
+- **Decision: `_attachment_problem` call site.** `build_send_arguments` runs
+  `_message_problem(message) or _attachment_problem(message)`, so the existing checks
+  report first (EA-4 "runs after"); `_message_problem` itself is unchanged.
+- **Decision: check 5 order.** The prefix is tested before `os.lstat(parent)`, so a
+  wrong parent name gives the fixed directory detail even when the parent does not
+  exist; a missing parent with the right prefix gives "could not be checked".
+- **Deviation (small): `ValueError` also maps to "the attachment file could not be
+  checked".** EA-4 says "any `OSError`"; a path with an embedded NUL passes check 2
+  (NUL is ASCII) and then makes `os.path.realpath`/`os.lstat` raise `ValueError`. It is
+  caught with the `OSError`s so no raw exception escapes `build_send_arguments`.
+- **Observation: check 4 vs non-ASCII names.** A full-width-digit name
+  (`reading-list-２０２６-11-08.html`) is refused by check 2 (non-ASCII path) before
+  check 4 can see it; the detail is "not a plain absolute path". Still refused; T094
+  should expect that detail for that case.
+- **Decision: `_schema_mismatch` part order** is `missing`, then `wrong type`, then
+  `new required`; `wrong type: attachments` is only added when the property exists
+  (a missing one already reads `missing: attachments`). The name comes from
+  `GMAIL_SEND_ARG_MAP["attachment"]` (rule (h)(1), approval record). An `anyOf`
+  (nullable array) is refused: only `{"type": "array", "items": {"type": "string"}}`
+  (extra keys allowed) passes, as EA-5 says.
+- **Decision: preparation-failure outcome fields.** `failed`, reason
+  `could not prepare the attachment (<ExcClass>); nothing was sent`, `send_calls=0`,
+  `session_starts=0`, and `shown`/`omitted`/`over_budget` from the rendered content
+  (rendering succeeded; same as the GmailSendError path). Logged once at WARNING via
+  `_not_sent`, as every failure is.
+- **Decision: the attachment REJECTED row logs the detail at DEBUG** inside
+  `_rejected_reason` (`The mail server could not read the attachment: <detail>`), so
+  the path-bearing text exists only at DEBUG (EA-7, EA-9). The other rows unchanged.
+- **Decision: size estimate in KB** = `round(estimated_message_bytes(...) / 1000)`
+  (`BYTES_PER_KB = 1_000`), matching EA-8's "about 242 KB" at the full budget. The
+  `Attaching ... (<n> bytes)` count is the existing `html_bytes` (equal to the file
+  size: staging fails for non-ASCII HTML).
+- **Decision: log order.** `Email body` INFO (and the over-budget WARNING), then
+  staging, then `Attaching the digest HTML as <name> (<n> bytes)` INFO,
+  `Staged the attachment at <path>` DEBUG, `Email size estimate: ...` INFO, then the
+  unchanged `Sending the digest email to N recipient(s)`, recipients/subject DEBUG and
+  the result line. On a staging failure only the WARNING follows `Email body`.
+- **Decision: `_remove_staged`** uses nested `try/except FileNotFoundError: pass`
+  rather than `contextlib.suppress`, so the stdlib import set is exactly AP-5's
+  (`os`, `stat`, `tempfile`, `datetime.date`). If `unlink` fails with another error,
+  `rmdir` is not attempted (it would fail on the non-empty directory anyway); one
+  WARNING `Could not remove the temporary copy of the email attachment (<ExcClass>)`
+  plus DEBUG `Removing <dir> failed: <exc>`.
+- **`__all__`** of `email_delivery` gains `attachment_name` and
+  `estimated_message_bytes` (public, documented). `TempDirFactory`, `QP_FACTOR`,
+  `BASE64_FACTOR`, `MIME_OVERHEAD_BYTES` are module-level as AP-5 lists.
+- **Tradeoff: `_owner_only` and `_POSIX` exist in both modules** (a 4-line helper).
+  `email_delivery` may import only `SEND_NAMES` from `gmail_mcp` (rule (a)), and adding
+  a private helper to `SEND_NAMES` for this is not worth widening the contract.
+- **Windows note (EA-4).** Mode and uid checks run only where `os.name == "posix"`;
+  on other platforms only the type, link-count, name, directory and byte checks run.
+  The project targets Linux and WSL.
+- **No change** to `send_gmail_message`, `_send_attempt`, `_call_send_tool`, the retry,
+  timeouts, `GmailSendErrorKind`, the read half, `cli.py`, `EmailOutcome`,
+  `build_subject` or the other reason rows. `gmail_mcp` imports no `tempfile`.
+
+Modified pre-existing lines of `src/newsletter_digest/gmail_mcp.py` (diff against the
+parent commit; everything else in the diff is added lines):
+- imports: `import stat` and `from pathlib import Path` added (no line changed);
+- the `GMAIL_SEND_ARG_MAP` comment line ("The ONLY five keys ...") replaced by the
+  two-line six-key comment; one pair `"attachment": "attachments"` added; the two
+  `ATTACHMENT_*` constants and `_POSIX`/`_READ_FLAGS` added;
+- `OutgoingEmail` docstring (one line -> four) and the new `attachment: Path` field;
+- `build_send_arguments` docstring summary line and its three-line paragraph
+  (rewritten: six keys, `cc`/`bcc`/`threadId`/`inReplyTo` still never set); the
+  `_message_problem` call site line (`... or _attachment_problem(message)`); one
+  `"attachment": [str(message.attachment)]` entry added to `values`;
+- `_schema_mismatch` docstring (two lines rewritten), plus added lines
+  (`attachment_key`, `listed`, the wrong-type check).
+
+Legacy test hunks (AP-6 item 2, T092-owned):
+- `tests/email_fixture.py`: the docstring line about `SEND_ARGUMENT_KEYS` /
+  `FORBIDDEN_SEND_KEYS` ("six ... four"); the two constants flipped (six keys incl.
+  `attachments`; four forbidden). Nothing else.
+- `tests/test_gmail_mcp_send.py`: module docstring (3 lines: six keys, `attachments`
+  included, never `cc`/`bcc`/`threadId`/`inReplyTo`); the `message` fixture (gains
+  `tmp_path`, `attachment=ef.stage_private_copy(tmp_path, HTML_BODY)`);
+  `test_build_send_arguments_exact_five_keys` renamed `..._exact_six_keys`, its literal
+  key set and exact dict gain `attachments` (still exact); `"new-required"`
+  `SCHEMA_CHANGES` case now uses `threadId`.
+  **Beyond the enumerated list (needed for green, recorded here):**
+  (1) `test_build_send_arguments_accepts_edges` gains `tmp_path` and re-stages a copy
+  when the edge changes `html_body` (`900-char-html-line`), because the attachment must
+  stay byte-identical to the body; every other edge and every assertion unchanged.
+  (2) The local FastMCP server script's `attachments: list[str] | None = None` became
+  `attachments: list[str] = []`: pydantic emits `anyOf [array, null]` for the
+  optional form, which EA-5 refuses (3 V33 tests failed with
+  `wrong type: attachments`); the new form gives the plain array schema that 1.1.11's
+  zod schema has. The recorded-keys logic is unchanged (the app always sends it).
+- `tests/test_email_delivery.py`: `SentCall` gains `arguments` and `attachment`
+  (an `ef.AttachmentSnapshot`) plus a docstring; `RecordingSender.__call__` records
+  `build_send_arguments(message)` and `AttachmentSnapshot.take(message.attachment)`
+  inside the call; `test_hostile_list_and_window_cannot_inject_headers` reads
+  `sender.calls[0].arguments` instead of calling `build_send_arguments` after delivery;
+  `test_success_outcome_and_seam_calls` equality gains
+  `attachment=Path(call.attachment.path)`; `FakeSend.check_calls` docstring "five" ->
+  "six" (its assertion follows the constant). **Beyond the enumerated list:**
+  `test_success_log_lines_follow_ed15` keeps its exact list and gains the three EA-9
+  rows (INFO attaching, DEBUG staged path from the recorded snapshot, INFO size
+  estimate via `email_delivery.estimated_message_bytes`), with a named `sender`; and
+  `test_end_to_end_success_sends_the_full_arguments`'s exact argument dict gains
+  `"attachments": [fake.factory.last_attachment_snapshot().path]`. The plan's "about
+  line 1439 / 1694" sites (`FakeSend.check_calls`,
+  `test_default_seams_use_the_patched_default_send_client`) compare against
+  `ef.SEND_ARGUMENT_KEYS` and needed no edit.
+- `tests/test_cli_email.py`, `tests/test_email_fixture.py`,
+  `tests/test_flag_off_identity.py`: **no change needed** (their key assertions follow
+  the constants; the CLI success line is T093's).
+- No assertion was loosened: every exact key set is still exact (now six), every
+  exact dict / list is still exact.

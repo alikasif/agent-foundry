@@ -182,11 +182,18 @@ def debug_logs(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
 
 @dataclass
 class SentCall:
-    """One recorded ``sender`` call."""
+    """One recorded ``sender`` call.
+
+    ``arguments`` (``build_send_arguments(message)``) and ``attachment`` (the
+    staged file's bytes and modes) are taken INSIDE the call, because the file is
+    removed when delivery returns.
+    """
 
     settings: Settings
     message: OutgoingEmail
     kwargs: dict[str, Any]
+    arguments: dict[str, object]
+    attachment: ef.AttachmentSnapshot
 
 
 class RecordingSender:
@@ -201,7 +208,9 @@ class RecordingSender:
         self, settings: Settings, message: OutgoingEmail, **kwargs: Any
     ) -> GmailSendReceipt:
         """Record the call and return the receipt or raise the error."""
-        self.calls.append(SentCall(settings, message, kwargs))
+        arguments = build_send_arguments(message)
+        snapshot = ef.AttachmentSnapshot.take(message.attachment)
+        self.calls.append(SentCall(settings, message, kwargs, arguments, snapshot))
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
@@ -520,7 +529,7 @@ async def test_hostile_list_and_window_cannot_inject_headers(
         assert injected not in subject.lower()
 
     assert message.to == settings.email_to
-    arguments = build_send_arguments(message)
+    arguments = sender.calls[0].arguments
     assert set(arguments) == ef.SEND_ARGUMENT_KEYS
     assert arguments["to"] == list(settings.email_to)
     assert arguments["subject"] == subject
@@ -562,6 +571,7 @@ async def test_success_outcome_and_seam_calls(
         subject=build_subject(rl),
         text_body=content.text,
         html_body=content.html,
+        attachment=Path(call.attachment.path),
     )
     assert outcome == EmailOutcome(
         status="sent",
@@ -1307,13 +1317,22 @@ async def test_success_log_lines_follow_ed15(
 ) -> None:
     rl = ef.standard_list()
     content = render_email(rl, html_name=HTML_NAME)
-    await deliver(rl, html_path, settings, sender=RecordingSender())
+    sender = RecordingSender()
+    await deliver(rl, html_path, settings, sender=sender)
     size = len(content.html.encode())
+    total = email_delivery.estimated_message_bytes(size, len(content.text.encode()))
     assert delivery_lines(debug_logs) == [
         (
             logging.INFO,
             f"Email body: {size} bytes HTML, {content.shown} of 12 items "
             f"({content.omitted} omitted)",
+        ),
+        (logging.INFO, f"Attaching the digest HTML as {HTML_NAME} ({size} bytes)"),
+        (logging.DEBUG, f"Staged the attachment at {sender.calls[0].attachment.path}"),
+        (
+            logging.INFO,
+            f"Email size estimate: about {round(total / 1000)} KB in total "
+            "(HTML part, attachment, plain part)",
         ),
         (logging.INFO, "Sending the digest email to 3 recipient(s)"),
         (logging.DEBUG, f"Email recipients: {', '.join(ef.RECIPIENTS)}"),
@@ -1432,7 +1451,7 @@ class FakeSend:
         )
 
     def check_calls(self, settings: Settings) -> None:
-        """At most one call, always ``send_email`` with exactly the five keys."""
+        """At most one call, always ``send_email`` with exactly the six keys."""
         assert len(self.factory.calls) <= 1
         for name, arguments in self.factory.calls:
             assert name == "send_email"
@@ -1472,6 +1491,7 @@ async def test_end_to_end_success_sends_the_full_arguments(
                 "body": content.text,
                 "htmlBody": content.html,
                 "mimeType": "multipart/alternative",
+                "attachments": [fake.factory.last_attachment_snapshot().path],
             },
         )
     ]
