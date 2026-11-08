@@ -432,3 +432,6 @@ Each has a recommended default that the design already assumes.
 6. The schema check type-checks only `attachments`, not all six keys.
 7. The attachment has the same name as the saved full page that the "items omitted" line points to; keep name and wording, explain in the README (rewording would break the golden).
 8. A non-ASCII temp path fails before sending; accept and document.
+
+### Approval record (2026-11-08, design-raised items and plan)
+The user approved design-raised items 1 to 8 with the recommended defaults and approved the plan T089 to T102. Added by the user: exclude Markdown from ruff (`extend-exclude = ["*.md"]` under `[tool.ruff]` in `pyproject.toml`, ruff config only) so the whole-repo `ruff format --check .` is clean.

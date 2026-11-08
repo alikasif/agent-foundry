@@ -1313,3 +1313,365 @@ table), with these rows (Result cells `TODO`), same columns as the earlier table
 
 ## Approval record (2026-11-04)
 The user approved this plan (T068 to T088) and the six design-raised defaults: (1) over budget after compact mode, send anyway and flag it; (2) hrefs over 800 characters rendered unlinked; (3) retry only transient session-start failures, once; (4) keep the strict schema check; (5) commented `EMAIL_TO` line in `.env.example`; (6) Telegram stderr lines unchanged, only email lines get the `Email:` prefix.
+
+# 2026-11-08 Email HTML attachment
+
+Amendment plan for PRD "Amendment 2026-11-08: Attach the email HTML as a file"
+(FR-073..FR-084, NFR-E9..NFR-E15, acceptance 35-43, D-A1, the approval record with every
+recommended default Q-A1..Q-A8, and the eight design-raised items), designed in
+`shared/designs.md` "Email HTML attachment (2026-11-08)" (EA-1..EA-16, decisions DA1..DA9,
+EA-14 lists the amended 2026-11-04 items), with facts in `shared/verified_facts.md` "Email
+attachments in 1.1.11 (read 2026-11-08)". Everything above this line (T001-T088, all done)
+still applies, including section 8, AF-P8, TP-8 and EP-8, except where EA-14 amends the
+2026-11-04 design. **EA-1..EA-16 are the binding contract**; this section adds task
+decomposition, ordering, **[plan addition]** clarifications and the new verification rows.
+Starting point: commit `77b6728` (HEAD of `feat/newsletter-digest`; `src/`, `tests/` and
+`README.md` are identical to `694753e`, the T087 gate commit), 4933 tests passing,
+2 xfailed, 2 deselected. New tasks are T089-T102, status `pending` (== not started for
+ralph).
+
+Approved defaults this plan builds on (PRD approval record 2026-11-08): private temp
+directory removed after the send (Q-A1); always attached with `--email`, no flag or env
+var (Q-A2); the email variant, the same string as `htmlBody` (Q-A3); file name
+`reading-list-YYYY-MM-DD.html` (Q-A4); the empty-state email is attached too (Q-A5);
+`with 1 attachment` on the success line (Q-A6); `From:`, LF endings and the unpinned
+`nodemailer` accepted and checked on the first real send (Q-A7); 95,000-byte body budget
+unchanged (Q-A8). **To confirm at plan approval** (design-raised items 1-8, the plan assumes
+the recommended default for each): staging in `email_delivery`, re-check in `gmail_mcp`;
+byte-equality read-back before the call; `OutgoingEmail.attachment` required (more test
+edits than FR-084 lists); the preparation reason carries the exception class name; cleanup
+by unlink + rmdir, no sweep; schema type check on `attachments` only; same file name as the
+saved page, explained in the README; a non-ASCII temp path fails before sending, documented.
+Plan-raised items are in AP-9.
+
+## AP-1 Implementation approach
+
+No new module, no new dependency, no change to the layer order. Two source modules change
+behaviour (`gmail_mcp`, `email_delivery`) and `cli` changes two literals. With `--email` off
+nothing new runs: `email_delivery` is still imported only lazily by `cli`, so no
+`tempfile` call, directory or file exists in a flag-off run, and `render.py`,
+`reading_list.html.j2`, `email_render.py`, `reading_list_email.html.j2`, `models.py` and
+`config.py` are untouched, so the T023, `flag_off_*` and `email_ranked_golden.html` goldens
+stay byte-identical without regeneration.
+
+With the flag on (EA-1, EA-6), inside `send_reading_list_email`:
+render (unchanged) -> `build_subject` -> `attachment_name(reading_list.meta.end_date)` ->
+`try:` `make_temp_dir(prefix=ATTACHMENT_DIR_PREFIX)` (raw path recorded at once) -> resolve,
+chmod/verify 0700 + uid -> `O_EXCL|O_NOFOLLOW|O_CLOEXEC` 0600 write of
+`content.html.encode("ascii")` -> verify regular file, size, 0600 -> `OutgoingEmail(...,
+attachment=path)` -> `sender(...)` (`build_send_arguments` re-check with byte equality, start
+with one retry using the same file, schema check with the `attachments` type check,
+`call_tool` once with six keys) -> map outcome -> `finally:` unlink + rmdir (synchronous,
+never raises, never `rmtree`). A staging failure is `failed` with
+`could not prepare the attachment (<ExcClass>); nothing was sent` and no `sender` call.
+
+The hard part is not the code but keeping every commit green while a **required** dataclass
+field changes the send contract that 2026-11-04 tests pin (exact five-key sets,
+`OutgoingEmail` equality, `build_send_arguments` called after delivery, the success line).
+Three measures:
+1. **Additive fixtures first (T091).** `tests/email_fixture.py` gains `stage_private_copy`,
+   `AttachmentSnapshot` and attachment emulation in `FakeSendSession` (active only when the
+   `attachments` key is present), so it works against the old and the new code. The
+   five/six-key constants are not flipped here.
+2. **One atomic switch (T092).** The `gmail_mcp` and `email_delivery` changes land in one
+   coder task together with the enumerated mechanical migration of the legacy assertions
+   (AP-6 item 2), so the suite is green before and after the commit. A split would leave
+   `email_delivery` constructing an `OutgoingEmail` without the required field (DA2 forbids
+   an optional transition field). `cli` follows in T093 with its two literals and the two
+   success-line constants.
+3. **Guard rules first, positive rules after the code.** T090 adds the stub-safe (negative)
+   EA-2 rules that pass on today's tree and on the synthetic final tree; T097 adds the
+   positive ones ((g) exact six-pair map, (h)(2) the single `OutgoingEmail` site with an
+   `attachment=` from the staging helper), the real-tree mutants and the kill matrix
+   (learnings T069, T083).
+
+Security nets that already exist stay untouched and must stay green: the FR-057 agent
+tool-list test (`test_agent.py`, 19 offered tools, email on/off), the `open_gmail_tools`
+subset and disjoint-maps tests (`test_gmail_mcp.py`), the conftest guard against a real
+`MultiServerMCPClient`, and the ED-16 lazy-import subprocess tests.
+
+## AP-2 Module breakdown
+
+| File | Change | Task |
+|---|---|---|
+| `shared/implementation-notes.md` | `## Library verification (Email attachment, 2026-11-08)` table V39..V45 (AP-7) before `## Task notes` | T089 |
+| `tests/test_architecture.py` | T090: `SEND_NAMES` += `ATTACHMENT_NAME_RE`, `ATTACHMENT_DIR_PREFIX`; negative sub-rules (h)(1), (h)(3), (i); (f) extended; synthetic trees (`_GMAIL_SEND_SIDE`, `STUB_EMAIL_TREE`, `FINAL_EMAIL_TREE`) in the six-key/staging shape; self-tests. T097: positive (g), (h)(2), `find_send_capability_violations` wiring and docstrings, `RealTreeMutant`s, kill matrix | T090, T097 |
+| `tests/email_fixture.py`, `tests/test_email_fixture.py` | T091: additive helpers + their tests. T092: flip `SEND_ARGUMENT_KEYS` (six) and `FORBIDDEN_SEND_KEYS` (four) and the module docstring line | T091, T092 |
+| `src/newsletter_digest/gmail_mcp.py` | Six-key `GMAIL_SEND_ARG_MAP`, `ATTACHMENT_NAME_RE`, `ATTACHMENT_DIR_PREFIX`, `OutgoingEmail.attachment: Path` (required), `build_send_arguments` six keys + docstring, `_attachment_problem` (EA-4 checks 1-8), `_schema_mismatch` type check (EA-5); imports `stat`, `pathlib.Path` | T092 |
+| `src/newsletter_digest/email_delivery.py` | `TempDirFactory`, `attachment_name`, staging helpers, `_remove_staged`, `make_temp_dir` seam, preparation failure, new first REJECTED row in `failure_reason`, size estimate (`QP_FACTOR`, `BASE64_FACTOR`, `MIME_OVERHEAD_BYTES`, `estimated_message_bytes`), EA-9 log rows, module docstring; imports `os`, `stat`, `tempfile`, `datetime.date` | T092 |
+| `tests/test_gmail_mcp_send.py`, `tests/test_email_delivery.py`, `tests/test_cli_email.py` | T092: enumerated legacy hunks only (AP-6 item 2) | T092 |
+| `src/newsletter_digest/cli.py` | `with 1 attachment` literal in `_deliver_by_email`; one sentence in the `--email` help; module docstring if it describes the message parts | T093 |
+| `tests/test_cli_email.py` (success-line helper), `tests/test_flag_off_identity.py` (`EMAIL_SENT_LINE`) | the two success-line constants | T093 |
+| `tests/test_gmail_mcp_send.py` | new tests: six keys, path-safety matrix, schema matrix, failure matrix, start retry with the same path, local FastMCP child read (V43) | T094 |
+| `tests/test_email_delivery.py` | new tests: byte identity, modes/location, cleanup matrix incl. cancellation, preparation failures, cleanup failure, name/property tests, logs, failure mapping, size estimate (V45) | T095 |
+| `tests/test_cli_email.py`, `tests/test_flag_off_identity.py` | new tests: CLI six keys and snapshot, `out_dir` holds only the saved HTML, `TMPDIR` empty after every outcome, start retry one directory, help sentence; flag-off and `--telegram`-only subprocess runs leave `TMPDIR` empty (V42) | T096 |
+| `README.md` | `## Email delivery` amended per EA-12 items 1-9 | T098 |
+| `shared/reviews/T099_review.md`, `T100_arch_review.md` | reviews | T099, T100 |
+| `shared/execution_summary.md` | appended amendment section | T102 |
+
+**Not modified by any task:** `config.py`, `models.py`, `render.py`, `email_render.py`, both
+templates, `agent.py`, `tools.py`, `prompts.py`, `store.py`, `delivery.py`, `pdf.py`,
+`telegram.py`, `enrich.py`, `fetch.py`, `netguard.py`, `extract.py`, `links.py`, `llm.py`,
+the fonts, `.env.example`, `pyproject.toml`/`uv.lock` (no new dependency, EA-13), every
+golden under `tests/fixtures/` (T023, `flag_off_*`, `email_ranked_golden.html`),
+`tests/conftest.py`, `tests/test_agent.py`, `tests/test_gmail_mcp.py`,
+`tests/test_email_render.py`, `tests/test_email_html.py`, `tests/test_config_email.py`,
+every Telegram test file, and `shared/designs.md`, `shared/prd.md`,
+`shared/verified_facts.md` (see AP-9 item 2).
+
+## AP-3 Agent responsibilities
+
+| `assigned_to` | Tasks |
+|---|---|
+| `project_structure` | T089 (identity and baseline pre-check, no-new-dependency check, V39..V45 table) |
+| `python_test` | T090 (guard rules first), T091 (fixtures), T094-T097 (tests), T101 (final gate) |
+| `python_coder` | T092 (atomic switch: `gmail_mcp` + `email_delivery` + legacy migration), T093 (`cli` literals + two success-line constants) |
+| `documentation` | T098 README, T102 execution summary |
+| `backend_reviewer` | T099 (path safety, byte identity, temp-file confidentiality and lifetime, failure semantics, privacy) |
+| `architecture_reviewer` | T100 (placement, boundaries, AST rules, flag-off, seams, test-scope discipline) |
+
+## AP-4 Dependency graph
+
+```
+T089 scaffold: identity + baseline pre-check, no-new-dep check, V39..V45 table
+ ├─► T090 arch guard rules (negative, stub-safe) ─┐
+ └─► T091 email_fixture additive helpers ─────────┴─► T092 gmail_mcp + email_delivery + legacy migration
+                                                        ├─► T093 cli literals + success-line constants
+                                                        ├─► T094 gmail_mcp send tests
+                                                        └─► T095 email_delivery tests
+Tests:  T096◄T093   T097◄T090,T092,T093
+Docs:   T098◄T092,T093
+Review: T099◄T092,T093,T094,T095,T096
+Arch:   T100◄T090,T092,T093,T096,T097
+Final:  T101◄T089..T100
+Summary:T102◄T101
+```
+
+Why the edges: T092 waits for T090 so the coder gets immediate feedback from the
+`tempfile`-owner and `"attachments"`-literal rules (the first code that references them),
+and for T091 because the legacy migration needs `stage_private_copy` (the `message` fixture
+of `test_gmail_mcp_send.py`) and the call-time snapshot (the `RecordingSender` of
+`test_email_delivery.py`). T093 waits for T092 because both edit `tests/test_cli_email.py`
+and the success line only becomes true once a message always carries the attachment.
+T094 and T095 own different test files and run beside T093. T096 tests the CLI wording and
+the subprocess runs, so it needs T093. T097's positive rules describe the final code, so it
+needs both code tasks. T101 waits for every task including both reviews and their
+review_feedback rounds.
+
+Parallel waves:
+1. T089
+2. T090, T091
+3. T092
+4. T093, T094, T095
+5. T096, T097, T098
+6. T099, T100
+7. T101
+8. T102
+
+## AP-5 API contracts (binding; details in EA-3..EA-9)
+
+### gmail_mcp.py (send half only; the read half stays byte-identical)
+```python
+GMAIL_SEND_ARG_MAP: dict[str, str] = {"to": "to", "subject": "subject",
+    "text_body": "body", "html_body": "htmlBody", "mime_type": "mimeType",
+    "attachment": "attachments"}                     # exactly six pairs, one dict literal
+ATTACHMENT_NAME_RE = re.compile(r"reading-list-[0-9]{4}-[0-9]{2}-[0-9]{2}\.html")  # fullmatch
+ATTACHMENT_DIR_PREFIX = "newsletter-digest-email-"
+@dataclass(frozen=True) class OutgoingEmail:
+    to: tuple[str, ...]; subject: str; text_body: str; html_body: str
+    attachment: Path                                 # REQUIRED, no default
+def build_send_arguments(message: OutgoingEmail) -> dict[str, object]
+    # {to: [...], subject, body, htmlBody, mimeType, attachments: [str(message.attachment)]}
+def _attachment_problem(message: OutgoingEmail) -> str | None   # EA-4 checks 1-8, fixed details
+def _schema_mismatch(schema: object) -> str     # + "wrong type: attachments" (EA-5)
+```
+`_attachment_problem` runs after the existing `_message_problem` checks and raises
+`GmailSendError(INVALID_MESSAGE, call_issued=False, session_starts=0)` before any
+`client_factory` call. `send_gmail_message`, `_send_attempt`, the retry, timeouts and
+`GmailSendErrorKind` are unchanged.
+**[plan addition]** Sub-rule (h)(1) allows the string constant `"attachments"` only as a
+value of the `GMAIL_SEND_ARG_MAP` literal. `_schema_mismatch` therefore reads the server
+name as `GMAIL_SEND_ARG_MAP["attachment"]`, never as a second `"attachments"` literal (the
+fixed detail texts are longer strings and are not equal to it). The `gmail_mcp.py` diff
+against `77b6728` touches only the send half; the coder lists every modified pre-existing
+line (map, dataclass, `build_send_arguments` docstring and return, `_message_problem` call
+site, `_schema_mismatch`, imports) in the notes.
+
+### email_delivery.py (imports `gmail_mcp` SEND_NAMES only, `email_render`, `models`, `config`; stdlib adds `os`, `stat`, `tempfile`, `datetime.date`)
+```python
+TempDirFactory = Callable[..., str]            # tempfile.mkdtemp-compatible (prefix=...)
+QP_FACTOR = 1.07; BASE64_FACTOR = 1.37; MIME_OVERHEAD_BYTES = 2_048
+def attachment_name(end_date: date) -> str     # f"reading-list-{end_date.isoformat()}.html"
+def estimated_message_bytes(html_bytes: int, text_bytes: int) -> int
+async def send_reading_list_email(reading_list: ReadingList, html_path: Path,
+        settings: Settings, *, sender=send_gmail_message, renderer=render_email,
+        make_temp_dir: TempDirFactory = tempfile.mkdtemp) -> EmailOutcome
+def _stage_attachment(...) -> Path             # EA-3 directory + file; name may change
+def _write_private_file(...) -> ...            # EA-3 O_EXCL/O_NOFOLLOW write; name may change
+def _remove_staged(raw_directory: str, name: str) -> None   # never raises (EA-6)
+def failure_reason(err: GmailSendError, settings: Settings) -> str
+    # new REJECTED row checked FIRST (before permission):
+    # "the mail server could not read the attachment file; nothing was sent"
+```
+`EmailOutcome`, `build_subject`, the existing reason rows and `redact_addresses` re-export
+are unchanged. **[plan addition]** The staging `try/finally` begins before
+`make_temp_dir` is called; the raw directory string is stored in a local before any check
+that can fail; the preparation `except` catches `Exception` only (anyio cancellation and
+`KeyboardInterrupt` propagate, cleanup still runs). The value passed as
+`OutgoingEmail(attachment=...)` is a bare local name assigned only from the staging helper's
+return (rule (h)(2)). If the helper names differ from EA-2's (`_stage_attachment`,
+`_write_private_file`, `_remove_staged`), T092 records the real names in its notes and T097
+uses them in the rule constants; T090 keys its stub-safe (f) extension on EA-2's names plus
+`attachment_name`, and T097 aligns the list with the real names.
+
+### cli.py
+`_deliver_by_email` success line:
+`Email: sent to N recipient(s) with 1 attachment (Gmail id <id>).` (the omitted and
+over-budget suffixes follow the period, unchanged); `--email` help gains
+`The same HTML is attached as reading-list-YYYY-MM-DD.html.`; `markup=False`,
+`highlight=False`, `emoji=False`, `soft_wrap=True` unchanged; no change to `EmailOutcome`,
+`_EmailResult`, `_EmailImportFailed`, exit codes or the lazy import (DA7). `ALL_OPTIONS`
+is unaffected.
+
+## AP-6 Key decisions (planning level)
+
+1. **No new goldens.** No render/template/model change, so the T023, `flag_off_*` and
+   `email_ranked_golden.html` goldens remain the oracles (FR-079, FR-081).
+2. **Existing test files: enumerated hunks only.** Allowed edits:
+   - `tests/test_architecture.py`: T090 and T097, the EA-2 rule changes, constants,
+     synthetic trees, cases and mutants only.
+   - `tests/email_fixture.py`: T091 additive helpers (`stage_private_copy`,
+     `AttachmentSnapshot`, `FakeSendSession` attachment emulation, `attachment_reply`
+     script option, docstring entries); T092 the `SEND_ARGUMENT_KEYS` /
+     `FORBIDDEN_SEND_KEYS` flip and the docstring line describing them.
+   - `tests/test_email_fixture.py`: T091 new tests only; T092 may adjust an existing
+     assertion only if the constant flip breaks it (expected: none, the union and subset
+     checks still hold), listed in notes.
+   - `tests/test_gmail_mcp_send.py`: T092 the module docstring line naming `attachments`
+     as never sent, the `message` fixture (gains `tmp_path` and `attachment=`), the
+     five-key test (becomes the six-key test, renamed), the `"new-required"`
+     `SCHEMA_CHANGES` case (unknown required key switches from `attachments` to a key
+     outside the six, e.g. `threadId`), and any other `OutgoingEmail(...)` construction
+     or exact-key assertion that the flip breaks; T094 new tests and, if needed, an extra
+     `attachments` parameter use in the existing local FastMCP `send_email` server.
+   - `tests/test_email_delivery.py`: T092 `RecordingSender` (records
+     `build_send_arguments(message)`, file bytes and modes inside the fake call), the
+     assertions that call `build_send_arguments` after delivery (about lines 523-528,
+     1439, 1694) moved onto the recorded snapshot, and the `OutgoingEmail` equality
+     (about line 560) gaining `attachment=<recorded path>`; T095 new tests and the
+     cancellation extension of `test_cancellation_is_not_swallowed`.
+   - `tests/test_cli_email.py`: T092 only if an assertion beyond lines 332-333 breaks
+     (these follow the constants); T093 the success-line helper (about line 292); T096
+     new tests.
+   - `tests/test_flag_off_identity.py`: T093 `EMAIL_SENT_LINE`; T096 new test functions
+     only (a new keyword with a default on an existing subprocess helper is allowed if
+     needed; existing calls unchanged).
+   Every task lists each modified pre-existing hunk in its notes; T101 checks
+   `git diff 77b6728 -- newsletter_digest/tests/` against this list. These are the
+   DA8/EA-11 "tests changed beyond FR-084's list" and are recorded as such.
+3. **Atomic switch in one coder task (T092)**, which also applies the item-2 legacy hunks
+   so the suite stays green at every commit. New behaviour tests stay with the test
+   tasks (T094-T097). See AP-9 item 1.
+4. **Real temp directories in tests are allowed but must not leak.** The default
+   `make_temp_dir` writes under the system temp location; tests that need control inject
+   `make_temp_dir` or set `tempfile.tempdir` via `monkeypatch` (it is read at call time;
+   learnings T079/T082 about bound defaults do not apply because `mkdtemp` itself reads
+   the global). T101 compares the `newsletter-digest-email-*` entries in
+   `tempfile.gettempdir()` before and after the full suite (must be equal).
+5. **Flag-off proof is about effects, not about `tempfile` in `sys.modules`.** Third-party
+   imports may already load `tempfile`; T096 records the fact (V42) and asserts what EA-10
+   requires: no `newsletter_digest.email_*` module loaded, no directory created in a
+   child's empty `TMPDIR`, byte-identical output.
+6. **Reviews:** one backend review on the security boundary (path safety, byte identity,
+   confidentiality, lifetime, failure semantics, privacy), one architecture review
+   (placement DA1, boundaries, AST rules, flag-off, seams, test-scope discipline). Each
+   runs mutation probes from scratch scripts.
+7. **Manual end-to-end (acceptance 43) is a user step, never a task.** No task sends real
+   mail. T101 writes the checklist for the user, T098 documents it in the README, T102
+   repeats it. It also settles the EA-16 **[re-verify]** items only a real send can show
+   (`From:` header, LF endings, chip/no clipping, the real EACCES/EISDIR texts).
+8. **Earlier open findings are not reopened** (T085 M-1/M-3, T086 M1-M4/I1-I7, C1-C10,
+   T065 finding 2, FR-070). T099 checks only that the new attachment row does not make M-3
+   worse (no network marker in the attachment row) and T102 carries them forward.
+
+## AP-7 Library verification rows (owned by tasks)
+
+T089 adds `## Library verification (Email attachment, 2026-11-08)` to
+`shared/implementation-notes.md`, directly before `## Task notes` (after the 2026-11-04
+email table), same columns as the earlier tables, Result cells `TODO`:
+
+| ID | Item | Owner |
+|---|---|---|
+| V39 | No new dependency: `os`, `stat`, `tempfile`, `pathlib` are stdlib; `uv lock --check` passes; `pyproject.toml`/`uv.lock` unchanged | T089 |
+| V40 | `tempfile.mkdtemp(prefix=...)` honours `TMPDIR` / `tempfile.tempdir` at call time, creates 0700 under the current umask, returns an absolute path; `Path.resolve(strict=True)` of it equals itself under `/tmp` on WSL | T092 |
+| V41 | `os.O_NOFOLLOW`, `O_CLOEXEC` exist on Linux/WSL; `O_CREAT|O_EXCL` refuses a planted symlink (`FileExistsError`) and an existing file; `fchmod` 0600 survives umask 077 and 022 (scratch probe under the scratchpad) | T092 |
+| V42 | Flag-off `sys.modules` after `import newsletter_digest.cli` (empty cwd, `uv run --project`): `stat`/`pathlib`/`os` already present at interpreter start; whether `tempfile` is present (record, assert only what is true); no `newsletter_digest.email_*` | T096 |
+| V43 | The local FastMCP stdio child under mcp's minimal environment reads a 0600 file in a 0700 directory; its SHA-256 equals `sha256(htmlBody)` (no npx, no Gmail) | T094 |
+| V44 | Error-text markers for "server could not read the attachment" (`file does not exist`, `no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email with`): verified `File does not exist: <path>` from source; Node `EACCES`/`EISDIR` texts are general knowledge, not run; confirm on the manual send | T092 (re-checked by T099) |
+| V45 | `estimated_message_bytes(95_000, t)` is 2.4-2.6 x the HTML; stdlib `quopri` + `base64` of the synthetic 300-item email HTML agree within 10% | T095 |
+
+## AP-8 Process rules (additions to section 8, AF-P8, TP-8 and EP-8)
+
+- Every task reads `shared/designs.md` EA-1..EA-16 (and the ED-* rows EA-14 amends),
+  `shared/verified_facts.md` "Email attachments in 1.1.11 (read 2026-11-08)" and this
+  section first. Record every decision not covered by the spec, every deviation from
+  EA-*/DA* and every tradeoff in `shared/implementation-notes.md` (FR-022), in the task's
+  own `## T0xx — <title>` section and owned V-rows (re-read before editing; targeted edits
+  only; other tasks edit the file in parallel).
+- The full suite, `tests/test_flag_off_identity.py`, the goldens, the FR-057 agent
+  tool-list test and the Telegram suites must pass at the end of every task.
+- Never read, print, copy or touch `.env` or `out/`. Sizes and byte checks come from
+  `tests/email_fixture.py` (synthetic). Test addresses use reserved domains only.
+- No test starts `npx`, a real Gmail MCP server or a socket; use the `client_factory` seam
+  and the fakes, patch `shutil.which`, never call `_default_send_client()`. The only real
+  MCP process allowed is the local FastMCP stdio server already in
+  `tests/test_gmail_mcp_send.py`.
+- The attachment path is fixed code only: never from model, newsletter or fetched content,
+  `.env`, a CLI option, `html_path` or `settings.out_dir`. Nothing is written to `out_dir`
+  by the email step. Never use `shutil.rmtree` for cleanup and never sweep old
+  directories. The temp path appears in logs at DEBUG only; reasons and stderr carry
+  fixed text and the exception class name only.
+- Never call `send_email` more than once per run; never pass `cc`, `bcc`, `threadId` or
+  `inReplyTo`; never send without `attachments` (no fallback).
+- Scratch files go under the scratchpad with the task id as prefix (learnings T027); any
+  real-file probe (V40, V41) runs in a scratch directory, never in the project tree.
+- Stage only your own files and commit in one command; check `git show --stat HEAD`.
+  `shared/task_list.json` keeps the `json.dumps(indent=2, ensure_ascii=True)` format with
+  one trailing newline (as it is at `77b6728`). Local commits only; never push.
+
+## AP-9 Risks and plan-raised items
+
+Risks:
+- **Atomic switch size (T092).** Two source files plus legacy hunks in four test files in
+  one commit. Mitigated by T091 providing the helpers first and by the enumerated hunk
+  list; T099/T100 check that the migration did not weaken an assertion (a migrated
+  assertion must still pin the exact key set, now six).
+- **Real temp directories during tests** (AP-6 item 4) could leak on a test bug; T101's
+  before/after listing catches it.
+- **Check-then-use window** between `build_send_arguments` and the server's read (EA-4):
+  accepted; only a same-user process could exploit it.
+- **First real send** (`From:`, LF endings, unpinned `nodemailer`, Gmail's handling of an
+  `.html` attachment, the real EACCES/EISDIR texts) is verified only by acceptance 43.
+- **Windows-side `node` under WSL** cannot read the Linux path; result is a clean
+  "could not read the attachment file" failure, documented in the README.
+- **Parallel edits** to `shared/implementation-notes.md` (three tasks in waves 4 and 5):
+  own section only, re-read before editing.
+- **Uncommitted planning docs**: the orchestrator commits this plan and the task list
+  before ralph starts so task commits stay scoped.
+
+Plan-raised items for user confirmation (the plan assumes the recommended option):
+1. **One coder task edits legacy tests (T092).** Recommended: yes, the enumerated
+   mechanical hunks only, so every commit is green. Alternative: a separate python_test
+   migration task with a red suite between the two commits.
+2. **`shared/designs.md` ruff-format note** (open since fa28154; `ruff format --check .`
+   fails only on that file's fenced Python blocks). Recommended: do **not** change
+   `designs.md` (append-only design record) and keep the gate at
+   `ruff format --check src tests`; no task is planned. Alternative: a one-line
+   `extend-exclude = ["*.md"]` in `[tool.ruff]`, which is a `pyproject.toml` change.
+3. **Flag-off `tempfile`**: assert effects (no email module, no directory) rather than
+   `tempfile` absence if a dependency already loads it (AP-6 item 5, V42).
+4. **Manual acceptance 43** stays a user step; nothing in T089-T102 sends mail.
+
+## Approval record (2026-11-08, attachment plan)
+The user approved this plan (T089 to T102) with all 8 design-raised items and the plan-level items at their recommended defaults: T092 is one atomic commit including the mechanical old-test edits; the V42 `tempfile` check is conditional; the schema check reads the argument name from `GMAIL_SEND_ARG_MAP`; `shared/designs.md` is not reformatted.
+Addition approved by the user: make `uv run ruff format --check .` clean for the whole repo by adding `extend-exclude = ["*.md"]` under `[tool.ruff]` in `pyproject.toml`. Folded into T089 (ruff config only; `uv lock --check` must still pass). T101 now runs `ruff format --check .` on the whole repo. This supersedes the earlier plan note that the gate checks only `src tests`.
