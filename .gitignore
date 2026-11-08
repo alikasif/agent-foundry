@@ -218,6 +218,7 @@ skill_autoresearch/skill_autoresearch/shared
 skill_planner/shared
 skillful_agent/shared
 skillrag/shared
+**/agent-memory/*
 
 # codeact_agent workspace artifacts (Phase C context spill files)
 .codeact_workspace/

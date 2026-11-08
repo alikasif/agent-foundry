@@ -31,11 +31,44 @@ Follow these steps in exact order:
 - Read `<project_dir>/shared/plan.md` for project name, tech stack, and module layout.
 - If missing, halt and report: "Cannot proceed: shared/plan.md not found."
 
-### 3. Create Directories
+### 3. Create Project Directories
 - Create all directories specified in the task description.
 - Create a `.gitkeep` file in each empty subdirectory so git tracks them.
 - Do NOT create inner module structure unless explicitly listed in `output_files` — that belongs to specialist agents.
 - Do NOT create source code files (`.py`, `.js`, `.ts`, `.sql`, etc.).
+
+<Project name>/
+├── config/
+│   ├── models.yaml              # Provider configs, API keys, rate limits
+├── model/
+│   ├── interface.py             # Unified model calling API
+│   ├── context.py               # Context window management, summarization
+│   └── providers/
+│       ├── openai.py
+│       └── anthropic.py
+├── tools/
+│   ├── registry.py              # Tool registration, lookup, schema validation
+│   ├── builtin/                 # Your tools (each file = one tool + its schema)
+│   └── custom/                  # Agent-generated tools land here
+├── state/
+│   ├── memory.py                # Working memory, checkpointing, rollback
+│   └── plan.py                  # Plan tracking, step completion status
+├── orchestration/
+│   ├── loop.py                  # Core agent loop
+│   ├── router.py                # Next-action decisions: tool, sub-agent, escalate
+│   └── subagents.py             # Sub-agent spawning and coordination
+├── evaluation/
+│   ├── linters.py               # Custom linters
+│   └── validators.py            # Output validation (schema, tests, review)
+├── observability/
+│   ├── tracer.py                # Structured trace logging
+│   └── metrics.py               # Cost, latency, success rate tracking
+├── prompts/
+│   ├── system.md.jinja          # Base system prompt template
+│   └── stages/                  # One template per workflow stage
+├── evals/                       # Benchmark tasks for regression testing
+├── main.py
+└── README.md
 
 ### 4. Create Config Stubs
 Write root-level config files appropriate to the tech stack (only if listed in `output_files`):
