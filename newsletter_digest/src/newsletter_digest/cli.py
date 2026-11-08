@@ -4,7 +4,7 @@ Parses options (CLI flag > env var > default), builds :class:`Settings`, runs th
 digest and writes the HTML reading list. With ``--telegram`` it then saves a PDF copy
 next to the HTML and sends it to the user's own Telegram chat. With ``--email`` it
 emails the reading list as HTML to ``EMAIL_TO`` through a separate, send-only Gmail MCP
-session.
+session, with the same HTML attached as ``reading-list-YYYY-MM-DD.html``.
 
 Exit codes:
     0: success (including the empty and the unranked-fallback list): the digest is
@@ -216,7 +216,8 @@ def _setup_logging(log_level: str) -> logging.Logger:
     is_flag=True,
     help="Also email the reading list as HTML to the addresses in EMAIL_TO (.env), "
     "through the same Gmail MCP server and login (no SMTP, no PDF). The AI agent "
-    "never gets the send tool. Privacy: every recipient sees the others in To.",
+    "never gets the send tool. Privacy: every recipient sees the others in To. "
+    "The same HTML is attached as reading-list-YYYY-MM-DD.html.",
 )
 @click.option(
     "--log-level",
@@ -387,7 +388,7 @@ def _deliver_by_email(
         count = outcome.recipients
         line = (
             f"Email: sent to {count} recipient{'' if count == 1 else 's'} "
-            f"(Gmail id {outcome.message_id})."
+            f"with 1 attachment (Gmail id {outcome.message_id})."
         )
         if outcome.omitted > 0:
             line += (

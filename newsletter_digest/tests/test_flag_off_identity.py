@@ -544,7 +544,7 @@ EMAIL_CHILD_ENV_DROP_PREFIXES = (*CHILD_ENV_DROP_PREFIXES, "EMAIL_")
 EMAIL_RECIPIENTS = ",".join(ef.RECIPIENTS)
 EMAIL_SENT_LINE = (
     f"Email: sent to {len(ef.RECIPIENTS)} recipients "
-    f"(Gmail id {ef.DEFAULT_MESSAGE_ID})."
+    f"with 1 attachment (Gmail id {ef.DEFAULT_MESSAGE_ID})."
 )
 FAKE_COMMAND_DIR = "/fake-bin"
 

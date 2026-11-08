@@ -289,7 +289,7 @@ def email_line(result: Result) -> str:
 def sent_line(count: int, message_id: str = ef.DEFAULT_MESSAGE_ID) -> str:
     """The ED-12 sent line without suffixes."""
     noun = "recipient" if count == 1 else "recipients"
-    return f"Email: sent to {count} {noun} (Gmail id {message_id})."
+    return f"Email: sent to {count} {noun} with 1 attachment (Gmail id {message_id})."
 
 
 def failed_line(reason: str, html_path: Path) -> str:

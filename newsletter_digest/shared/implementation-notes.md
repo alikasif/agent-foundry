@@ -5520,3 +5520,41 @@ Legacy test hunks (AP-6 item 2, T092-owned):
   the constants; the CLI success line is T093's).
 - No assertion was loosened: every exact key set is still exact (now six), every
   exact dict / list is still exact.
+
+## T093 — cli.py: 'with 1 attachment' success line, --email help sentence, success-line test constants
+
+Changes (`src/newsletter_digest/cli.py`):
+- `_deliver_by_email` sent line is now
+  `Email: sent to N recipient(s) with 1 attachment (Gmail id <id>).` The words
+  `with 1 attachment` are a literal in the f-string (DA7). The omitted and over-budget
+  suffixes still follow the period; `markup=False`, `highlight=False`, `emoji=False`,
+  `soft_wrap=True` unchanged. FAILED and OUTCOME UNKNOWN lines unchanged.
+- `--email` help: one sentence appended to the existing text,
+  `The same HTML is attached as reading-list-YYYY-MM-DD.html.` (the rest kept verbatim;
+  `ALL_OPTIONS` unaffected).
+- Module docstring: only the sentence describing what `--email` sends gained
+  `, with the same HTML attached as reading-list-YYYY-MM-DD.html`. The exit-code
+  section is unchanged.
+- Not touched: `EmailOutcome`, `_EmailResult`, `_EmailImportFailed`, exit codes, the
+  lazy import in `_run_email_delivery`, the Telegram path. No T063/T083 mutant anchor
+  in `tests/test_architecture.py` quotes the edited lines (checked by grep).
+
+Modified pre-existing test hunks (AP-6 item 2, owned by T093; nothing else in these
+files):
+- `tests/test_cli_email.py` `sent_line()` (line 292): the returned f-string gains
+  `with 1 attachment ` before `(Gmail id ...)`. Still 88 columns or fewer.
+- `tests/test_flag_off_identity.py` `EMAIL_SENT_LINE` (line 547): the second f-string
+  part gains `with 1 attachment `.
+
+Decisions and checks:
+- The help check: `uv run --project <project> newsletter-digest --help` from an empty
+  scratch cwd (`scratchpad/T093_empty_cwd`, learnings T075) exits 0. Click wraps the
+  hyphenated name as `reading-` / `list-YYYY-MM-DD.html.` (learnings T060), so the
+  sentence was confirmed with all whitespace removed. No test asserts the help text; a
+  new help test would be T096's scope, not added here.
+- `README.md` line 653 / 691 still show the old sent line; README is T098's
+  (docs-writer), so it is left alone and flagged here for that task.
+- Verification: `uv run ruff format` (3 own files unchanged), `uv run ruff check .`,
+  `uv run pyrefly check` (0 errors), `uv run pytest -q`: 5060 passed, 2 xfailed,
+  2 deselected (same count as after T092; the three tests that use `EMAIL_SENT_LINE`
+  and every `sent_line()` user pass with the new line).
