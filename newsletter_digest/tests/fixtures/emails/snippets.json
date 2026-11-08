@@ -1,0 +1,249 @@
+{
+  "_comment": "Characterisation goldens for gmail_mcp.html_to_text, generated from the stdlib html.parser implementation at 8548f1f (F004, before the lxml port).",
+  "snippets": {
+    "script": {
+      "html": "<p>Visible</p><script>var secret = 1;</script>",
+      "text": "Visible"
+    },
+    "style": {
+      "html": "<p>Visible</p><style>.secret { color: red }</style>",
+      "text": "Visible"
+    },
+    "head-title": {
+      "html": "<head><title>secret</title></head><body><p>Visible</p></body>",
+      "text": "Visible"
+    },
+    "display-none": {
+      "html": "<p>Visible</p><div style='display:none'>secret</div>",
+      "text": "Visible"
+    },
+    "display-none-spaced": {
+      "html": "<p>Visible</p><span style=\"color: red; DISPLAY : None\">secret</span>",
+      "text": "Visible"
+    },
+    "hidden-attr": {
+      "html": "<p>Visible</p><div hidden>secret</div>",
+      "text": "Visible"
+    },
+    "noscript-template": {
+      "html": "<p>Visible</p><noscript>secret</noscript><template>secret</template>",
+      "text": "Visible"
+    },
+    "svg": {
+      "html": "<p>Visible</p><svg><text>secret</text></svg>",
+      "text": "Visible"
+    },
+    "nested-hidden": {
+      "html": "<div style='display:none'><div>secret</div> secret</div><p>Visible</p>",
+      "text": "Visible"
+    },
+    "http-link": {
+      "html": "<p>Read <a href=\"https://example.com/a?b=1&amp;c=2\">the article</a> now</p>",
+      "text": "Read the article <https://example.com/a?b=1&c=2> now"
+    },
+    "javascript-link": {
+      "html": "<p>Click <a href=\"javascript:alert(1)\">here</a></p>",
+      "text": "Click here"
+    },
+    "mailto-link": {
+      "html": "<p>Click <a href=\"mailto:editor@example.com\">here</a></p>",
+      "text": "Click here"
+    },
+    "fragment-link": {
+      "html": "<p>Click <a href=\"#anchor\">here</a></p>",
+      "text": "Click here"
+    },
+    "image-alt-link": {
+      "html": "<a href=\"https://example.com/x\"><img src=\"https://img/x.png\" alt=\"Logo\"></a><p><img src=\"https://img/y.png\" alt=\"decorative\">Body</p>",
+      "text": "Logo <https://example.com/x>\nBody"
+    },
+    "empty-link": {
+      "html": "<p>A<a href=\"https://t.co/x\"></a>B</p>",
+      "text": "AB"
+    },
+    "list": {
+      "html": "<ul><li>One</li><li>Two</li>\n<li>Three</li></ul>",
+      "text": "- One\n- Two\n- Three"
+    },
+    "blocks": {
+      "html": "<div>First</div><p>Second</p>Third<br>Fourth<h2>Fifth</h2>",
+      "text": "First\n\nSecond\nThird\nFourth\nFifth"
+    },
+    "whitespace": {
+      "html": "<p>  lots   of\n\n\t spaces&nbsp;&nbsp;here  </p>\n\n\n\n<p>next</p>",
+      "text": "lots of spaces here\n\nnext"
+    },
+    "zero-width": {
+      "html": "<p>Fish &amp; chips\u200b\u200c&zwnj;&#8203;!</p>",
+      "text": "Fish & chips!"
+    },
+    "link-blocks": {
+      "html": "<a href=\"https://example.com/s\"><div>Big</div><div>Story</div></a>",
+      "text": "Big Story <https://example.com/s>"
+    },
+    "unclosed-head": {
+      "html": "<html><head><body><p>Body text</p>",
+      "text": "Body text"
+    },
+    "tag-heavy-unclosed": {
+      "html": "<html><body><div><p>Hello <a href='https://x.io'>x</a></p>",
+      "text": "Hello x <https://x.io>"
+    },
+    "uppercase-tags": {
+      "html": "<P>Hello <A HREF=\"https://example.com/u\">World</A></P>",
+      "text": "Hello World <https://example.com/u>"
+    },
+    "self-closing-br": {
+      "html": "<p>one<br/>two<br />three</p>",
+      "text": "one\n\ntwo\n\nthree"
+    },
+    "inline-spacing": {
+      "html": "<p><b>bold</b> <i>italic</i> <a href='https://e.x/a'>link</a> end</p>",
+      "text": "bold italic link <https://e.x/a> end"
+    },
+    "nested-inline-link": {
+      "html": "<p><a href='https://e.x/n'><span><strong>Title</strong> (5 min)</span></a></p>",
+      "text": "Title (5 min) <https://e.x/n>"
+    },
+    "link-text-and-img": {
+      "html": "<a href='https://e.x/i'><img alt='Pic'> Caption</a>",
+      "text": "Caption <https://e.x/i>"
+    },
+    "link-without-href": {
+      "html": "<p>Plain <a name='top'>anchor</a> text</p>",
+      "text": "Plain anchor text"
+    },
+    "relative-link": {
+      "html": "<p>See <a href='/path/x'>local</a></p>",
+      "text": "See local"
+    },
+    "ordered-list-nested": {
+      "html": "<ol><li>A<ul><li>A1</li><li>A2</li></ul></li><li>B</li></ol>",
+      "text": "- A\n- A1\n- A2\n\n- B"
+    },
+    "table-cells": {
+      "html": "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>",
+      "text": "a\n\nb\n\nc\n\nd"
+    },
+    "comments": {
+      "html": "<p>keep<!-- hidden comment -->this</p><!-- <p>not this</p> -->",
+      "text": "keepthis"
+    },
+    "mso-conditional": {
+      "html": "<!--[if mso]><table><tr><td>MSO only</td></tr></table><![endif]--><p>Everyone</p>",
+      "text": "Everyone"
+    },
+    "downlevel-revealed": {
+      "html": "<![if !mso]><p>Non-MSO</p><![endif]><p>All</p>",
+      "text": "Non-MSO\n\nAll"
+    },
+    "headings": {
+      "html": "<h1>One</h1><h2>Two</h2><h3>Three</h3><h6>Six</h6>",
+      "text": "One\n\nTwo\n\nThree\n\nSix"
+    },
+    "pre": {
+      "html": "<pre>line 1\n    indented\nline 3</pre>",
+      "text": "line 1 indented line 3"
+    },
+    "blockquote": {
+      "html": "<blockquote><p>Quoted</p></blockquote><p>After</p>",
+      "text": "Quoted\n\nAfter"
+    },
+    "hr": {
+      "html": "<p>above</p><hr><p>below</p>",
+      "text": "above\n\nbelow"
+    },
+    "doctype-and-bom": {
+      "html": "\ufeff<!DOCTYPE html><html><body><p>BOM</p></body></html>",
+      "text": "BOM"
+    },
+    "crlf": {
+      "html": "<p>a\r\nb</p>\r\n<p>c</p>",
+      "text": "a b\n\nc"
+    },
+    "nbsp-only-paragraph": {
+      "html": "<p>&nbsp;</p><p>Text</p><p>&nbsp;</p>",
+      "text": "Text"
+    },
+    "entities-named": {
+      "html": "<p>&ldquo;Q&rdquo; &mdash; it&rsquo;s &hellip; &copy;</p>",
+      "text": "\u201cQ\u201d \u2014 it\u2019s \u2026 \u00a9"
+    },
+    "entity-apos": {
+      "html": "<p>it&apos;s</p>",
+      "text": "it's"
+    },
+    "entity-in-href": {
+      "html": "<a href=\"https://e.x/?a=1&amp;b=2&amp;c=3\">q</a>",
+      "text": "q <https://e.x/?a=1&b=2&c=3>"
+    },
+    "bare-amp-in-href": {
+      "html": "<a href=\"https://e.x/?a=1&b=2\">q</a>",
+      "text": "q <https://e.x/?a=1&b=2>"
+    },
+    "visibility-hidden": {
+      "html": "<p>Visible</p><span style='visibility:hidden'>still emitted</span>",
+      "text": "Visible\nstill emitted"
+    },
+    "display-none-important": {
+      "html": "<p>Visible</p><div style='display:none !important'>secret</div>",
+      "text": "Visible"
+    },
+    "hidden-span-in-link": {
+      "html": "<a href='https://e.x/h'>Title<span style='display:none'>x</span></a>",
+      "text": "Title <https://e.x/h>"
+    },
+    "img-pixel": {
+      "html": "<p>Text</p><img src='https://t.example/o.gif' width='1' alt=''>",
+      "text": "Text"
+    },
+    "emoji": {
+      "html": "<p>\ud83d\ude80 Launch &#128640;</p>",
+      "text": "\ud83d\ude80 Launch \ud83d\ude80"
+    },
+    "unclosed-p": {
+      "html": "<p>first<p>second<p>third",
+      "text": "first\nsecond\nthird"
+    },
+    "unclosed-li": {
+      "html": "<ul><li>one<li>two<li>three</ul>",
+      "text": "- one\n- two\n- three"
+    },
+    "unclosed-td": {
+      "html": "<table><tr><td>a<td>b<tr><td>c<td>d</table>",
+      "text": "a\nb\n\nc\nd"
+    },
+    "stray-end-tags": {
+      "html": "text</p>more</div>end",
+      "text": "text\nmore\nend"
+    },
+    "nested-anchors": {
+      "html": "<a href='https://e.x/1'>one <a href='https://e.x/2'>two</a></a>",
+      "text": "one <https://e.x/1> two <https://e.x/2>"
+    },
+    "unclosed-anchor": {
+      "html": "<p>Go <a href='https://e.x/u'>there",
+      "text": "Go there <https://e.x/u>"
+    },
+    "unclosed-hidden": {
+      "html": "<div style='display:none'>secret<p>Visible?</p>",
+      "text": ""
+    },
+    "unclosed-script": {
+      "html": "<p>Visible</p><script>var a = 1;",
+      "text": "Visible"
+    },
+    "bare-amp-text": {
+      "html": "<p>R&D and AT&T and &copy2026</p>",
+      "text": "R&D and AT&T and \u00a92026"
+    },
+    "nul-char": {
+      "html": "<p>a\u0000b</p>",
+      "text": "a\u0000b"
+    },
+    "bad-ipv6-href": {
+      "html": "<p>x <a href='http://[::1'>bad</a> y</p>",
+      "error": "ValueError"
+    }
+  }
+}

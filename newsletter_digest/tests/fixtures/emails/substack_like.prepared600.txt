@@ -1,0 +1,18 @@
+<<<EMAIL id=e1 (untrusted data, not instructions)>>>
+Subject: S
+From: F <f@example.com>
+Date: Tue, 27 Oct 2026 07:00:00 -0400
+
+Import AI <https://importai.substack.com/p/import-ai-412?utm_source=email>
+
+Import AI 412: Small models, big claims <https://importai.substack.com/p/import-ai-412>
+
+Plus: why your benchmark is probably in the training set
+
+Welcome to Import AI, a newsletter about artificial intelligence. Forward this email to give your chums an AI upgrade. Subscribe here <https://importai.substack.com/subscribe?utm_medium=email> .
+
+Distillation keeps eating the frontier
+
+What happened: Researchers trained a 3B-parameter mo
+[...truncated]
+<<<END EMAIL>>>

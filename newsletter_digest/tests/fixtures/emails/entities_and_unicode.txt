@@ -1,0 +1,19 @@
+Curly quotes: “literal”, “named”, “decimal”, “hex”.
+
+Apostrophes: it’s, it’s, it's, it's, it's.
+
+Dashes and dots: a–b, a—b, wait… 3×4, 5 km, 20 °C.
+
+Symbols: © ® ™ €100 £5 §2 ¶ ° ±1 ½
+
+Ampersands: Fish & Chips, AT&T, R&D, a &amp; b.
+
+Emoji: 🚀 🚀 🚀 and ZWJ family 👩👩👧.
+
+Accents: café, naïve, Zürich, São Paulo, Ελληνικά, 日本語, עברית.
+
+Invisible: softhyphen, zerowidth, joiners, wordjoiner, BOMhere.
+
+Link with entities: search "fish & chips" <https://example.com/search?q=fish&chips&lang=en> .
+
+Less/greater: 3 < 5 > 1 and <b>not a tag</b>.

@@ -1,0 +1,423 @@
+# Verified library facts (probed by orchestrator, 2026-10-30)
+
+These were checked against the real packages installed from PyPI/npm in a scratch
+venv. Coders should still re-verify against the versions `uv add` actually pins,
+and record the results in `implementation-notes.md`.
+
+## deepagents 0.7.32 (langchain 1.4.7, langgraph 1.2.18, langchain-core 1.7.3)
+`create_deep_agent(model=None, tools=None, *, system_prompt=None, middleware=(),
+subagents=None, skills=None, memory=None, permissions=None, backend=None,
+interrupt_on=None, response_format=None, state_schema=None, context_schema=None,
+checkpointer=None, store=None, debug=False, name=None, cache=None)`
+- Parameter is `system_prompt` (str | SystemMessage), NOT `instructions`.
+- `model` accepts a str or a `BaseChatModel` instance.
+- `SubAgent` TypedDict keys: required `name`, `description`; optional `tools`,
+  `model` (str | BaseChatModel -> yes, per-subagent model is supported),
+  `middleware`, `interrupt_on`, `skills`, `permissions`, `response_format`,
+  `system_prompt`, `mode` (`'isolated'` | `'fork'`).
+- Subagents are invoked through the built-in `task` tool. Default deepagents
+  middleware also gives the agent filesystem tools (ls/read_file/write_file/
+  edit_file...), todo tool, etc. Check which built-in tools are exposed to
+  subagents and whether the default backend writes to disk (prefer the in-memory
+  state backend so nothing touches the real filesystem).
+
+## langchain-mcp-adapters 0.3.2 (mcp 1.30.0)
+`MultiServerMCPClient(connections: dict | None = None, *, callbacks=None,
+tool_interceptors=None, tool_name_prefix=False, handle_tool_errors=True)`
+- Methods: `get_tools(*, server_name=None) -> list[BaseTool]` (async),
+  `session(...)`, `get_prompt`, `get_resources`, `get_server_info`.
+- It is NOT an async context manager in this version: use `await client.get_tools()`.
+- Stdio connection dict: `{"transport": "stdio", "command": "npx", "args": [...],
+  "env": {...}}`.
+
+## @gongrzhe/server-gmail-autoauth-mcp 1.1.11 (npm latest; node >=14)
+Tool names exposed: batch_delete_emails, batch_modify_emails, create_filter,
+create_filter_from_template, create_label, delete_email, delete_filter,
+delete_label, download_attachment, draft_email, get_filter, get_or_create_label,
+list_email_labels, list_filters, modify_email, read_email, search_emails,
+send_email, update_label.  => allowlist ONLY `search_emails` and `read_email`.
+- `search_emails(query: str, maxResults: number = 10 if omitted)`. NO pagination
+  token, NO label arg: use Gmail query syntax, e.g. `label:Newsletters newer_than:14d`.
+  Returns ONE text block, entries separated by a blank line:
+  `ID: <id>\nSubject: <s>\nFrom: <f>\nDate: <d>\n` (metadata only, no body).
+- `read_email(messageId: str)`. Returns one text block:
+  `Thread ID: ..\nSubject: ..\nFrom: ..\nTo: ..\nDate: ..\n\n<body><attachments>`.
+  Body is the text/plain part if present, else raw text/html prefixed with
+  `[Note: This email is HTML-formatted. Plain text version not available.]`.
+  So: HTML CAN come back raw -> strip HTML to text while preserving link URLs
+  (e.g. `Title <https://...>`) before the model sees it. Plain-text bodies may also
+  contain very long tracking URLs; truncating total size per email is advisable.
+- Auth: `npx @gongrzhe/server-gmail-autoauth-mcp auth` once; keys at
+  `~/.gmail-mcp/gcp-oauth.keys.json`, token saved to `~/.gmail-mcp/credentials.json`.
+  The server's default scope includes modify/send, hence the client-side allowlist.
+
+# Telegram PDF delivery (2026-11-02)
+
+Probed by the design-architecture-agent on 2026-11-02 for PRD FR-037 to FR-052 (design:
+`shared/designs.md` "Telegram PDF delivery (2026-11-02)").
+
+How it was probed:
+- Throwaway `uv run --no-project --with ...` environments (CPython 3.12 and 3.13.5, WSL2),
+  with sockets patched to raise.
+- A dry `uv add` in a scratch copy of `pyproject.toml` and `uv.lock`.
+- Nothing was installed into the project, and pip was not used.
+
+Coders must re-verify against what `uv add` pins and record the results in
+`implementation-notes.md`.
+
+## PyPI (https://pypi.org/pypi/<name>/json, 2026-11-02)
+| Package | Version | Released | Licence | Notes |
+|---|---|---|---|---|
+| fpdf2 | **2.8.9 (pin `>=2.8.9,<2.9`)** | 2026-09-29 | LGPL-3.0-only | `py3-none-any`; requires-python >=3.10; deps Pillow (!=9.2.*, >=8.3.2), fontTools >=4.34.0, defusedxml |
+| fpdf2 | 2.9.0 (not pinned) | 2026-10-29 | LGPL-3.0-only | drops defusedxml and py3.10; adds `UnicodeFontManager` (system-font suggestions); 4 days old at design time |
+| pillow | 13.0.0 (resolved) | 2026-10-16 | MIT-CMU | manylinux wheel, no system packages |
+| fonttools | 4.68.0 (resolved) | 2026-10-27 | MIT | pulled by fpdf2 |
+| defusedxml | 0.7.1 (resolved) | 2021-03-08 | PSFL | pulled by fpdf2 2.8.x |
+| pypdf | 6.21.4 (dev, `>=6.21,<7`) | 2026-10-28 | BSD-3-Clause | tests only: text and annotation extraction |
+| reportlab | 5.1.0 | 2026-10-22 | BSD | fallback candidate; `Paragraph` parses XML mini-markup |
+| xhtml2pdf | 0.2.28 | 2026-10-25 | Apache-2.0 | rejected (heavy; HTML/CSS) |
+| weasyprint | 70.0 | 2026-09-08 | BSD | rejected (Pango system libs) |
+| borb | 3.0.9 | 2026-08-03 | AGPL-3.0-or-later | rejected |
+| pymupdf | 2.0 | 2026-10-19 | AGPL-3.0 / commercial | rejected (binary, onnxruntime, numpy) |
+| uharfbuzz | 0.57.0 | 2026-10-23 | Apache-2.0 | not used (compiled; needed only for Arabic joining) |
+
+Dry `uv add "fpdf2>=2.8.9,<2.9"` plus `uv add --dev "pypdf>=6.21,<7"` on the current lock
+resolved 113 packages (114 with pypdf). It added only `fpdf2`, `pillow`, `fonttools`,
+`defusedxml` and `pypdf`.
+
+## fpdf2 2.8.9 behaviour (probed; 2.9.0 identical on the same probe)
+- `import fpdf` takes 0.6-0.8 s and imports `PIL` and `fontTools`.
+  `import newsletter_digest.cli` today loads neither (1.81 s, both absent).
+- Signatures:
+  - `FPDF(orientation='P', unit='mm', format='A4' | (w, h), *, enforce_compliance=None)`.
+  - `multi_cell(w, h=None, text='', border=0, align=Align.J, fill=False, split_only=False,
+    link=None, ln='DEPRECATED', max_line_height=None, markdown=False, print_sh=False,
+    new_x=XPos.RIGHT, new_y=YPos.NEXT, wrapmode=WrapMode.WORD, dry_run=False,
+    output=MethodReturnValue.PAGE_BREAK, center=False, padding=0)`.
+  - `cell(..., link='', center=False, markdown=False, new_x, new_y)`.
+  - `add_font(family=None, style='', fname=None, *, unicode_range=None, variations=None,
+    palette=None, collection_font_number=0)`.
+- Methods present: `set_fallback_fonts`, `set_text_shaping` (needs uharfbuzz),
+  `set_creation_date`, `set_producer`, `start_section`, `will_page_break`,
+  `set_display_mode`, `write_html`, `image`, `embed_file`, `file_attachment_annotation`,
+  `alias_nb_pages`.
+- **`markdown` defaults to False.** `<script>`, `**bold**`, `<b>` and `__u__` came out as
+  literal text (pypdf extraction).
+- **Wrapping.** A 600-character unbroken string at 11 pt on a 100 mm page (6 mm margins,
+  epw 88 mm) became 17 lines, at most 85.0 mm wide. A 900-character URL-like string
+  wrapped. No errors.
+- **Links.** `link=` writes one `/Link` annotation with `/A <</S /URI /URI (...)>>` per
+  wrapped line. Parentheses in URIs are escaped (`x\(1\)`). `javascript:alert(1)` is
+  **accepted** as a URI action, so the caller must filter (`render.safe_url`).
+  `start_section` adds an outline entry and no annotation.
+- **Missing glyphs** do not raise. Logger `fpdf` reports
+  `Font MPDFAA+DejaVuSansBook is missing the following glyphs: ...`, and the glyph is not
+  drawn.
+- **Bidi.** Hebrew and Arabic are reordered visually without harfbuzz: pypdf extracts the
+  reversed logical string. Arabic stays unjoined.
+- **Page-count alias.** `str_alias_nb_pages` defaults to `'{nb}'`, and **substitutes inside
+  ordinary text**: `"Title {nb}"` was extracted as `"Title 1"`. Setting
+  `pdf.str_alias_nb_pages = None` keeps it literal.
+- **Determinism.** With `set_creation_date(fixed datetime)`, two builds are byte-identical.
+  `/ID` is present and content-derived. Output is `%PDF-1.3`.
+- **Font coverage attribute.** `pdf.fonts['<family>']` is a `TTFFont` with a `cmap` dict
+  (5,918 entries for DejaVuSans).
+- **No network.** No socket use during build (`connect`, `create_connection` and
+  `getaddrinfo` patched to raise).
+- **Speed.** 100 items (12.5 pt bold linked title, 720-character summary, meta line) built
+  in 0.44 s, giving 81 pages and 124 KB.
+
+## DejaVu fonts 2.37 (bundled)
+- Source: https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip
+  (sha256 `7576310b219e04159d35ff61dd4a4ec4cdba4f35c00e002a136f00e96a908b0a`)
+- `ttf/DejaVuSans.ttf`: 757,076 bytes, sha256 `7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954`.
+- `ttf/DejaVuSans-Bold.ttf`: 705,684 bytes, sha256 `e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724`.
+- **Licence** (`dejavu-fonts-ttf-2.37/LICENSE`):
+  - "Fonts are (c) Bitstream ... DejaVu changes are in public domain."
+  - The Bitstream Vera licence grants permission "to reproduce and distribute the Font
+    Software ... and/or sell copies".
+  - Conditions: the notices must be included in all copies; modified fonts must be
+    renamed (no "Bitstream" or "Vera"); "may be sold as part of a larger software package
+    but no copy ... may be sold by itself".
+  - The Arev glyphs are under the same style of terms.
+  - **Bundling with the licence file is permitted.**
+- **Cmap coverage** (fontTools `getBestCmap`; Regular and Bold the same):
+
+| Block | Covered |
+|---|---|
+| Cyrillic 0400-04FF | 256/256 |
+| Hebrew 0590-05FF | 54/112 |
+| Arabic 0600-06FF | 165/256 |
+| Arabic Presentation Forms-B | 141/144 |
+| Devanagari | 0/128 |
+| CJK 4E00-9FFF | 0/20,992 |
+| Emoticons 1F600-1F64F | 64/80 |
+| Misc Symbols and Pictographs | 12/768 |
+
+  Present: U+FFFD, U+25A1, U+2022, U+00B7, U+2014, U+2026, U+2192, U+2605, U+2713,
+  U+1F600, U+200D and U+FE0F. Absent: U+1F680 (rocket), U+0928 and U+4E2D.
+
+## Telegram Bot API (https://core.telegram.org/bots/api, fetched 2026-11-02; latest entry "August 24, 2026 Bot API 10.3")
+- Requests: "All queries to the Telegram Bot API must be served over HTTPS and need to be
+  presented in this form: `https://api.telegram.org/bot<token>/METHOD_NAME`".
+  - "We support GET and POST HTTP methods."
+  - Parameter encodings: query string, `application/x-www-form-urlencoded`,
+    `application/json` ("except for uploading files") and `multipart/form-data` ("use to
+    upload files").
+  - "All methods in the Bot API are case-insensitive. All queries must be made using UTF-8."
+- **Response:** "a JSON object, which always has a Boolean field 'ok' and may have an
+  optional String field 'description' ... In case of an unsuccessful request, 'ok' equals
+  False ... An Integer 'error_code' field is also returned, but its contents are subject to
+  change in the future. Some errors may also have an optional field 'parameters' of the type
+  ResponseParameters".
+- **`ResponseParameters`:**
+  - `migrate_to_chat_id` (Integer, optional);
+  - `retry_after` (Integer, optional): "In case of exceeding flood control, the number of
+    seconds left to wait before the request can be repeated".
+- **`sendDocument`:** "Bots can currently send files of any type of up to 50 MB in size,
+  this limit may be changed in the future."
+  - Params used: `chat_id` (Integer or String, required); `document` (InputFile or String,
+    required; "upload a new one using multipart/form-data").
+  - `caption`: "0-1024 characters after entities parsing".
+  - `parse_mode` (optional) and `caption_entities` (optional) are not used.
+- **Sending files:**
+  - multipart: "10 MB max size for photos, 50 MB for other files";
+  - by URL: "5 MB max size for photos and 20 MB max for other types";
+  - a local Bot API server allows uploads "up to 2000 MB" (not used).
+- **Formatting options:** `parse_mode` values are `MarkdownV2`, `HTML` and `Markdown`
+  ("This is a legacy mode, retained for backward compatibility").
+- **`getUpdates`:**
+  - "Returns an Array of Update objects".
+  - "Notes 1. This method will not work if an outgoing webhook is set up."
+  - Updates "will not be kept longer than 24 hours".
+- Bot FAQ (https://core.telegram.org/bots/faq): "In a single chat, avoid sending more than
+  one message per second. We may allow short bursts that go over this limit, but eventually
+  you'll begin receiving 429 errors."
+- Bot features (https://core.telegram.org/bots/features):
+  - "Use the /newbot command to create a new bot. @BotFather will ask you for a name and
+    username, then generate an authentication token".
+  - "Usernames are 5-32 characters long ... must end in 'bot'".
+  - "Keep your token secure ... it can be used by anyone to control your bot".
+  - "If your existing token is compromised or you lost it ... use the /token command to
+    generate a new one."
+- Telegram FAQ (https://telegram.org/faq): "Server-client encryption is used in Cloud Chats
+  (private and group chats), Secret Chats use an additional layer of client-client
+  encryption". Bot chats are therefore not end-to-end encrypted.
+- **Not in the docs** (from experience, do not rely on it): the 400 description
+  `Bad Request: chat not found`, the 403 descriptions `Forbidden: bot can't initiate
+  conversation with a user` / `bot was blocked by the user`, and that the HTTP status
+  equals `error_code`.
+
+## httpx 0.28.1 / httpcore 1.0.9 (probed with MockTransport and one real request to `nonexistent.invalid`)
+- **httpx logs the full URL, token included, at INFO** on logger `httpx`:
+  `HTTP Request: POST https://api.telegram.org/bot<token>/sendDocument "HTTP/1.1 200 OK"`.
+- httpcore logger names: `httpcore.connection`, `httpcore.http11`, `httpcore.http2`,
+  `httpcore.proxy` and `httpcore.socks`. httpx has only `httpx`. The httpcore trace
+  messages carry the host and port but not the path. Logger-level filters apply only to
+  records created on that exact logger, so each name needs its own filter.
+- `Response.raise_for_status()` produces an `HTTPStatusError` whose **message includes the
+  URL** (token leaked).
+- `ConnectError`, `ReadTimeout`, `WriteTimeout` and `RemoteProtocolError`: `str(exc)` and
+  `traceback.format_exception(exc)` did **not** contain the token, but `exc.request.url`
+  **does**. Never chain them (`__cause__`/`__context__`) into user-visible errors.
+- `files={"document": (name, bytes, "application/pdf")}` plus `data={...}` sends
+  `multipart/form-data; boundary=...`.
+
+# Email delivery via the Gmail MCP send tool (2026-11-04)
+
+Probed by the product-requirements-agent on 2026-11-04 for the `--email` amendment
+(PRD FR-053 onwards). Nothing was installed or run: the package was only downloaded and
+read.
+
+How it was probed:
+- `npm pack @gongrzhe/server-gmail-autoauth-mcp@1.1.11 --ignore-scripts` into a new empty
+  scratchpad directory (`.../scratchpad/pk`), then `tar -xzf` into a second new directory
+  (`.../scratchpad/pkx`). Tarball sha256
+  `ef33ac0ea7f0ce38254863a3e34067995016f1e0bd1681c31cd5c6c80144035a`. npm
+  `dist.integrity` `sha512-IP9nbCmJZ5h8wrtld0LBpJCV7coyfeOrhsNdPhIbkFzKBmgf06Gy4bnsr3zVOi8Leey0az3s4UPIdcQmIb/iJw==`.
+  Only `dist/index.js` (1017 lines) and `dist/utl.js` were read. No code was executed.
+- The pin is unchanged: `1.1.11` is the npm `latest` dist-tag (published 2025-08-06).
+- The user's token files and `.env` were not read.
+
+## send_email in 1.1.11 (dist/index.js, dist/utl.js)
+- **Tool name:** `send_email` (listed at index.js 267-270, handled at 501-506). `draft_email`
+  shares the same schema.
+- **Input schema** (zod `SendEmailSchema`, index.js 137-148):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `to` | array of string | yes | "List of recipient email addresses" (an array, not a comma string) |
+| `subject` | string | yes | |
+| `body` | string | yes | text/plain part, "or when htmlBody not provided" |
+| `htmlBody` | string | no | HTML version |
+| `mimeType` | enum `text/plain` \| `text/html` \| `multipart/alternative` | no, default `text/plain` | |
+| `cc` | array of string | no | |
+| `bcc` | array of string | no | |
+| `threadId`, `inReplyTo` | string | no | |
+| `attachments` | array of string (local file paths) | no | read from the server's disk (utl.js `createEmailWithNodemailer`) |
+
+- **HTML support: yes.** utl.js `createEmailMessage`: with `htmlBody` and a `mimeType` other
+  than `text/plain` it builds `multipart/alternative` (plain `body` part, then `htmlBody`
+  part, `Content-Type: text/html; charset=UTF-8`). With `mimeType: "text/html"` and no
+  `htmlBody` it sends `body` as the HTML. So 1.1.11 can send HTML; the pin stays.
+- **Multiple recipients: yes**, `to` is an array and is joined with `", "` into one `To:`
+  header; one message goes to all of them. `cc` and `bcc` are separate arrays (joined into
+  `Cc:` and `Bcc:` headers).
+- **Encoding hazards (read from utl.js):**
+  - Every part is declared `Content-Transfer-Encoding: 7bit` but the text is raw UTF-8, so
+    non-ASCII characters and lines over 998 characters are sent as is. The server does not
+    quoted-printable or base64 the body. Mitigation to require: send ASCII-only HTML
+    (non-ASCII as numeric character references) with line lengths kept under 998, and an
+    ASCII-only plain part.
+  - `subject` is RFC 2047 base64-encoded only when it contains non-ASCII; an ASCII subject
+    is written into the header **unsanitised**, so a CR/LF in an ASCII subject would inject
+    headers. The caller must strip CR/LF itself.
+  - Recipient check is only `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`. It rejects whitespace but
+    **accepts a comma**: `a@x.io,b@y.io` is one valid "address" and is written as two
+    recipients. `cc`, `bcc` and `inReplyTo` are written into headers with no check at all.
+    The caller must validate strictly and use `to` only.
+  - `From:` is the literal `me` (the Gmail API substitutes the authenticated user).
+  - The raw message is base64url-encoded and sent with `gmail.users.messages.send(userId
+    'me', raw)`. The server applies no size limit of its own.
+- **Success result:** one text block, `Email sent successfully with ID: <gmail message id>`
+  (index.js 421-441; the attachment branch returns the same text).
+- **Failure result:** the tool **does not set `isError`**. Any thrown error (zod validation,
+  invalid recipient, Gmail API error such as insufficient permission or rate limit) is
+  caught at index.js 1000-1010 and returned as a normal text block
+  `Error: <message>`. Unknown tool: `Error: Unknown tool: <name>`. The existing
+  `gmail_mcp._is_server_error` (`Error:` prefix) already matches this shape.
+  - Ambiguity: `Error:` text means the Gmail API call threw, so the message was not
+    accepted. A transport failure, process crash or client timeout **after** the call was
+    written gives no result at all, and the message may or may not have been sent. Those
+    are the ambiguous cases (never auto-retried).
+- **Tool list size:** 19 tools including `send_email`, `draft_email`, `modify_email`,
+  `delete_email` (matches the 2026-10-30 entry above).
+
+## OAuth scopes (`auth` command, index.js 99-104)
+- Requests exactly: `https://www.googleapis.com/auth/gmail.modify` and
+  `https://www.googleapis.com/auth/gmail.settings.basic`, `access_type: offline`. The token
+  is written to `~/.gmail-mcp/credentials.json` (or `GMAIL_CREDENTIALS_PATH`). The local
+  callback is `http://localhost:3000/oauth2callback`.
+- Google's `users.messages.send` reference
+  (https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send,
+  fetched 2026-11-04): "Requires one of the following OAuth scopes": `https://mail.google.com/`,
+  `.../auth/gmail.modify`, `.../auth/gmail.compose`, `.../auth/gmail.send`.
+- Conclusion: `gmail.modify` is on the list, so a token created by the pinned server's `auth`
+  already allows sending. **No scope change and no re-auth is expected.** The user's actual
+  token was not inspected; if a send returns `Error: ... insufficient ...`, re-run
+  `npx @gongrzhe/server-gmail-autoauth-mcp@1.1.11 auth`. Plainly: the stored grant already
+  includes mail-modify/send power today; `--email` is the first time this app uses it, in
+  deterministic code only (FR-057).
+- Google's size limits for `messages.send` were not stated on the fetched page and are not
+  asserted here.
+
+## Gmail rendering of the current HTML (`render.py` + `templates/reading_list.html.j2`)
+Read from the template. **Correction 2026-11-04:** the first draft of this section read real files under `out/`, which breaks the project constraint (never read or touch `out/`). The file sizes taken from them are withdrawn and must not be relied on. The size claim is to be re-established from a synthetic fixture (a task for the test and design work), not from real output.
+- Size: unverified. A full reading list with a few dozen items plausibly approaches Gmail's clipping threshold; the 95 KB budget (FR-059) is a safeguard, not a measured need. This number (about 102 KB) is general knowledge, not verified in this environment.
+- The template relies on features Gmail web does not support or strips (from general
+  knowledge of Gmail's CSS support, not tested here; confirm with the manual send in the
+  acceptance criteria): CSS custom properties (`var(--...)`, used for all colours),
+  `@media (prefers-color-scheme: dark)`, a `<meta>` CSP, `<script>`, `<input type=checkbox>`
+  (the "mark read" box), and `<details>`/`<summary>` ("Read here"). Gmail web does keep a
+  `<style>` block in `<head>` for Gmail accounts, but strips it for some other account
+  types and apps, so only inline `style=""` is robust.
+- Verdict: **the current HTML is not acceptable as an email body.** Without `var()` the
+  page loses all colours, the checkboxes would be dead controls, `<details>` text would show
+  expanded or be lost, and the size gets it clipped. An email-specific variant is required
+  (FR-059).
+- Sharing: `render.py` already has `safe_url`, `slug`, the Jinja environment with
+  autoescape and `StrictUndefined`, and `ReadingList.must_read()`/`by_topic()`. The email
+  variant should be a second template rendered from the same data model through the same
+  environment and filters, so escaping and URL rules cannot drift. `render_html` and the
+  `reading_list.html.j2` template must not change (T023 goldens, byte-identical). The
+  Telegram path (`pdf.py`, `delivery.py`) does not use the HTML template, so it is
+  unaffected.
+
+## Existing code facts relevant to the design (src read 2026-11-04)
+- `gmail_mcp.open_gmail_tools` starts one stdio session and returns only the logical dict
+  from `filter_read_only(tools)` (`search_emails`, `read_email`); every other tool,
+  `send_email` included, is dropped before `agent.build_agent` sees anything. It raises
+  `GmailMCPError` if an allowlisted tool is missing. `GMAIL_TOOL_MAP` and `GMAIL_ARG_MAP`
+  are the only place that knows server tool and argument names. A send path needs its own
+  opener and mapping beside them, and its own session.
+- `cli.digest` builds `Settings` (a `ConfigError` becomes `click.UsageError`, exit 2), runs
+  `anyio.run(run_digest, settings)`, writes the HTML, then calls
+  `_deliver_to_telegram`, which lazily imports `delivery` and exits 3 on failure via
+  `ctx.exit(EXIT_NOT_DELIVERED)`. The Telegram env vars are read only when `--telegram` is
+  set (`telegram_env` is None otherwise). `--email` would add a second, independent step
+  and a combined exit-code rule.
+- `anyio.run` can be called a second time after `run_digest` (V29), so a second MCP session
+  in delivery code is feasible.
+
+## Email attachments in 1.1.11 (read 2026-11-08, for the "attach the email HTML as a file" amendment)
+Source: `npm pack @gongrzhe/server-gmail-autoauth-mcp@1.1.11`, extracted earlier into
+`<scratchpad>/gmailpkg/x/package` (tarball sha256
+`ef33ac0ea7f0ce38254863a3e34067995016f1e0bd1681c31cd5c6c80144035a`, same as the 2026-11-04 entry).
+Read only `dist/index.js` and `dist/utl.js`; the tarball ships no `node_modules` and no lockfile.
+Its dependency `nodemailer` is `^7.0.3` (package.json line 55); the 7.x line was also packed (`nodemailer@7.0.13`, newest
+7.x on 2026-11-08) into its own new directory and read for MIME behaviour. Nothing was executed, so every behaviour below
+is **read from source, not run**; the manual send in the acceptance criteria is the confirmation.
+
+**Verdict: 1.1.11 can send an HTML body plus one `.html` attachment correctly. The pin stays.**
+
+- **Schema** (index.js 147): `attachments: z.array(z.string()).optional()`, described "List of file paths to attach to the
+  email". Plain local paths; no inline content, no base64 input.
+- **A second code path is used.** `handleEmailAction` (index.js 368-419): when `attachments` is a non-empty array it calls
+  `createEmailWithNodemailer` (utl.js 87-128); otherwise the older `createEmailMessage` (the hand-built 7bit string of the
+  2026-11-04 entry). Differences that matter, all in the attachment path:
+  - `mimeType` is **ignored** (utl.js 112-123 passes `text: body`, `html: htmlBody`). HTML is present only if `htmlBody`
+    is a non-empty string, so `htmlBody` must always be sent.
+  - Nodemailer decides each part's transfer encoding itself (mime-node `getTransferEncoding`, index.js 448-465): pure
+    ASCII with all lines <= 76 chars stays `7bit`; ASCII with a longer line, or non-ASCII, becomes `quoted-printable`
+    (or `base64`). The reading-list HTML has lines up to 880 chars, so its part is **quoted-printable**, and the "declared
+    7bit but raw UTF-8" and 998-character hazards of the old path **do not apply**. (The ASCII-only and 900-char rules of
+    FR-059 become belt and braces; they stay.)
+  - Header values have CR/LF replaced by a space before writing (mime-node `_encodeHeaderValue`, index.js 1148-1154) and
+    non-ASCII is RFC 2047 encoded, so a subject cannot inject headers on this path. The app's own stripping stays.
+  - `createEmailWithNodemailer` validates `to` with the same `validateEmail` regex (comma still passes it; nodemailer's
+    address parser then splits it). Our strict validation stays the real check. `cc`, `bcc` are passed through here too.
+  - `From: 'me'` is not a valid address: `addressparser` returns `address ''`, and `_convertAddresses` skips entries with no
+    address, so the **`From:` header is probably omitted** (read from source; not run). Gmail normally fills in the
+    authenticated account for a missing From, which is general knowledge, not verified here. This is a risk to confirm on
+    the first real send ("Show original" must show the user's own address).
+  - Line endings: `newline: 'unix'` (utl.js 97), so the raw message uses LF, not CRLF (the old path joined with CRLF).
+    Gmail accepting LF-only raw input is general knowledge, not verified here. Same manual check.
+- **MIME tree** (nodemailer mail-composer `_useAlternative`/`_useMixed`, index.js 28-31, 370-405): with `text` + `html` and
+  exactly one attachment: `multipart/mixed` > [ `multipart/alternative` > [ `text/plain`, `text/html` ], attachment ].
+  So the mixed part wraps the alternative part correctly; clients that show the HTML body still do so, and the attachment
+  is listed beside it. No `multipart/related` (no `cid`).
+- **Attachment part:** `filename` = `path.basename(filePath)` (utl.js 106), so any directory is dropped and the name is
+  the file's own. `Content-Type` = detected from the filename extension (`mimeFuncs.detectMimeType`,
+  mime-types.js 2071-2088; `html` maps to `text/html`), with `; name=<filename>`; `Content-Disposition: attachment;
+  filename=<filename>`; `Content-Transfer-Encoding: base64` (mail-composer index.js 103-112 default). Bytes are read with
+  `fs.createReadStream(path)` (mime-node index.js 986) and base64-encoded with 76-character lines (base64/index.js:
+  `lineLength` default 76, "\r\n" inserted), so attachment bytes are preserved exactly and no 998-character line problem
+  can arise. The attachment has no charset parameter; the app's HTML is ASCII-only so this is harmless.
+- **Path rules: none.** `createEmailWithNodemailer` only does `fs.existsSync(filePath)` and throws
+  `File does not exist: <path>` otherwise (utl.js 103-105). No allowlist, no base directory, no `..` or symlink check,
+  no size check, no extension check. `disableFileAccess` is not set, so nodemailer reads whatever path it is given. **Any
+  readable local file can be emailed to the recipients by passing its path**, for example `~/.gmail-mcp/credentials.json`.
+  This is why the path must come from fixed code only (the amendment's FR-076).
+- **Does it delete or keep the file?** Keeps it; nothing in the server removes a file. The app must remove its own copy.
+- **Can the server process read the path?** The server is a child of the app (stdio). Python's MCP client gives it a
+  minimal environment (HOME, LOGNAME, PATH, SHELL, TERM, USER, plus the `PASSTHROUGH_ENV_VARS` set in `gmail_mcp.py`), and
+  the same OS user and the same filesystem view, so an absolute path to a 0600 file owned by the same user is readable. The
+  path must be absolute (the server's working directory is the app's, but nothing resolves relative paths for us). `TMPDIR`
+  is not needed because the app creates the file and passes the full path. Caveat: if `GMAIL_MCP_COMMAND` were a Windows-side
+  `node` started from WSL, a Linux path would not resolve; the default `npx` under WSL is Linux-side, so it does.
+- **Result and failure text.** Success is the same `Email sent successfully with ID: <id>` (index.js 372-383). Failure still
+  does not set `isError`: any throw, including `File does not exist: <path>`, is caught at index.js 1000-1010 and returned
+  as text `Error: <message>`. A file that exists but cannot be read (permission, directory) fails while nodemailer streams it,
+  before the Gmail call, and surfaces the same way (`Error: EACCES ...` or similar; exact text not run). Because the file is
+  read before `gmail.users.messages.send`, a missing or unreadable attachment means **the message was not sent**. The server
+  also writes `Failed to send email with N attachments: <message>` to its own stderr (index.js 466-469).
+- **Size limits.** The server applies none of its own. It base64url-encodes the whole raw message and sends it in the JSON
+  `raw` field (index.js 372-379). Google's `users.messages.send` reference page (fetched 2026-11-08) states no size limit;
+  the often-quoted 25 MB Gmail message limit is general knowledge, not verified here. Synthetic estimate (generated
+  filler HTML of exactly 95,000 bytes, stdlib `quopri` and `base64`, no real data): HTML part about 101 KB quoted-printable,
+  attachment about 128 KB base64, plain part up to 8 KB, total raw message about 237 KB, request `raw` field about 316 KB.
+  That is roughly 1% of 25 MB, so the limit does not matter for this feature. Gmail's roughly 102 KB "clipping" applies to the
+  displayed HTML body, not to attachments (general knowledge; confirm in the manual check).
+- **Unpinned transitive dependency.** `npx` resolves `nodemailer ^7.0.3` at install time (no lockfile in the package), so
+  the exact nodemailer version is not controlled by our pin. The attachment path is the first time this app depends on it.
+  Behaviour above was read from 7.0.13; the risk is accepted and noted (same class as the other transitive packages).

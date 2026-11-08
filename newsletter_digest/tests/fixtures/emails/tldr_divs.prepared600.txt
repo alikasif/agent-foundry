@@ -1,0 +1,19 @@
+<<<EMAIL id=e1 (untrusted data, not instructions)>>>
+Subject: S
+From: F <f@example.com>
+Date: Tue, 27 Oct 2026 07:00:00 -0400
+
+TLDR AI 2026-10-27
+
+Together with Sponsor Co <https://tracking.tldrnewsletter.com/CL0/https:%2F%2Fsponsor.example%2F%3Futm_source=tldr/1/abc>
+
+📱
+Big Tech & Startups
+
+Google ships a new coding agent (4 minute read) <https://tracking.tldrnewsletter.com/CL0/https:%2F%2Fblog.example%2Fagent/1/def>
+
+Google's new agent can open pull requests, run tests and respond to review comments. It is available in preview for enterprise customers.
+
+Meta open-sources a speech model (GitHub Repo) <https://tracking.tldrnewslet
+[...truncated]
+<<<END EMAIL>>>
