@@ -535,3 +535,8 @@
   cannot apply to the docstring-only stub: `POSITIVE_EMAIL_CASES` need it to fail every
   positive check. Keep the stub unchanged and run each new negative sub-rule on it
   explicitly in `ALLOWED_CASES` (implementation-notes T090).
+- (T090) Never `git commit --amend` in a parallel wave: another agent committed
+  (`chore: task list status`) between my commit and my amend, so the amend folded my
+  test changes into its commit. Fixed with `git reset --soft <their sha>` (their commit
+  restored unchanged, my changes still staged) and a separate follow-up commit. Make
+  follow-ups new commits, and check `git log -1` right before any history edit.
