@@ -46,6 +46,10 @@ is imported or executed. The rules:
    ((h)(1)); `attachment_name` is called only with a `....meta.end_date` argument
    ((h)(3)); only `email_delivery` imports or references `tempfile` ((i)); and
    agent, tools and prompts never name the attachment helpers ((f), extended).
+   Positive (T097, `find_missing_attachment_wiring`): `GMAIL_SEND_ARG_MAP` is one
+   dict literal of exactly the six AP-5 pairs ((g)), and `OutgoingEmail(...)` is
+   built once, in `email_delivery.send_reading_list_email`, with `attachment=` a
+   name bound only from `_stage_attachment(...)` ((h)(2)).
 
 Each checker is a pure function over parsed modules, so the self-tests at the end feed
 it synthetic sources and prove that every rule can fail.
@@ -302,9 +306,12 @@ ATTACHMENT_HELPER_NAMES = frozenset(
         "_remove_staged",
         "ATTACHMENT_NAME_RE",
         "ATTACHMENT_DIR_PREFIX",
+        # T097: T092's real names kept EA-2's; its gmail_mcp re-check helpers join
+        "_attachment_problem",
+        "_attachment_file_problem",
     }
 )
-"""EA-2 helper names the agent side never references (FR-078); T097 aligns them."""
+"""EA-2 helper names the agent side never references (FR-078); T097 aligned them."""
 TEMPFILE_MODULE = "tempfile"
 TEMPFILE_OWNER = "email_delivery"
 
@@ -1529,7 +1536,8 @@ def find_send_capability_violations(modules: Modules) -> list[str]:
     (h)(1) `"attachments"` is a code string only as a value of gmail_mcp's
     `GMAIL_SEND_ARG_MAP` literal; (h)(3) `attachment_name` is only called, with one
     argument ending in `.meta.end_date`; (i) only email_delivery imports or
-    references `tempfile`. T097 adds the positive (g) and (h)(2).
+    references `tempfile`. The positive (g) and (h)(2) are "exactly one" rules
+    and live in `find_missing_attachment_wiring` (T097).
     """
     return [
         *_send_name_reference_violations(modules),
@@ -5399,6 +5407,880 @@ def test_email_rule_fails_on_mutated_real_tree(
     package: dict[str, SourceModule], mutant_id: str
 ) -> None:
     mutant = ALL_EMAIL_MUTANTS[mutant_id]
+    original = (SOURCE_DIR / f"{mutant.module}.py").read_text(encoding="utf-8")
+    changed = parse_module(mutant.module, apply_mutant(original, mutant))
+    mutated = {**package, mutant.module: changed}
+    assert mutant.checker(package) == []
+    violations = mutant.checker(mutated)
+    assert any(mutant.expected in v for v in violations), violations
+
+
+# ------------------------ positive attachment rules (T097, EA-2 (g) and (h)(2))
+
+
+SEND_ARG_PAIRS = frozenset(
+    {
+        ("to", "to"),
+        ("subject", "subject"),
+        ("text_body", "body"),
+        ("html_body", "htmlBody"),
+        ("mime_type", "mimeType"),
+        ("attachment", ATTACHMENTS_ARGUMENT),
+    }
+)
+"""AP-5: the only six logical -> server pairs `GMAIL_SEND_ARG_MAP` may hold."""
+SEND_ARG_MAP_READS = frozenset({"get", "items", "keys", "values"})
+OUTGOING_EMAIL = "OutgoingEmail"
+OUTGOING_EMAIL_OWNER = "email_delivery"
+OUTGOING_EMAIL_FUNCTION = "send_reading_list_email"
+ATTACHMENT_FIELD = "attachment"
+OUTGOING_EMAIL_POSITIONAL_LIMIT = 4  # to, subject, text_body, html_body
+STAGING_HELPER = "_stage_attachment"
+"""T092's staging helper (EA-2 name kept); its return is the only attachment value."""
+DATACLASS_COPY_CALLS = frozenset({"dataclasses.replace", "copy.replace"})
+DATACLASS_COPY_HOOK = "__replace__"
+
+_Binder = (
+    ast.arg
+    | ast.alias
+    | ast.ExceptHandler
+    | ast.FunctionDef
+    | ast.AsyncFunctionDef
+    | ast.ClassDef
+    | ast.Global
+    | ast.Nonlocal
+    | ast.MatchAs
+    | ast.MatchStar
+    | ast.MatchMapping
+)
+
+
+def _module_level_values(module: SourceModule, name: str) -> list[ast.expr | None]:
+    """Return the values of the module-level assignments to `name` (None: bare)."""
+    values: list[ast.expr | None] = []
+    for stmt in module.tree.body:
+        if isinstance(stmt, ast.Assign):
+            targets, value = stmt.targets, stmt.value
+        elif isinstance(stmt, ast.AnnAssign | ast.AugAssign):
+            targets, value = [stmt.target], stmt.value
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            values.append(value)
+    return values
+
+
+def _constant_pairs(value: ast.expr | None) -> list[tuple[str, str]] | None:
+    """Return the `(key, value)` string pairs of a dict literal, else None."""
+    if not isinstance(value, ast.Dict):
+        return None
+    pairs: list[tuple[str, str]] = []
+    for key, item in zip(value.keys, value.values, strict=True):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return None
+        if not (isinstance(item, ast.Constant) and isinstance(item.value, str)):
+            return None
+        pairs.append((key.value, item.value))
+    return pairs
+
+
+def _binds(node: ast.AST, name: str) -> bool:
+    """Return True if `node` binds or deletes `name` (any binding form)."""
+    if isinstance(node, ast.Name):
+        return node.id == name and not isinstance(node.ctx, ast.Load)
+    if isinstance(node, ast.arg):
+        return node.arg == name
+    if isinstance(node, ast.alias):
+        return (node.asname or node.name.partition(".")[0]) == name
+    if isinstance(node, ast.Global | ast.Nonlocal):
+        return name in node.names
+    if isinstance(node, ast.MatchMapping):
+        return node.rest == name
+    if isinstance(node, _Binder):
+        return getattr(node, "name", None) == name
+    return False
+
+
+def _map_reference(node: ast.AST, aliases: set[str]) -> bool:
+    """Return True for a Name/Attribute naming `GMAIL_SEND_ARG_MAP`."""
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    return isinstance(node, ast.Attribute) and node.attr == SEND_ARG_MAP
+
+
+def _send_arg_map_change_violations(modules: Modules) -> list[str]:
+    """Report code that rebinds, writes into or mutates `GMAIL_SEND_ARG_MAP`."""
+    violations: list[str] = []
+    for name, module in modules.items():
+        aliases = {SEND_ARG_MAP} | {
+            local
+            for local, origin in import_bindings(module).items()
+            if origin.rpartition(".")[2] == SEND_ARG_MAP
+        }
+        definition = {
+            id(target)
+            for stmt in module.tree.body
+            if name == GMAIL_MODULE and isinstance(stmt, ast.Assign | ast.AnnAssign)
+            for target in (
+                stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            )
+            if isinstance(target, ast.Name) and target.id == SEND_ARG_MAP
+        }
+        imported = {
+            id(alias)
+            for node in ast.walk(module.tree)
+            if name != GMAIL_MODULE and isinstance(node, ast.ImportFrom)
+            for alias in node.names
+            if alias.asname is None and alias.name == SEND_ARG_MAP
+        }
+        for node in ast.walk(module.tree):
+            if id(node) in definition | imported:
+                continue
+            if any(_binds(node, alias) for alias in aliases):
+                violations.append(
+                    f"{name}.py:{getattr(node, 'lineno', 0)}: {name} rebinds "
+                    f"{SEND_ARG_MAP}; it is one module-level literal in gmail_mcp"
+                )
+            elif (
+                isinstance(node, ast.Subscript)
+                and not isinstance(node.ctx, ast.Load)
+                and _map_reference(node.value, aliases)
+            ):
+                violations.append(
+                    f"{name}.py:{node.lineno}: {name} writes into {SEND_ARG_MAP}"
+                    f"[{ast.unparse(node.slice)}]; the six pairs never change"
+                )
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr not in SEND_ARG_MAP_READS
+                and _map_reference(node.value, aliases)
+            ):
+                violations.append(
+                    f"{name}.py:{node.lineno}: {name} uses {SEND_ARG_MAP}."
+                    f"{node.attr}; only {sorted(SEND_ARG_MAP_READS)} read the map"
+                )
+    return violations
+
+
+def _send_arg_map_violations(modules: Modules) -> list[str]:
+    """(g) Check `GMAIL_SEND_ARG_MAP` is one literal of exactly the six AP-5 pairs.
+
+    gmail_mcp assigns it exactly once at module level, as a dict literal of six
+    constant string pairs with no duplicate key; no module rebinds it, writes into
+    it or calls anything but a read method on it. Positive: fails on a tree
+    without the map (the stub tree).
+    """
+    gmail = modules.get(GMAIL_MODULE)
+    if gmail is None:
+        return [f"{GMAIL_MODULE}.py: module missing"]
+    values = _module_level_values(gmail, SEND_ARG_MAP)
+    changes = _send_arg_map_change_violations(modules)
+    if len(values) != 1:
+        return [
+            f"gmail_mcp.py: {len(values)} module-level {SEND_ARG_MAP} assignments, "
+            "expected exactly one dict literal",
+            *changes,
+        ]
+    pairs = _constant_pairs(values[0])
+    if pairs is None:
+        return [
+            f"gmail_mcp.py: {SEND_ARG_MAP} is not a dict literal of constant "
+            "string pairs",
+            *changes,
+        ]
+    keys = [key for key, _ in pairs]
+    violations = [
+        f"gmail_mcp.py: {SEND_ARG_MAP} repeats key {key!r}"
+        for key in sorted({k for k in keys if keys.count(k) > 1})
+    ]
+    violations.extend(
+        f"gmail_mcp.py: {SEND_ARG_MAP} has extra pair {key!r}: {value!r}"
+        for key, value in sorted(set(pairs) - SEND_ARG_PAIRS)
+    )
+    violations.extend(
+        f"gmail_mcp.py: {SEND_ARG_MAP} lacks pair {key!r}: {value!r}"
+        for key, value in sorted(SEND_ARG_PAIRS - set(pairs))
+    )
+    return [*violations, *changes]
+
+
+def _outgoing_email_aliases(module: SourceModule) -> set[str]:
+    """Return the local names bound to `OutgoingEmail` (itself and import aliases)."""
+    return {OUTGOING_EMAIL} | {
+        local
+        for local, origin in import_bindings(module).items()
+        if origin.rpartition(".")[2] == OUTGOING_EMAIL
+    }
+
+
+def _outgoing_email_reference(node: ast.AST, aliases: set[str]) -> bool:
+    """Return True for a Name/Attribute naming `OutgoingEmail`."""
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    return isinstance(node, ast.Attribute) and node.attr == OUTGOING_EMAIL
+
+
+def _annotation_ids(tree: ast.AST) -> set[int]:
+    """Return the ids of the nodes inside parameter, return and variable annotations."""
+    roots: list[ast.expr | None] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            args = node.args
+            params = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+            params.extend(a for a in (args.vararg, args.kwarg) if a is not None)
+            roots.extend([node.returns, *(a.annotation for a in params)])
+        elif isinstance(node, ast.AnnAssign):
+            roots.append(node.annotation)
+    return {id(n) for root in roots if root is not None for n in ast.walk(root)}
+
+
+def _attachment_value_problem(call: ast.Call) -> str | ast.Name:
+    """Return the bare name passed as `attachment=`, or why the call breaks (h)(2)."""
+    if any(isinstance(arg, ast.Starred) for arg in call.args):
+        return "takes *args"
+    if any(keyword.arg is None for keyword in call.keywords):
+        return "takes **kwargs"
+    if len(call.args) > OUTGOING_EMAIL_POSITIONAL_LIMIT:
+        return f"passes {ATTACHMENT_FIELD} positionally"
+    values = [k.value for k in call.keywords if k.arg == ATTACHMENT_FIELD]
+    if not values:
+        return f"has no {ATTACHMENT_FIELD}= keyword"
+    if not isinstance(values[0], ast.Name):
+        return f"{ATTACHMENT_FIELD}={ast.unparse(values[0])} is not a bare name"
+    return values[0]
+
+
+def _from_staging_helper(stmt: ast.AST, local: str) -> set[int]:
+    """Return the target id if `stmt` is `<local> = _stage_attachment(...)`."""
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        target, value = stmt.targets[0], stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        target, value = stmt.target, stmt.value
+    else:
+        return set()
+    staged = (
+        isinstance(target, ast.Name)
+        and target.id == local
+        and isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == STAGING_HELPER
+    )
+    return {id(target)} if staged else set()
+
+
+def _staged_name_violations(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, local: str
+) -> list[str]:
+    """Check `local` is bound in `function` only from `_stage_attachment(...)`."""
+    where = f"{OUTGOING_EMAIL_OWNER}.py"
+    staged: set[int] = set()
+    for node in ast.walk(function):
+        staged |= _from_staging_helper(node, local)
+    violations = [
+        f"{where}:{getattr(node, 'lineno', function.lineno)}: {ATTACHMENT_FIELD}= "
+        f"name {local!r} is also bound otherwise; it comes from {STAGING_HELPER} only"
+        for node in ast.walk(function)
+        if _binds(node, local) and id(node) not in staged
+    ]
+    if not staged:
+        violations.append(
+            f"{where}:{function.lineno}: {ATTACHMENT_FIELD}= name {local!r} is never "
+            f"assigned from {STAGING_HELPER}(...)"
+        )
+    return violations
+
+
+def _staging_helper_violations(owner: SourceModule) -> list[str]:
+    """Check email_delivery binds `_stage_attachment` once, as a module-level def."""
+    defined = [
+        stmt
+        for stmt in owner.tree.body
+        if isinstance(stmt, ast.FunctionDef) and stmt.name == STAGING_HELPER
+    ]
+    bindings = [n for n in ast.walk(owner.tree) if _binds(n, STAGING_HELPER)]
+    if len(defined) == 1 and bindings == defined:
+        return []
+    return [
+        f"{OUTGOING_EMAIL_OWNER}.py: {len(bindings)} bindings of {STAGING_HELPER}; "
+        "expected exactly one module-level def"
+    ]
+
+
+def _outgoing_email_call_violations(
+    modules: Modules, calls: list[tuple[str, ast.Call]]
+) -> list[str]:
+    """Check each `OutgoingEmail(...)` call's place and its `attachment=` value."""
+    owner = modules.get(OUTGOING_EMAIL_OWNER)
+    function = _top_level_function(owner, OUTGOING_EMAIL_FUNCTION) if owner else None
+    inside = (
+        top_level_function_nodes(owner, OUTGOING_EMAIL_FUNCTION) if owner else set()
+    )
+    violations: list[str] = []
+    for name, call in calls:
+        site = f"{name}.py:{call.lineno}: {OUTGOING_EMAIL}(...)"
+        if name != OUTGOING_EMAIL_OWNER or id(call) not in inside:
+            violations.append(
+                f"{site} outside {OUTGOING_EMAIL_OWNER}.{OUTGOING_EMAIL_FUNCTION}"
+            )
+            continue
+        value = _attachment_value_problem(call)
+        if isinstance(value, str):
+            violations.append(f"{site} {value}; it takes the staged path by name")
+        elif function is not None:
+            violations.extend(_staged_name_violations(function, value.id))
+    if owner is not None and calls:
+        violations.extend(_staging_helper_violations(owner))
+    return violations
+
+
+def _outgoing_email_site_violations(modules: Modules) -> list[str]:
+    """(h)(2) Check `OutgoingEmail(...)` is built once, from the staged path only.
+
+    Exactly one call in the package, inside `email_delivery.send_reading_list_email`,
+    with an `attachment=` keyword (no `*args`/`**kwargs`, at most four positional
+    arguments) whose value is a bare name that the function binds only as
+    `<name> = _stage_attachment(...)`; `_stage_attachment` is one module-level def.
+    `OutgoingEmail` is otherwise only named in imports and annotations (never passed
+    around as a value), and the send-capable modules never copy a dataclass with a
+    changed field (`dataclasses.replace`, `copy.replace`, `__replace__`).
+    Positive: fails on a tree with no call (the stub tree).
+    """
+    calls: list[tuple[str, ast.Call]] = []
+    violations: list[str] = []
+    for name, module in modules.items():
+        aliases = _outgoing_email_aliases(module)
+        skip = _annotation_ids(module.tree)
+        for node in ast.walk(module.tree):
+            if isinstance(node, ast.Call) and _outgoing_email_reference(
+                node.func, aliases
+            ):
+                calls.append((name, node))
+                skip.add(id(node.func))
+        violations.extend(
+            f"{name}.py:{node.lineno}: {OUTGOING_EMAIL} used as a value "
+            f"({ast.unparse(node)}); it is only called, once"
+            for node in ast.walk(module.tree)
+            if isinstance(node, ast.Name | ast.Attribute)
+            and id(node) not in skip
+            and _outgoing_email_reference(node, aliases)
+        )
+        if name not in SEND_CAPABLE:
+            continue
+        violations.extend(
+            f"{name}.py:{call.lineno}: {name} calls {target}; an {OUTGOING_EMAIL} is "
+            "never copied with a changed field"
+            for target, call in resolved_calls(module)
+            if target in DATACLASS_COPY_CALLS
+        )
+        violations.extend(
+            f"{name}.py:{node.lineno}: {name} uses {DATACLASS_COPY_HOOK}; an "
+            f"{OUTGOING_EMAIL} is never copied with a changed field"
+            for node in ast.walk(module.tree)
+            if isinstance(node, ast.Attribute) and node.attr == DATACLASS_COPY_HOOK
+        )
+    if len(calls) != 1:
+        where = [f"{name}.py:{call.lineno}" for name, call in calls]
+        violations.append(
+            f"{len(calls)} {OUTGOING_EMAIL}(...) call sites {where}; expected exactly "
+            f"one, in {OUTGOING_EMAIL_OWNER}.{OUTGOING_EMAIL_FUNCTION}"
+        )
+    violations.extend(_outgoing_email_call_violations(modules, calls))
+    return violations
+
+
+def find_missing_attachment_wiring(modules: Modules) -> list[str]:
+    """Report the EA-2 attachment facts the real code must show (positive, T097).
+
+    (g) `GMAIL_SEND_ARG_MAP` is exactly one module-level dict literal in gmail_mcp
+    with exactly the six AP-5 pairs, and nothing changes it; (h)(2) `OutgoingEmail`
+    is built in exactly one place, `email_delivery.send_reading_list_email`, with
+    `attachment=<name>` where the name only comes from `_stage_attachment(...)`.
+    These are "exactly one" rules, so they live here and not in
+    `find_send_capability_violations`, which `ALLOWED_CASES` also runs on the
+    docstring-only `STUB_EMAIL_TREE` (learnings T083).
+    """
+    return [
+        *_send_arg_map_violations(modules),
+        *_outgoing_email_site_violations(modules),
+    ]
+
+
+ATTACHMENT_POSITIVE_RULES: tuple[Checker, ...] = (
+    _send_arg_map_violations,
+    _outgoing_email_site_violations,
+)
+"""The positive EA-2 sub-rules T097 adds (in `find_missing_attachment_wiring`)."""
+
+
+@pytest.mark.parametrize(
+    "checker",
+    [find_missing_attachment_wiring, *ATTACHMENT_POSITIVE_RULES],
+    ids=lambda c: c.__name__,
+)
+def test_detector_sees_the_attachment_wiring(
+    package: dict[str, SourceModule], checker: Checker
+) -> None:
+    violations = checker(package)
+    assert violations == [], _report(violations)
+
+
+def test_detector_sees_the_six_send_arg_pairs(
+    package: dict[str, SourceModule],
+) -> None:
+    values = _module_level_values(package[GMAIL_MODULE], SEND_ARG_MAP)
+    assert len(values) == 1
+    pairs = _constant_pairs(values[0])
+    assert pairs is not None and len(pairs) == 6
+    assert set(pairs) == SEND_ARG_PAIRS
+
+
+def test_detector_sees_the_single_staged_outgoing_email(
+    package: dict[str, SourceModule],
+) -> None:
+    owner = package[OUTGOING_EMAIL_OWNER]
+    function = _top_level_function(owner, OUTGOING_EMAIL_FUNCTION)
+    assert function is not None
+    calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == OUTGOING_EMAIL
+    ]
+    assert len(calls) == 1
+    value = _attachment_value_problem(calls[0])
+    assert isinstance(value, ast.Name), value
+    staged = set().union(
+        *(_from_staging_helper(n, value.id) for n in ast.walk(function))
+    )
+    assert len(staged) == 1
+    assert _staging_helper_violations(owner) == []
+
+
+def test_attachment_helper_names_exist_in_the_real_tree(
+    package: dict[str, SourceModule],
+) -> None:
+    """(f)'s `ATTACHMENT_HELPER_NAMES` match names the send-capable modules define."""
+    defined: dict[str, list[str]] = {}
+    for name in sorted(SEND_CAPABLE):
+        for stmt in package[name].tree.body:
+            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                defined.setdefault(stmt.name, []).append(name)
+            elif isinstance(stmt, ast.Assign | ast.AnnAssign):
+                targets = (
+                    stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                )
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        defined.setdefault(target.id, []).append(name)
+    owners = {helper: defined.get(helper, []) for helper in ATTACHMENT_HELPER_NAMES}
+    assert all(len(found) == 1 for found in owners.values()), owners
+    assert STAGING_HELPER in ATTACHMENT_HELPER_NAMES
+    assert owners[STAGING_HELPER] == [OUTGOING_EMAIL_OWNER]
+
+
+def test_positive_attachment_checker_allows_the_synthetic_final_tree() -> None:
+    for tree in (FINAL_EMAIL_TREE, POSITIVE_EMAIL_TREE):
+        violations = find_missing_attachment_wiring(make_modules(**tree))
+        assert violations == [], _report(violations)
+
+
+_SYN_MAP_ENTRY = '"attachment": "attachments",'
+_SYN_MAP_END = '            "attachment": "attachments",\n        }\n'
+_SYN_OUTGOING = "message = OutgoingEmail("
+_SYN_ATTACHMENT = "attachment=attachment,"
+_SYN_STAGE = "attachment = _stage_attachment(raw_directory, name, content.html)"
+_SYN_RECEIPT = "receipt: GmailSendReceipt = await sender("
+_SYN_MAP_START = "GMAIL_SEND_ARG_MAP: dict[str, str] = {"
+_SYN_FACTORY = "TempDirFactory = Callable[..., str]"
+_SYN_PATH = "    path = message.attachment\n"
+_SYN_IMPORT_OS = "import os\n"
+
+
+def _final_with(module: str, *edits: tuple[str, str]) -> dict[str, str]:
+    """Return `FINAL_EMAIL_TREE` with anchored edits to `module` (unique anchors)."""
+    source = FINAL_EMAIL_TREE[module]
+    for anchor, replacement in edits:
+        assert source.count(anchor) == 1, anchor
+        source = source.replace(anchor, replacement, 1)
+    return {**FINAL_EMAIL_TREE, module: source}
+
+
+ATTACHMENT_WIRING_CASES: list[tuple[str, dict[str, str], str]] = [
+    ("stub-tree-map", STUB_EMAIL_TREE, "0 module-level GMAIL_SEND_ARG_MAP assignments"),
+    ("stub-tree-outgoing", STUB_EMAIL_TREE, "0 OutgoingEmail(...) call sites []"),
+    (
+        "map-extra-cc",
+        _final_with("gmail_mcp", (_SYN_MAP_ENTRY, _SYN_MAP_ENTRY + ' "cc": "cc",')),
+        "GMAIL_SEND_ARG_MAP has extra pair 'cc': 'cc'",
+    ),
+    (
+        "map-drops-attachment",
+        _final_with("gmail_mcp", (_SYN_MAP_ENTRY, "")),
+        "GMAIL_SEND_ARG_MAP lacks pair 'attachment': 'attachments'",
+    ),
+    (
+        "map-renames-server-argument",
+        _final_with("gmail_mcp", (_SYN_MAP_ENTRY, '"attachment": "attachment",')),
+        "GMAIL_SEND_ARG_MAP has extra pair 'attachment': 'attachment'",
+    ),
+    (
+        "map-repeats-key",
+        _final_with("gmail_mcp", (_SYN_MAP_ENTRY, _SYN_MAP_ENTRY + _SYN_MAP_ENTRY)),
+        "GMAIL_SEND_ARG_MAP repeats key 'attachment'",
+    ),
+    (
+        "map-is-a-call",
+        _final_with(
+            "gmail_mcp",
+            (_SYN_MAP_START, _SYN_MAP_START.replace("{", "dict(**{")),
+            (_SYN_MAP_END, _SYN_MAP_END.replace("}", "})")),
+        ),
+        "GMAIL_SEND_ARG_MAP is not a dict literal of constant string pairs",
+    ),
+    (
+        "map-assigned-twice",
+        _final_with(
+            "gmail_mcp",
+            (_SYN_MAP_END, _SYN_MAP_END + "        GMAIL_SEND_ARG_MAP = {}\n"),
+        ),
+        "2 module-level GMAIL_SEND_ARG_MAP assignments",
+    ),
+    (
+        "map-written-later",
+        _final_with(
+            "gmail_mcp",
+            (_SYN_MAP_END, _SYN_MAP_END + '        GMAIL_SEND_ARG_MAP["cc"] = "cc"\n'),
+        ),
+        "gmail_mcp writes into GMAIL_SEND_ARG_MAP['cc']",
+    ),
+    (
+        "map-updated-by-email-delivery",
+        _final_with(
+            "email_delivery",
+            (
+                _SYN_FACTORY,
+                _SYN_FACTORY + "\n        gmail_mcp.GMAIL_SEND_ARG_MAP.clear()",
+            ),
+        ),
+        "email_delivery uses GMAIL_SEND_ARG_MAP.clear",
+    ),
+    (
+        "map-rebound-in-a-function",
+        _final_with(
+            "gmail_mcp",
+            (_SYN_PATH, _SYN_PATH + "            global GMAIL_SEND_ARG_MAP\n"),
+        ),
+        "gmail_mcp rebinds GMAIL_SEND_ARG_MAP",
+    ),
+    (
+        "attachment-from-out-dir",
+        _final_with(
+            "email_delivery", (_SYN_ATTACHMENT, "attachment=settings.out_dir / name,")
+        ),
+        "attachment=settings.out_dir / name is not a bare name",
+    ),
+    (
+        "second-outgoing-email",
+        _final_with(
+            "email_delivery",
+            (
+                _SYN_RECEIPT,
+                "copy = OutgoingEmail(*message.to, attachment=attachment)\n"
+                "                " + _SYN_RECEIPT,
+            ),
+        ),
+        "2 OutgoingEmail(...) call sites",
+    ),
+    (
+        "outgoing-email-in-helper",
+        _final_with(
+            "email_delivery",
+            (
+                "def failure_reason(",
+                "def _build(a):\n"
+                "            return OutgoingEmail((), '', '', '', attachment=a)\n\n"
+                "        def failure_reason(",
+            ),
+        ),
+        "OutgoingEmail(...) outside email_delivery.send_reading_list_email",
+    ),
+    (
+        "attachment-rebound",
+        _final_with(
+            "email_delivery",
+            (
+                _SYN_OUTGOING,
+                "attachment = settings.out_dir / name\n                "
+                + _SYN_OUTGOING,
+            ),
+        ),
+        "name 'attachment' is also bound otherwise",
+    ),
+    (
+        "attachment-not-staged",
+        _final_with(
+            "email_delivery", (_SYN_STAGE, "attachment = Path(raw_directory) / name")
+        ),
+        "name 'attachment' is never assigned from _stage_attachment(...)",
+    ),
+    (
+        "attachment-positional",
+        _final_with("email_delivery", (_SYN_ATTACHMENT, "attachment,")),
+        "passes attachment positionally",
+    ),
+    (
+        "attachment-missing",
+        _final_with("email_delivery", (_SYN_ATTACHMENT, "")),
+        "has no attachment= keyword",
+    ),
+    (
+        "attachment-in-kwargs",
+        _final_with(
+            "email_delivery", (_SYN_ATTACHMENT, "**{'attachment': attachment},")
+        ),
+        "takes **kwargs",
+    ),
+    (
+        "outgoing-email-aliased",
+        _final_with(
+            "email_delivery",
+            (_SYN_OUTGOING, "build = OutgoingEmail\n                message = build("),
+        ),
+        "OutgoingEmail used as a value (OutgoingEmail)",
+    ),
+    (
+        "dataclass-replace",
+        _final_with(
+            "email_delivery",
+            (_SYN_IMPORT_OS, "import dataclasses\n        " + _SYN_IMPORT_OS),
+            (
+                _SYN_RECEIPT,
+                "message = dataclasses.replace(message, attachment=html_path)\n"
+                "                " + _SYN_RECEIPT,
+            ),
+        ),
+        "email_delivery calls dataclasses.replace",
+    ),
+    (
+        "staging-helper-rebound",
+        _final_with(
+            "email_delivery",
+            (_SYN_FACTORY, _SYN_FACTORY + "\n        _stage_attachment = None"),
+        ),
+        "2 bindings of _stage_attachment; expected exactly one module-level def",
+    ),
+]
+"""Synthetic trees the positive attachment checker must reject (line-free)."""
+
+
+@pytest.mark.parametrize(
+    ("case_id", "tree", "expected"),
+    ATTACHMENT_WIRING_CASES,
+    ids=[case[0] for case in ATTACHMENT_WIRING_CASES],
+)
+def test_positive_attachment_checker_reports_missing_wiring(
+    case_id: str, tree: dict[str, str], expected: str
+) -> None:
+    violations = find_missing_attachment_wiring(make_modules(**tree))
+    assert any(expected in v for v in violations), (case_id, violations)
+
+
+# ------------------------------- attachment real-tree mutants (T097, EA-2 (f)-(i))
+
+
+_GMAIL_ARG_ENTRY = '    "attachment": "attachments",\n'
+_GMAIL_IMPORTS = "import shutil\nimport stat\n"
+_GMAIL_DIR_PREFIX = 'ATTACHMENT_DIR_PREFIX = "newsletter-digest-email-"\n'
+_GMAIL_ARG_LOOKUP = 'GMAIL_SEND_ARG_MAP["attachment"]'
+_ED_OUTGOING_CALL = "        message = OutgoingEmail(\n"
+_ED_ATTACHMENT_KW = "            attachment=attachment,\n"
+_ED_SEND_ONCE = "        return await _send_once(sender, settings, message, content)"
+_ED_NAME = "attachment_name(reading_list.meta.end_date)"
+_ED_STAGE = "attachment = _stage_attachment(raw_directory, name, content.html)"
+_ED_IMPORT_OS = "import os\n"
+_ED_SENDING = (
+    '    LOGGER.info("Sending the digest email to %d recipient(s)", recipients)\n'
+)
+_TOOLS_GMAIL = "from newsletter_digest.gmail_mcp import prepare_email_text,"
+
+ATTACHMENT_REAL_TREE_MUTANTS: dict[str, RealTreeMutant] = {
+    # -- the T097 task list
+    "attachment-map-adds-cc": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_ARG_ENTRY, _GMAIL_ARG_ENTRY + '    "cc": "cc",\n'),),
+        find_missing_attachment_wiring,
+        "GMAIL_SEND_ARG_MAP has extra pair 'cc': 'cc'",
+    ),
+    "attachment-map-drops-attachment": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_ARG_ENTRY, ""),),
+        find_missing_attachment_wiring,
+        "GMAIL_SEND_ARG_MAP lacks pair 'attachment': 'attachments'",
+    ),
+    "email-delivery-builds-attachments": RealTreeMutant(
+        "email_delivery",
+        (
+            (
+                _ED_OUTGOING_CALL,
+                '        extra = {"attachments": [str(attachment)]}\n'
+                + _ED_OUTGOING_CALL,
+            ),
+        ),
+        find_send_capability_violations,
+        "string 'attachments' outside the GMAIL_SEND_ARG_MAP values",
+    ),
+    "attachment-from-out-dir": RealTreeMutant(
+        "email_delivery",
+        ((_ED_ATTACHMENT_KW, "            attachment=settings.out_dir / name,\n"),),
+        find_missing_attachment_wiring,
+        "attachment=settings.out_dir / name is not a bare name",
+    ),
+    "second-outgoing-email": RealTreeMutant(
+        "email_delivery",
+        (
+            (
+                _ED_SEND_ONCE,
+                "        copy = OutgoingEmail(\n"
+                "            to=message.to,\n"
+                "            subject=message.subject,\n"
+                "            text_body=message.text_body,\n"
+                "            html_body=message.html_body,\n"
+                "            attachment=attachment,\n"
+                "        )\n"
+                "        return await _send_once(sender, settings, copy, content)",
+            ),
+        ),
+        find_missing_attachment_wiring,
+        "2 OutgoingEmail(...) call sites",
+    ),
+    "attachment-name-from-item-title": RealTreeMutant(
+        "email_delivery",
+        ((_ED_NAME, "attachment_name(item.title)"),),
+        find_send_capability_violations,
+        "argument 'item.title' does not end in '.meta.end_date'",
+    ),
+    "gmail-imports-tempfile": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_IMPORTS, _GMAIL_IMPORTS + "import tempfile\n"),),
+        find_send_capability_violations,
+        "gmail_mcp imports tempfile; only email_delivery may use tempfile",
+    ),
+    "agent-calls-mkdtemp": RealTreeMutant(
+        "agent",
+        (
+            (
+                _AGENT_GMAIL,
+                _AGENT_GMAIL + "import tempfile\nSCRATCH = tempfile.mkdtemp()\n",
+            ),
+        ),
+        find_send_capability_violations,
+        "agent references tempfile; only email_delivery may use tempfile",
+    ),
+    "agent-references-stage-attachment": RealTreeMutant(
+        "agent",
+        (
+            (
+                _AGENT_GMAIL,
+                _AGENT_GMAIL
+                + f"from {EMAIL_DELIVERY_IMPORT} import _stage_attachment\n",
+            ),
+        ),
+        find_send_capability_violations,
+        "agent references _stage_attachment; the agent side never touches the "
+        "attachment helpers",
+    ),
+    "prompts-holds-attachments": RealTreeMutant(
+        "prompts",
+        ((_PROMPTS_MODELS, _PROMPTS_MODELS + 'ARGUMENT = "attachments"\n'),),
+        find_send_capability_violations,
+        "prompts holds string 'attachments'; the agent side never names",
+    ),
+    # -- further (g) and (h)(2) shapes on the real source
+    "attachment-map-written-later": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_DIR_PREFIX, _GMAIL_DIR_PREFIX + 'GMAIL_SEND_ARG_MAP["cc"] = "cc"\n'),),
+        find_missing_attachment_wiring,
+        "gmail_mcp writes into GMAIL_SEND_ARG_MAP['cc']",
+    ),
+    "attachment-schema-literal": RealTreeMutant(
+        "gmail_mcp",
+        ((_GMAIL_ARG_LOOKUP, '"attachments"'),),
+        find_send_capability_violations,
+        "string 'attachments' outside the GMAIL_SEND_ARG_MAP values",
+    ),
+    "attachment-rebound-before-send": RealTreeMutant(
+        "email_delivery",
+        (
+            (
+                _ED_OUTGOING_CALL,
+                "        attachment = settings.out_dir / name\n" + _ED_OUTGOING_CALL,
+            ),
+        ),
+        find_missing_attachment_wiring,
+        "name 'attachment' is also bound otherwise",
+    ),
+    "attachment-not-staged": RealTreeMutant(
+        "email_delivery",
+        ((_ED_STAGE, "attachment = Path(raw_directory) / name"),),
+        find_missing_attachment_wiring,
+        "name 'attachment' is never assigned from _stage_attachment(...)",
+    ),
+    "outgoing-email-in-send-once": RealTreeMutant(
+        "email_delivery",
+        (
+            (
+                _ED_SENDING,
+                "    message = OutgoingEmail(\n"
+                "        message.to,\n"
+                "        message.subject,\n"
+                "        message.text_body,\n"
+                "        message.html_body,\n"
+                "        attachment=message.attachment,\n"
+                "    )\n" + _ED_SENDING,
+            ),
+        ),
+        find_missing_attachment_wiring,
+        "OutgoingEmail(...) outside email_delivery.send_reading_list_email",
+    ),
+    "outgoing-email-replaced": RealTreeMutant(
+        "email_delivery",
+        (
+            (_ED_IMPORT_OS, "import dataclasses\n" + _ED_IMPORT_OS),
+            (
+                _ED_SEND_ONCE,
+                "        message = dataclasses.replace(message, attachment=html_path)\n"
+                + _ED_SEND_ONCE,
+            ),
+        ),
+        find_missing_attachment_wiring,
+        "email_delivery calls dataclasses.replace",
+    ),
+    "tools-references-attachment-problem": RealTreeMutant(
+        "tools",
+        (
+            (
+                _TOOLS_GMAIL,
+                _TOOLS_GMAIL.replace("import ", "import _attachment_problem, "),
+            ),
+        ),
+        find_send_capability_violations,
+        "tools references _attachment_problem; the agent side never touches",
+    ),
+}
+"""Each EA-2 attachment rule (T090 negative, T097 positive) on a mutated real tree."""
+
+
+def test_attachment_mutant_ids_do_not_collide() -> None:
+    known = {*REAL_TREE_MUTANTS, *ALL_EMAIL_MUTANTS}
+    assert not set(ATTACHMENT_REAL_TREE_MUTANTS) & known
+
+
+@pytest.mark.parametrize("mutant_id", sorted(ATTACHMENT_REAL_TREE_MUTANTS))
+def test_attachment_rule_fails_on_mutated_real_tree(
+    package: dict[str, SourceModule], mutant_id: str
+) -> None:
+    mutant = ATTACHMENT_REAL_TREE_MUTANTS[mutant_id]
     original = (SOURCE_DIR / f"{mutant.module}.py").read_text(encoding="utf-8")
     changed = parse_module(mutant.module, apply_mutant(original, mutant))
     mutated = {**package, mutant.module: changed}

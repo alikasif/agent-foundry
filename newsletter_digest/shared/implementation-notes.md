@@ -5762,3 +5762,133 @@ Observed, not mine: 12 `newsletter-digest-email-*` directories in `/tmp`, create
 a before/after listing around a mutant run showed no new entry. I did not remove them.
 
 Verification: `uv run ruff format --check src tests` (64 files) and `uv run ruff check .` pass, `uv run pyrefly check` reports 0 errors, and `uv run pytest -q` gives 5367 passed, 2 xfailed, 2 deselected. That run includes the in-flight uncommitted files of T094, T095 and T097. My two files plus `test_agent.py` (FR-057) give 192 passed.
+
+## T097 — Architecture positive rules (attachment): six-pair map (g), single OutgoingEmail site (h)(2), real-tree mutants and kill matrix
+
+Only `tests/test_architecture.py` changed (plus this section and one learnings line).
+`tests/test_architecture.py`: 472 -> 519 passed (47 new tests). Full suite: 5367 passed,
+2 xfailed, 2 deselected (includes the other wave agents' uncommitted T094/T095/T096
+tests at the time of the run). `uv run ruff format` (own file), `ruff check .`,
+`pyrefly check` (0 errors) clean.
+
+What was added (all appended after `test_email_rule_fails_on_mutated_real_tree`):
+- **Positive checker `find_missing_attachment_wiring`** = (g) `_send_arg_map_violations`
+  + (h)(2) `_outgoing_email_site_violations` (`ATTACHMENT_POSITIVE_RULES` lists both).
+  New constants: `SEND_ARG_PAIRS` (the six AP-5 pairs), `SEND_ARG_MAP_READS`,
+  `OUTGOING_EMAIL`, `OUTGOING_EMAIL_OWNER`, `OUTGOING_EMAIL_FUNCTION`,
+  `ATTACHMENT_FIELD`, `OUTGOING_EMAIL_POSITIONAL_LIMIT` (4), `STAGING_HELPER`
+  (`_stage_attachment`), `DATACLASS_COPY_CALLS`, `DATACLASS_COPY_HOOK`.
+- **(g)**: gmail_mcp has exactly one module-level assignment to `GMAIL_SEND_ARG_MAP`;
+  its value is a dict literal of constant string pairs (a `dict(...)` call or `**`
+  unpacking fails), with no repeated key, equal to the six pairs (messages name each
+  extra / missing pair). Additionally no module rebinds the name (any binding form,
+  `global` included, other than the definition and a plain `from gmail_mcp import`),
+  writes into it (`GMAIL_SEND_ARG_MAP["cc"] = ...`, `del`), or uses an attribute other
+  than `get`/`items`/`keys`/`values` on it (`.update`, `.clear`, `.setdefault`...).
+- **(h)(2)**: exactly one `OutgoingEmail(...)` call in the package (by name, import
+  alias or attribute), inside `email_delivery.send_reading_list_email`; no `*args` or
+  `**kwargs`, at most four positional arguments, an `attachment=` keyword whose value
+  is an `ast.Name`; every binding of that name inside the function (any binding form)
+  is `<name> = _stage_attachment(...)` (plain `Assign`/`AnnAssign`, single Name target,
+  direct call by name) and there is at least one; `_stage_attachment` is bound in
+  email_delivery exactly once, by its module-level `def`.
+- Real-tree tests: `test_detector_sees_the_attachment_wiring` (checker and both
+  sub-rules), `test_detector_sees_the_six_send_arg_pairs`,
+  `test_detector_sees_the_single_staged_outgoing_email`,
+  `test_attachment_helper_names_exist_in_the_real_tree`.
+- Synthetic: `test_positive_attachment_checker_allows_the_synthetic_final_tree`
+  (`FINAL_EMAIL_TREE` and `POSITIVE_EMAIL_TREE`), 23 `ATTACHMENT_WIRING_CASES`
+  (both stub-tree failures plus 21 anchored edits of `FINAL_EMAIL_TREE` via
+  `_final_with`, which asserts each anchor is unique).
+- 17 `ATTACHMENT_REAL_TREE_MUTANTS` (`test_attachment_rule_fails_on_mutated_real_tree`,
+  anchored `apply_mutant` edits of the real source, line-free expected substrings) and
+  `test_attachment_mutant_ids_do_not_collide`. The ten task-listed mutants plus:
+  map written later, `_schema_mismatch` uses the literal, attachment rebound before
+  the send, attachment not from the helper, `OutgoingEmail` built in `_send_once`,
+  `dataclasses.replace(message, attachment=...)`, tools references
+  `_attachment_problem`.
+
+Decisions not covered by the spec:
+- **(g) and (h)(2) are positive only** (not in `find_send_capability_violations`):
+  both are "exactly one" rules and `ALLOWED_CASES` runs `find_send_capability_violations`
+  on the docstring-only `STUB_EMAIL_TREE` (learnings T083). The stub is unchanged
+  and fails both (`stub-tree-map`, `stub-tree-outgoing` cases). The positive checker is
+  tested by its own test, not added to `REAL_TREE_CHECKERS` (that would be a
+  pre-existing hunk, and T063/T083 did the same).
+- **Extensions beyond EA-2's wording**, each to close a way around "exactly one":
+  `OutgoingEmail` used as a value (outside imports and annotations, e.g.
+  `build = OutgoingEmail`) is reported; the send-capable modules may not call
+  `dataclasses.replace` / `copy.replace` or use `__replace__` (an `OutgoingEmail` copy
+  with another `attachment` would bypass the single site; neither module uses them
+  today); the attachment name may not be rebound in the function in any other way;
+  the map may not be mutated after its definition. Splitting strings or `getattr`
+  tricks stay out of scope for an AST rule (as in T090).
+- **(f) alignment (task item 3)**: T092 kept EA-2's names (`attachment_name`,
+  `_stage_attachment`, `_write_private_file`, `_remove_staged`), so no rename. I added
+  T092's two gmail_mcp re-check helpers, `_attachment_problem` and
+  `_attachment_file_problem`, to `ATTACHMENT_HELPER_NAMES` (agent, tools and prompts
+  must not reference them either; mutant `tools-references-attachment-problem`). Not
+  added: `_owner_only`, `_POSIX`, `_send_once`, `TempDirFactory`,
+  `estimated_message_bytes` (generic or not attachment-specific). New test
+  `test_attachment_helper_names_exist_in_the_real_tree` keeps the constant from going
+  stale: every name is defined at module level in exactly one send-capable module and
+  `_stage_attachment` in email_delivery.
+- T090's `test_detector_sees_the_send_arg_map_values` still accepts 5 or 6 values; I
+  left it alone (pre-existing test) and pinned exactly six in the new
+  `test_detector_sees_the_six_send_arg_pairs`.
+- Not mutated on the real tree: "attachment passed positionally" (the real call uses
+  keywords only, so moving `attachment` to a positional argument is a SyntaxError);
+  covered by the synthetic `attachment-positional` case.
+
+Pre-existing hunks modified (AP-6 item 2; `git diff d0de61f -- tests/test_architecture.py`):
+1. Module docstring item 9: four lines appended (the positive (g)/(h)(2) rules).
+2. `ATTACHMENT_HELPER_NAMES`: one comment and two names appended; its docstring
+   "T097 aligns them" -> "T097 aligned them".
+3. `find_send_capability_violations` docstring: last sentence ("T097 adds the positive
+   (g) and (h)(2).") replaced by a two-line pointer to `find_missing_attachment_wiring`.
+Everything else is appended at the end of the file. No checker body, case, mutant,
+synthetic tree, `REAL_TREE_CHECKERS`, the layer order or
+`test_detector_sees_the_known_project_edges` changed (item 7).
+
+Kill matrix (scratch `T097_kill_matrix.py`; 25 checkers = the 22 `REAL_TREE_CHECKERS`
++ `find_missing_delivery_wiring`, `find_missing_email_wiring`,
+`find_missing_attachment_wiring`; all report nothing on the real tree; columns list the
+checkers that report the mutant, then the attachment sub-rules that do):
+
+| Mutant | Declared checker | Killed by (checkers) | Sub-rules |
+|---|---|---|---|
+| agent-calls-mkdtemp | send_capability | send_capability | (i) `_tempfile_violations` |
+| agent-references-stage-attachment | send_capability | layer, importer, send_capability | (f) `_agent_attachment_violations` |
+| attachment-from-out-dir | attachment_wiring | attachment_wiring | (h)(2) |
+| attachment-map-adds-cc | attachment_wiring | attachment_wiring | (g) |
+| attachment-map-drops-attachment | attachment_wiring | attachment_wiring | (g) |
+| attachment-map-written-later | attachment_wiring | attachment_wiring | (g) |
+| attachment-name-from-item-title | send_capability | send_capability | (h)(3) |
+| attachment-not-staged | attachment_wiring | attachment_wiring | (h)(2) |
+| attachment-rebound-before-send | attachment_wiring | attachment_wiring | (h)(2) |
+| attachment-schema-literal | send_capability | send_capability | (h)(1) |
+| email-delivery-builds-attachments | send_capability | send_capability | (h)(1) |
+| gmail-imports-tempfile | send_capability | send_capability | (i) |
+| outgoing-email-in-send-once | attachment_wiring | attachment_wiring | (h)(2) |
+| outgoing-email-replaced | attachment_wiring | attachment_wiring | (h)(2) |
+| prompts-holds-attachments | send_capability | send_capability | (f), (h)(1) |
+| second-outgoing-email | attachment_wiring | attachment_wiring | (h)(2) |
+| tools-references-attachment-problem | send_capability | send_capability | (f) |
+
+(`send_capability` = `find_send_capability_violations`, `attachment_wiring` =
+`find_missing_attachment_wiring`, `layer`/`importer` = `find_layer_violations` /
+`find_importer_violations`.) Every mutant is killed by at least one rule. The (g) and
+(h)(2) mutants are killed **only** by the new positive checker: no pre-existing negative
+rule sees an extra map pair, a dropped pair, an `out_dir` attachment or a second
+`OutgoingEmail` call, which is the gap T097 closes.
+
+Rule mutation probe (scratch `-p` plugin replacing one helper with `lambda: []`, one
+process each, on the 67 attachment tests): `_send_arg_map_violations` 13 failures,
+`_send_arg_map_change_violations` 4, `_outgoing_email_site_violations` 18,
+`_outgoing_email_call_violations` 12, `_staged_name_violations` 4,
+`_staging_helper_violations` 1 (only the `staging-helper-rebound` case; the real tree
+has one def, so that guard has no real-tree mutant).
+
+Mistake fixed on the way (learnings T097): the first (g) draft exempted *every*
+module-level assignment target in gmail_mcp as "the definition", which also exempted a
+module-level `GMAIL_SEND_ARG_MAP["cc"] = "cc"`; the `map-written-later` case caught it.

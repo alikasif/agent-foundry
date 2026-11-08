@@ -581,3 +581,8 @@
   `pathlib` is **not** loaded at interpreter start in a script run, only `os` and
   `stat` are. Flag-off proofs therefore assert effects (no email module, nothing under
   an empty `TMPDIR`), not module absence.
+- (T097) When an AST rule exempts "the definition" by collecting assignment-target ids,
+  keep only `Name` targets with the watched id. Collecting every module-level target
+  also exempts `MAP["cc"] = "cc"` (a `Subscript` target) at module level; a synthetic
+  "written later" case caught it. Write one synthetic case per write form (subscript,
+  method, rebind, `global`).
