@@ -586,3 +586,18 @@
   also exempts `MAP["cc"] = "cc"` (a `Subscript` target) at module level; a synthetic
   "written later" case caught it. Write one synthetic case per write form (subscript,
   method, rebind, `global`).
+- (T095) An exec-mutant anchor must occur exactly once in the source. The
+  `send_reading_list_email` docstring repeats `make_temp_dir(prefix=ATTACHMENT_DIR_PREFIX)`,
+  so `str.replace(anchor, new, 1)` changed the docstring and the mutant "survived".
+  Assert `src.count(anchor) == 1` in the plugin. With `pytest -qq`, the last output line
+  is dots (no summary), so read the pass/fail counts from a `-q` summary instead.
+- (T095) A "cleanup removed" mutant of `email_delivery` leaks `newsletter-digest-email-*`
+  directories into the real `/tmp`, because the default-factory tests stage there. That
+  makes T101's before/after `/tmp` check fail. After a mutation run, remove only the
+  directories from that run (mtime in the run window, at most one `reading-list-*.html`
+  inside), then check that `/tmp` is back to 0.
+- (T095) mkdtemp's 0700 and `os.open(..., 0o600)` are already exact under a normal umask.
+  So "no chmod/fchmod" and "no mode check" mutants survive every test that runs under
+  umask 022. Run the staging once under `os.umask(0o277)` (restore it in a finalizer):
+  without the explicit chmods that gives 0500/0400. Likewise, a "no resolve" mutant is
+  only visible when `tempfile.tempdir` is a symlink.

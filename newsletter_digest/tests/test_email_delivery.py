@@ -14,18 +14,26 @@ for the recipients and the reserved test domains, never for a bare ``@``.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import logging
+import math
 import os
+import quopri
+import random
 import re
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
+import types
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import date, timedelta
 from functools import partial
+from html import unescape
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -51,6 +59,7 @@ from newsletter_digest.gmail_mcp import (
     send_gmail_message,
 )
 from newsletter_digest.models import ReadingList
+from newsletter_digest.render import write_reading_list
 from tests import email_fixture as ef
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -178,6 +187,21 @@ def debug_logs(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
     """Capture every logger at DEBUG, so privacy checks see all records."""
     caplog.set_level(logging.DEBUG)
     return caplog
+
+
+@pytest.fixture
+def temp_root(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """An empty stand-in for the system temp location (``tempfile.tempdir``).
+
+    ``tempfile.mkdtemp`` reads ``tempfile.tempdir`` at call time, so the default
+    ``make_temp_dir`` stages here; the directory is separate from ``tmp_path``
+    (which holds the saved HTML), so leftovers are easy to see.
+    """
+    root = tmp_path_factory.mktemp("systemp")
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
 
 
 @dataclass
@@ -715,18 +739,36 @@ async def test_unexpected_sender_exception_is_unknown(
 
 @pytest.mark.anyio
 async def test_cancellation_is_not_swallowed(
-    settings: Settings, html_path: Path
+    settings: Settings, html_path: Path, temp_root: Path
 ) -> None:
-    async def hanging_sender(*args: Any, **kwargs: Any) -> GmailSendReceipt:
+    seen: list[ef.AttachmentSnapshot] = []
+    propagated: list[BaseException] = []
+
+    async def hanging_sender(
+        settings: Settings, message: OutgoingEmail, **kwargs: Any
+    ) -> GmailSendReceipt:
+        seen.append(ef.AttachmentSnapshot.take(message.attachment))
         await anyio.sleep_forever()
         raise AssertionError("unreachable")
 
     with anyio.move_on_after(FAST_TIMEOUT) as scope:
-        await send_reading_list_email(
-            ef.standard_list(), html_path, settings, sender=hanging_sender
-        )
+        try:
+            await send_reading_list_email(
+                ef.standard_list(), html_path, settings, sender=hanging_sender
+            )
+        except anyio.get_cancelled_exc_class() as exc:
+            propagated.append(exc)
+            raise
         pytest.fail("send_reading_list_email returned after cancellation")
     assert scope.cancelled_caught
+    # EA-6: the CancelledError propagates, and the synchronous finally has already
+    # removed the staged file and its directory (cancelled while the sender awaited).
+    assert len(propagated) == 1
+    assert len(seen) == 1 and seen[0].exists
+    staged = Path(seen[0].path)
+    assert staged.parent.parent == temp_root.resolve()
+    assert not staged.exists() and not staged.parent.exists()
+    assert list(temp_root.iterdir()) == []
 
 
 @pytest.mark.anyio
@@ -1713,3 +1755,1486 @@ async def test_default_seams_use_the_patched_default_send_client(
     _, arguments = factory.calls[0]
     assert set(arguments) == ef.SEND_ARGUMENT_KEYS
     assert str(arguments["subject"]).endswith("- no articles found")
+
+
+# ============================================ attachment staging (EA-3 to EA-9, T095)
+#
+# The staged copy is removed when delivery returns, so the file is inspected INSIDE
+# the sender call (``RecordingSender``'s ``AttachmentSnapshot`` or the fake
+# session's). ``temp_root`` points ``tempfile.tempdir`` at an empty directory, so
+# the default ``make_temp_dir`` (``tempfile.mkdtemp``) stages there and leftovers
+# are visible; one test uses the real system temp location.
+
+POSIX = os.name == "posix"
+posix_only = pytest.mark.skipif(not POSIX, reason="POSIX modes and owners only")
+STAGED_PREFIX = gmail_mcp.ATTACHMENT_DIR_PREFIX
+PREPARE_REASON = "could not prepare the attachment ({}); nothing was sent"
+UNREADABLE_REASON = (
+    "the mail server could not read the attachment file; nothing was sent"
+)
+CLEANUP_WARNING = "Could not remove the temporary copy of the email attachment ({})"
+STAGED_DEBUG = "Staged the attachment at "
+SIZE_ESTIMATE_RE = re.compile(
+    r"Email size estimate: about \d+ KB in total "
+    r"\(HTML part, attachment, plain part\)"
+)
+#: EA-7 / V44: the case-insensitive "server could not read the attachment" markers.
+UNREADABLE_MARKERS = (
+    "file does not exist",
+    "no such file",
+    "enoent",
+    "eacces",
+    "eisdir",
+    "eperm",
+    "enotdir",
+    "failed to send email with",
+)
+SAMPLE_STAGED = f"/tmp/{STAGED_PREFIX}k3j9x_q/{HTML_NAME}"
+#: Server replies (``Error: `` already stripped). Only the first is verified from
+#: the 1.1.11 source; the Node texts are general knowledge (V44).
+UNREADABLE_DETAILS = (
+    f"File does not exist: {SAMPLE_STAGED}",
+    f"EACCES: permission denied, open '{SAMPLE_STAGED}'",
+    "EISDIR: illegal operation on a directory, read",
+    f"ENOENT: no such file or directory, open '{SAMPLE_STAGED}'",
+    f"EPERM: operation not permitted, open '{SAMPLE_STAGED}'",
+    f"ENOTDIR: not a directory, open '{SAMPLE_STAGED}'",
+    "Failed to send email with 1 attachments: read error",
+)
+PROPERTY_SEED = 20261108
+PROPERTY_RUNS = 200
+#: Pieces of hostile content for the property test (FR-073: content never names
+#: the attachment).
+HOSTILE_PIECES = (
+    "/",
+    "..",
+    "\x00",
+    "\n",
+    "~",
+    "\r\n",
+    "\\",
+    " ",
+    "../../etc/passwd",
+    "~/.gmail-mcp/credentials.json",
+    "reading-list-1999-01-01.html",
+    "%2e%2e%2f",
+    "name.html",
+    "Title",
+)
+HOSTILE_HTML_NAMES = (
+    HTML_NAME,
+    "evil.html",
+    "../../etc/passwd",
+    "~",
+    "reading-list-1999-01-01.html",
+    "credentials.json",
+)
+
+
+class RecordingTempDir:
+    """A ``make_temp_dir`` stand-in: records each call and the directory made."""
+
+    def __init__(self, make: Callable[..., str] = tempfile.mkdtemp) -> None:
+        """Delegate to ``make`` (default: ``tempfile.mkdtemp``, read at call time)."""
+        self.make = make
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.made: list[str] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> str:
+        """Record the arguments, make the directory and record its raw path."""
+        self.calls.append((args, dict(kwargs)))
+        made = self.make(*args, **kwargs)
+        self.made.append(made)
+        return made
+
+
+def mkdtemp_then(tamper: Callable[[Path], None]) -> Callable[..., str]:
+    """A factory that runs ``tempfile.mkdtemp`` and then ``tamper`` on the result."""
+
+    def make(*args: Any, **kwargs: Any) -> str:
+        made = tempfile.mkdtemp(*args, **kwargs)
+        tamper(Path(made))
+        return made
+
+    return make
+
+
+def os_with(**overrides: Any) -> types.ModuleType:
+    """A copy of the ``os`` namespace with ``overrides``, for ``email_delivery.os``.
+
+    Patching ``os.rmdir`` itself would also reach pytest, ``tempfile`` and the
+    test's own helpers (learnings T092); this proxy is seen by email_delivery only.
+    """
+    proxy = types.ModuleType("os")
+    proxy.__dict__.update(vars(os))
+    proxy.__dict__.update(overrides)
+    return proxy
+
+
+class ShortWriter:
+    """Wraps a binary file object and silently writes one byte fewer."""
+
+    def __init__(self, handle: Any) -> None:
+        """Wrap ``handle`` (the real ``os.fdopen`` result)."""
+        self.handle = handle
+
+    def __enter__(self) -> ShortWriter:
+        """Context manager entry, like a file object."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """Close the real file."""
+        self.handle.close()
+
+    def fileno(self) -> int:
+        """The real descriptor (``fchmod`` uses it)."""
+        return self.handle.fileno()
+
+    def write(self, data: bytes) -> int:
+        """Write all but the last byte."""
+        return self.handle.write(data[:-1])
+
+
+class PathEchoSender(RecordingSender):
+    """Records the call, then raises an error whose text holds the staged path."""
+
+    def __init__(self, make_error: Callable[[str], BaseException]) -> None:
+        """``make_error(path)`` builds the error, like a server echoing the path."""
+        super().__init__()
+        self.make_error = make_error
+
+    async def __call__(
+        self, settings: Settings, message: OutgoingEmail, **kwargs: Any
+    ) -> GmailSendReceipt:
+        """Record like :class:`RecordingSender`, then raise."""
+        await super().__call__(settings, message, **kwargs)
+        raise self.make_error(str(message.attachment))
+
+
+class TamperingSender(RecordingSender):
+    """Records the call, then changes the staged directory before returning."""
+
+    def __init__(self, tamper: Callable[[Path], None]) -> None:
+        """``tamper(staged_file)`` runs after the snapshot, before the receipt."""
+        super().__init__()
+        self.tamper = tamper
+
+    async def __call__(
+        self, settings: Settings, message: OutgoingEmail, **kwargs: Any
+    ) -> GmailSendReceipt:
+        """Record, tamper, then return the receipt."""
+        receipt = await super().__call__(settings, message, **kwargs)
+        self.tamper(message.attachment)
+        return receipt
+
+
+class VanishingFakeSend(FakeSend):
+    """The real helper over the fakes, but the staged file is deleted after the
+    EA-4 re-check and before the session starts, so the fake server answers the
+    verified ``Error: File does not exist: <path>``."""
+
+    async def __call__(
+        self, settings: Settings, message: OutgoingEmail, *, send_timeout: float
+    ) -> GmailSendReceipt:
+        """Forward to the real helper with a factory that removes the file first."""
+        inner = self.factory
+
+        def factory(connections: dict[str, Any]) -> ef.FakeSendClient:
+            os.unlink(message.attachment)
+            return inner(connections)
+
+        return await send_gmail_message(
+            settings,
+            message,
+            send_timeout=send_timeout,
+            client_factory=factory,
+            start_timeout=FAST_TIMEOUT,
+            sleep=self._sleep,
+        )
+
+
+def assert_call_time_staging(
+    snapshot: ef.AttachmentSnapshot, html: str, root: Path
+) -> Path:
+    """The EA-3 shape of the staged file as the sender saw it; return its path."""
+    path = Path(snapshot.path)
+    assert path.is_absolute()
+    assert os.path.normpath(snapshot.path) == snapshot.path
+    assert path.parent.parent == root.resolve()
+    assert path.parent.name.startswith(STAGED_PREFIX)
+    assert path.parent.name != STAGED_PREFIX  # mkdtemp adds a random part
+    assert gmail_mcp.ATTACHMENT_NAME_RE.fullmatch(path.name)
+    assert snapshot.exists and not snapshot.is_symlink
+    assert snapshot.data == html.encode("ascii")
+    if POSIX:
+        assert (snapshot.file_mode, snapshot.dir_mode) == (0o600, 0o700)
+    return path
+
+
+def assert_nothing_left(root: Path, made: Sequence[str] = ()) -> None:
+    """Every directory made is gone and the temp root is empty again."""
+    for directory in made:
+        assert not os.path.lexists(directory)
+    assert list(root.iterdir()) == []
+
+
+def warning_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """``email_delivery`` WARNING-or-higher messages, in order."""
+    return [line for level, line in delivery_lines(caplog) if level >= logging.WARNING]
+
+
+def assert_preparation_failed(
+    outcome: EmailOutcome,
+    exc_class: type[BaseException],
+    content: EmailContent,
+    sender: RecordingSender,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """EA-7 preparation failure: failed, fixed reason, nothing sent, one WARNING."""
+    reason = PREPARE_REASON.format(exc_class.__name__)
+    assert outcome == EmailOutcome(
+        status="failed",
+        recipients=3,
+        message_id=None,
+        reason=reason,
+        shown=content.shown,
+        omitted=content.omitted,
+        over_budget=content.over_budget,
+        send_calls=0,
+        session_starts=0,
+    )
+    assert reason.startswith("could not prepare the attachment (")
+    assert reason.endswith("); nothing was sent")
+    assert "/" not in reason and STAGED_PREFIX not in reason
+    assert_reason_shape(outcome.reason)
+    assert sender.calls == []
+    assert warning_lines(caplog) == [f"Email delivery failed ({reason})"]
+    lines = [line for _, line in delivery_lines(caplog)]
+    assert not any(line.startswith(("Attaching", STAGED_DEBUG)) for line in lines)
+
+
+# ------------------------------------------------- byte identity (acceptance 35, 41)
+
+BYTE_IDENTITY_LISTS: list[Any] = [
+    pytest.param(ef.standard_list, id="standard"),
+    pytest.param(ef.cjk_heavy_list, id="cjk-heavy"),
+    pytest.param(ef.hostile_list, id="hostile"),
+    pytest.param(partial(ef.hostile_list, lone_surrogate=True), id="lone-surrogate"),
+    pytest.param(partial(ef.empty_list, 0), id="empty-no-emails"),
+    pytest.param(partial(ef.empty_list, 4), id="empty-no-articles"),
+    pytest.param(ef.size_300_list, id="size-300"),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("build", BYTE_IDENTITY_LISTS)
+async def test_attachment_bytes_equal_the_html_body(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    build: Callable[[], ReadingList],
+) -> None:
+    rl = build()
+    renderer = RecordingRenderer()
+    sender = RecordingSender()
+    outcome = await deliver(rl, html_path, settings, sender=sender, renderer=renderer)
+
+    assert outcome.status == "sent"
+    assert len(renderer.calls) == 1  # one render: one string for both uses
+    content = renderer.returned[0]
+    assert len(sender.calls) == 1
+    call = sender.calls[0]
+    # NFR-E11: file bytes == htmlBody == content.html.encode("ascii").
+    assert call.arguments["htmlBody"] == call.message.html_body == content.html
+    assert call.attachment.data == content.html.encode("ascii")
+    assert call.attachment.data == content.html.encode("utf-8")  # ASCII: same
+    assert call.arguments["attachments"] == [call.attachment.path]
+    assert call.arguments["body"] == content.text
+    # The same string an independent render gives (no second, different render).
+    assert content.html == render_email(rl, html_name=HTML_NAME).html
+    assert_call_time_staging(call.attachment, content.html, temp_root)
+    assert_nothing_left(temp_root)
+
+
+@pytest.mark.anyio
+async def test_size_300_attachment_keeps_must_read_and_the_omitted_line(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    rl = ef.size_300_list()
+    renderer = RecordingRenderer()
+    sender = RecordingSender()
+    outcome = await deliver(rl, html_path, settings, sender=sender, renderer=renderer)
+
+    content = renderer.returned[0]
+    call = sender.calls[0]
+    data = call.attachment.data
+    assert data is not None
+    body = str(call.arguments["htmlBody"]).encode("ascii")
+    assert data == body
+    assert len(data) <= EMAIL_HTML_BUDGET and len(body) <= EMAIL_HTML_BUDGET
+    assert not content.over_budget and not outcome.over_budget
+    assert content.omitted > 0 and outcome.omitted == content.omitted
+    assert content.shown + content.omitted == 300
+    text = " ".join(unescape(data.decode("ascii")).split())
+    assert (
+        f"{content.shown} of 300 items are shown; {content.omitted} lower-priority "
+        "items were left out to fit Gmail's size limit."
+    ) in text
+    must = rl.must_read()
+    assert len(must) == 10
+    for item in must:  # every Must-read item is in the attachment
+        assert " ".join(item.title.split()) in text
+    assert_nothing_left(temp_root)
+
+
+# ----------------------------------------------------- modes, location and the name
+
+
+@pytest.mark.anyio
+async def test_default_factory_stages_in_the_system_temp_location(
+    settings: Settings, html_path: Path, tmp_path: Path
+) -> None:
+    defaults = send_reading_list_email.__kwdefaults__
+    assert defaults is not None and defaults["make_temp_dir"] is tempfile.mkdtemp
+    rl = ef.standard_list()
+    sender = RecordingSender()
+    outcome = await deliver(rl, html_path, settings, sender=sender)
+
+    assert outcome.status == "sent"
+    snapshot = sender.calls[0].attachment
+    system_temp = Path(tempfile.gettempdir()).resolve()
+    path = assert_call_time_staging(
+        snapshot, sender.calls[0].message.html_body, system_temp
+    )
+    assert path == path.resolve()
+    assert path == sender.calls[0].message.attachment
+    expected_name = email_delivery.attachment_name(rl.meta.end_date)
+    saved = write_reading_list(rl, tmp_path / "out")
+    assert path.name == expected_name == saved.name == HTML_NAME
+    assert not path.exists() and not path.parent.exists()
+
+
+@pytest.mark.anyio
+async def test_factory_gets_only_the_prefix_and_the_directory_holds_one_file(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    listings: list[list[str]] = []
+
+    def look(staged: Path) -> None:
+        listings.append(sorted(os.listdir(staged.parent)))
+
+    temp_dir = RecordingTempDir()
+    sender = TamperingSender(look)
+    await deliver(
+        ef.standard_list(), html_path, settings, sender=sender, make_temp_dir=temp_dir
+    )
+    # No dir=: the system temp location (tempfile.tempdir, read at call time).
+    assert temp_dir.calls == [((), {"prefix": STAGED_PREFIX})]
+    assert listings == [[HTML_NAME]]
+    staged = Path(sender.calls[0].attachment.path)
+    assert staged.parent == Path(temp_dir.made[0]).resolve()
+    assert_call_time_staging(
+        sender.calls[0].attachment, sender.calls[0].message.html_body, temp_root
+    )
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_attachment_name_ignores_the_html_path(
+    settings: Settings, tmp_path: Path, temp_root: Path
+) -> None:
+    sender = RecordingSender()
+    other = tmp_path / "saved" / "reading-list-1999-01-01.html"
+    await deliver(ef.standard_list(), other, settings, sender=sender)
+    staged = Path(sender.calls[0].attachment.path)
+    assert staged.name == HTML_NAME  # from meta.end_date, never from html_path
+    assert not staged.is_relative_to(tmp_path / "saved")
+    assert not other.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        date(2026, 11, 4),
+        date(2026, 11, 8),
+        date(2024, 2, 29),
+        date(1999, 12, 31),
+        date(1000, 1, 1),
+        date(9999, 12, 31),
+    ],
+)
+def test_attachment_name_is_the_saved_page_name(end: date, tmp_path: Path) -> None:
+    base = ef.empty_list(0)
+    rl = base.model_copy(
+        update={"meta": base.meta.model_copy(update={"end_date": end})}
+    )
+    name = email_delivery.attachment_name(end)
+    assert name == f"reading-list-{end.isoformat()}.html"
+    assert gmail_mcp.ATTACHMENT_NAME_RE.fullmatch(name)
+    assert write_reading_list(rl, tmp_path).name == name
+
+
+def test_attachment_name_always_fits_the_send_pattern() -> None:
+    rng = random.Random(PROPERTY_SEED)
+    for _ in range(PROPERTY_RUNS):
+        end = date.fromordinal(rng.randint(date(1000, 1, 1).toordinal(), 3_652_059))
+        name = email_delivery.attachment_name(end)
+        assert gmail_mcp.ATTACHMENT_NAME_RE.fullmatch(name), name
+        assert date.fromisoformat(name[len("reading-list-") : -len(".html")]) == end
+
+
+# ------------------------------------------------------- cleanup (acceptance 36)
+
+CLEANUP_RESULTS: list[Any] = [
+    pytest.param(GmailSendReceipt(MESSAGE_ID, 1), "sent", id="sent"),
+    pytest.param(
+        send_error(GmailSendErrorKind.REJECTED, "Backend Error"),
+        "failed",
+        id="rejected",
+    ),
+    pytest.param(
+        send_error(GmailSendErrorKind.TIMEOUT_AFTER_SEND),
+        "unknown",
+        id="timeout-after-send",
+    ),
+    pytest.param(
+        send_error(GmailSendErrorKind.TRANSPORT_AFTER_SEND, "ConnectionResetError"),
+        "unknown",
+        id="transport-after-send",
+    ),
+    pytest.param(
+        send_error(GmailSendErrorKind.INVALID_MESSAGE, "x"),
+        "failed",
+        id="invalid-message",
+    ),
+    pytest.param(RuntimeError("boom"), "unknown", id="unexpected-exception"),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("result", "status"), CLEANUP_RESULTS)
+async def test_staged_copy_is_removed_after_every_sender_result(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    result: GmailSendReceipt | BaseException,
+    status: str,
+) -> None:
+    temp_dir = RecordingTempDir()
+    sender = RecordingSender(result)
+    outcome = await deliver(
+        ef.standard_list(), html_path, settings, sender=sender, make_temp_dir=temp_dir
+    )
+    assert outcome.status == status
+    assert len(temp_dir.made) == 1 and len(sender.calls) == 1
+    call = sender.calls[0]
+    assert_call_time_staging(call.attachment, call.message.html_body, temp_root)
+    assert_nothing_left(temp_root, temp_dir.made)
+    assert not any(
+        line.startswith("Could not remove") for line in warning_lines(debug_logs)
+    )
+
+
+REAL_HELPER_OUTCOMES: list[Any] = [
+    pytest.param(
+        ef.send_script(ef.Reply.success(MESSAGE_ID)), None, "sent", (1, 1), id="sent"
+    ),
+    pytest.param(
+        ef.send_script(attachment_reply="eacces"),
+        None,
+        "failed",
+        (1, 1),
+        id="eacces-reply",
+    ),
+    pytest.param(
+        ef.send_script(ef.Reply.server_error("Backend Error")),
+        None,
+        "failed",
+        (1, 1),
+        id="error-reply",
+    ),
+    pytest.param(
+        [ef.send_script(ef.Reply.hang()), ef.send_script()],
+        FAST_TIMEOUT,
+        "unknown",
+        (1, 1),
+        id="timeout-after-send",
+    ),
+    pytest.param(
+        ef.send_script(ef.Reply.raising_group(ConnectionResetError("reset"))),
+        None,
+        "unknown",
+        (1, 1),
+        id="transport-after-send",
+    ),
+    pytest.param(
+        [START_FAULT, START_FAULT], None, "failed", (0, 2), id="start-failed-twice"
+    ),
+    pytest.param(
+        ef.SessionScript(send_schema=_schema_without("attachments")),
+        None,
+        "failed",
+        (0, 1),
+        id="schema-without-attachments",
+    ),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("scripts", "timeout", "status", "calls_starts"), REAL_HELPER_OUTCOMES
+)
+async def test_staged_copy_is_removed_after_the_session_closes(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripts: ef.SessionScript | Sequence[ef.SessionScript],
+    timeout: float | None,
+    status: str,
+    calls_starts: tuple[int, int],
+) -> None:
+    fake = FakeSend(scripts)
+
+    def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        fake.log.add("unlink")
+        os.unlink(path, *args, **kwargs)
+
+    def rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        fake.log.add("rmdir")
+        os.rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(email_delivery, "os", os_with(unlink=unlink, rmdir=rmdir))
+    configured = settings
+    if timeout is not None:
+        configured = dataclasses.replace(settings, email_send_timeout=timeout)
+    temp_dir = RecordingTempDir()
+    outcome = await deliver(
+        ef.standard_list(), html_path, configured, sender=fake, make_temp_dir=temp_dir
+    )
+
+    assert outcome.status == status
+    assert (outcome.send_calls, outcome.session_starts) == calls_starts
+    assert len(fake.factory.calls) == calls_starts[0]
+    fake.check_calls(configured)
+    assert len(temp_dir.made) == 1
+    for snapshot in fake.factory.attachment_snapshots:
+        assert_call_time_staging(
+            snapshot, str(fake.factory.calls[0][1]["htmlBody"]), temp_root
+        )
+    # EA-6: removal strictly after the last session closed (or failed to open).
+    assert fake.log.events[-2:] == ["unlink", "rmdir"]
+    assert fake.log.events.count("unlink") == 1
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_invalid_message_still_removes_the_staged_copy(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    many = tuple(f"reader{i}@example.com" for i in range(11))
+    configured = dataclasses.replace(settings, email_to=many)
+    fake = FakeSend(ef.send_script())
+    temp_dir = RecordingTempDir()
+    outcome = await deliver(
+        ef.standard_list(), html_path, configured, sender=fake, make_temp_dir=temp_dir
+    )
+    assert outcome.status == "failed"
+    assert (outcome.send_calls, outcome.session_starts) == (0, 0)
+    assert fake.log.events == []
+    assert len(temp_dir.made) == 1
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_start_retry_reuses_the_one_staged_file(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    fake = FakeSend([START_FAULT, ef.send_script(ef.Reply.success(MESSAGE_ID))])
+    temp_dir = RecordingTempDir()
+    outcome = await deliver(
+        ef.standard_list(), html_path, settings, sender=fake, make_temp_dir=temp_dir
+    )
+    assert outcome.status == "sent"
+    assert (outcome.send_calls, outcome.session_starts) == (1, 2)
+    assert fake.sleeps == [2.0]
+    assert len(temp_dir.made) == 1  # created once, before the first start
+    snapshot = fake.factory.last_attachment_snapshot()
+    assert len(fake.factory.attachment_snapshots) == 1
+    assert Path(snapshot.path).parent == Path(temp_dir.made[0]).resolve()
+    assert_call_time_staging(
+        snapshot, str(fake.factory.calls[0][1]["htmlBody"]), temp_root
+    )
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+class _Abort(BaseException):
+    """A non-``Exception`` error, like ``KeyboardInterrupt`` (never swallowed)."""
+
+
+@pytest.mark.anyio
+async def test_base_exception_from_the_sender_propagates_after_cleanup(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    temp_dir = RecordingTempDir()
+    sender = RecordingSender(_Abort("stop"))
+    with pytest.raises(_Abort):
+        await deliver(
+            ef.standard_list(),
+            html_path,
+            settings,
+            sender=sender,
+            make_temp_dir=temp_dir,
+        )
+    assert len(sender.calls) == 1 and sender.calls[0].attachment.exists
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_base_exception_while_staging_is_not_a_preparation_failure(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def interrupted_open(*args: Any, **kwargs: Any) -> int:
+        raise _Abort("stop")
+
+    monkeypatch.setattr(email_delivery, "os", os_with(open=interrupted_open))
+    temp_dir = RecordingTempDir()
+    sender = RecordingSender()
+    with pytest.raises(_Abort):
+        await deliver(
+            ef.standard_list(),
+            html_path,
+            settings,
+            sender=sender,
+            make_temp_dir=temp_dir,
+        )
+    assert sender.calls == []
+    assert len(temp_dir.made) == 1
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+# ------------------------------------------------ preparation failures (FR-074)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "exc_class", [OSError, PermissionError, RuntimeError, ValueError]
+)
+async def test_factory_error_is_a_preparation_failure(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    exc_class: type[Exception],
+) -> None:
+    def failing_factory(*args: Any, **kwargs: Any) -> str:
+        raise exc_class(f"cannot create {temp_root}/{STAGED_PREFIX}x")
+
+    content = marker_content()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=failing_factory,
+    )
+    assert_preparation_failed(outcome, exc_class, content, sender, debug_logs)
+    assert_nothing_left(temp_root)
+    for record in records_at_or_above(debug_logs.records, logging.INFO):
+        assert str(temp_root) not in record.getMessage()
+
+
+@pytest.mark.anyio
+async def test_factory_returning_a_missing_directory_fails_quietly(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+) -> None:
+    missing = temp_root / f"{STAGED_PREFIX}never-made"
+    temp_dir = RecordingTempDir(lambda *args, **kwargs: str(missing))
+    content = marker_content()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=temp_dir,
+    )
+    assert_preparation_failed(outcome, FileNotFoundError, content, sender, debug_logs)
+    # Cleanup of entries that do not exist is silent (FileNotFoundError ignored).
+    assert not any(
+        line.startswith("Could not remove") for line in warning_lines(debug_logs)
+    )
+    assert_nothing_left(temp_root)
+
+
+@posix_only
+@pytest.mark.anyio
+async def test_factory_dir_0755_is_made_private_before_writing(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    temp_dir = RecordingTempDir(mkdtemp_then(lambda made: made.chmod(0o755)))
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(), html_path, settings, sender=sender, make_temp_dir=temp_dir
+    )
+    # EA-3 chmods the directory to 0700 itself, so a 0755 factory dir is repaired.
+    assert outcome.status == "sent"
+    assert sender.calls[0].attachment.dir_mode == 0o700
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@posix_only
+@pytest.mark.anyio
+async def test_factory_dir_0755_that_stays_0755_is_a_preparation_failure(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chmods: list[tuple[Any, int]] = []
+
+    def ineffective_chmod(path: Any, mode: int, *args: Any, **kwargs: Any) -> None:
+        chmods.append((path, mode))
+
+    monkeypatch.setattr(email_delivery, "os", os_with(chmod=ineffective_chmod))
+    temp_dir = RecordingTempDir(mkdtemp_then(lambda made: made.chmod(0o755)))
+    content = marker_content()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=temp_dir,
+    )
+    assert [mode for _, mode in chmods] == [0o700]
+    assert_preparation_failed(outcome, PermissionError, content, sender, debug_logs)
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_open_error_is_a_preparation_failure(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[str] = []
+
+    def refusing_open(path: Any, *args: Any, **kwargs: Any) -> int:
+        opened.append(os.fspath(path))
+        raise PermissionError(13, "Permission denied", os.fspath(path))
+
+    monkeypatch.setattr(email_delivery, "os", os_with(open=refusing_open))
+    temp_dir = RecordingTempDir()
+    content = marker_content()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=temp_dir,
+    )
+    assert opened == [str(Path(temp_dir.made[0]).resolve() / HTML_NAME)]
+    assert_preparation_failed(outcome, PermissionError, content, sender, debug_logs)
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dangling", [False, True], ids=["to-a-file", "dangling"])
+async def test_planted_symlink_is_never_followed(
+    settings: Settings,
+    html_path: Path,
+    tmp_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    dangling: bool,
+) -> None:
+    target = tmp_path / "victim" / "credentials.json"
+    target.parent.mkdir()
+    if not dangling:
+        target.write_bytes(b"SECRET")
+
+    def plant(made: Path) -> None:
+        os.symlink(target, made / HTML_NAME)
+
+    temp_dir = RecordingTempDir(mkdtemp_then(plant))
+    content = marker_content()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=temp_dir,
+    )
+    assert_preparation_failed(outcome, FileExistsError, content, sender, debug_logs)
+    # O_EXCL refused the entry; cleanup removed the link only, never its target.
+    if dangling:
+        assert not target.exists()
+    else:
+        assert target.read_bytes() == b"SECRET"
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_short_write_is_a_preparation_failure(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def short_fdopen(fd: int, *args: Any, **kwargs: Any) -> ShortWriter:
+        return ShortWriter(os.fdopen(fd, *args, **kwargs))
+
+    monkeypatch.setattr(email_delivery, "os", os_with(fdopen=short_fdopen))
+    temp_dir = RecordingTempDir()
+    content = marker_content()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=temp_dir,
+    )
+    assert_preparation_failed(outcome, OSError, content, sender, debug_logs)
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_non_ascii_html_is_a_preparation_failure(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+) -> None:
+    content = dataclasses.replace(
+        marker_content(), html="<!DOCTYPE html><p>café \U0001f680</p>"
+    )
+    temp_dir = RecordingTempDir()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=temp_dir,
+    )
+    assert_preparation_failed(outcome, UnicodeEncodeError, content, sender, debug_logs)
+    assert len(temp_dir.made) == 1
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_render_failure_never_calls_the_factory(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    temp_dir = RecordingTempDir()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(ValueError("bad template")),
+        make_temp_dir=temp_dir,
+    )
+    assert outcome.status == "failed"
+    assert outcome.reason == (
+        "could not build the email (ValueError); nothing was sent"
+    )
+    assert temp_dir.calls == [] and sender.calls == []
+    assert_nothing_left(temp_root)
+
+
+# ------------------------------------------------------- cleanup failures (EA-6)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "result",
+    [
+        GmailSendReceipt(MESSAGE_ID, 1),
+        send_error(GmailSendErrorKind.REJECTED, "Backend Error"),
+        send_error(GmailSendErrorKind.TIMEOUT_AFTER_SEND),
+    ],
+    ids=["sent", "failed", "unknown"],
+)
+async def test_rmdir_failure_is_one_warning_and_keeps_the_outcome(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    result: GmailSendReceipt | GmailSendError,
+) -> None:
+    baseline = await deliver(
+        ef.standard_list(), html_path, settings, sender=RecordingSender(result)
+    )
+    baseline_warnings = warning_lines(debug_logs)
+    debug_logs.clear()
+
+    def failing_rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError(13, "Permission denied", os.fspath(path))
+
+    monkeypatch.setattr(email_delivery, "os", os_with(rmdir=failing_rmdir))
+    sender = RecordingSender(result)
+    outcome = await deliver(ef.standard_list(), html_path, settings, sender=sender)
+
+    assert outcome == baseline
+    staged = Path(sender.calls[0].attachment.path)
+    warning = CLEANUP_WARNING.format("PermissionError")
+    assert warning_lines(debug_logs) == [*baseline_warnings, warning]
+    for record in records_at_or_above(debug_logs.records, logging.INFO):
+        assert str(staged.parent) not in record.getMessage()
+        assert STAGED_PREFIX not in record.getMessage()
+    debug_paths = [
+        r for r in debug_logs.records if str(staged.parent) in r.getMessage()
+    ]
+    assert debug_paths and {r.levelno for r in debug_paths} == {logging.DEBUG}
+    assert not staged.exists()  # unlink worked; only the empty directory is left
+    assert staged.parent.is_dir() and list(staged.parent.iterdir()) == []
+    os.rmdir(staged.parent)
+    assert_nothing_left(temp_root)
+
+
+@pytest.mark.anyio
+async def test_unlink_failure_is_one_warning_and_skips_rmdir(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rmdirs: list[Any] = []
+
+    def failing_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError(13, "Permission denied", os.fspath(path))
+
+    def recording_rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        rmdirs.append(path)
+        os.rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        email_delivery, "os", os_with(unlink=failing_unlink, rmdir=recording_rmdir)
+    )
+    sender = RecordingSender()
+    outcome = await deliver(ef.standard_list(), html_path, settings, sender=sender)
+    assert outcome.status == "sent" and outcome.message_id == MESSAGE_ID
+    assert warning_lines(debug_logs) == [CLEANUP_WARNING.format("PermissionError")]
+    assert rmdirs == []
+    staged = Path(sender.calls[0].attachment.path)
+    assert staged.is_file()
+    staged.unlink()
+    staged.parent.rmdir()
+    assert_nothing_left(temp_root)
+
+
+@pytest.mark.anyio
+async def test_an_extra_entry_is_left_alone_never_removed_recursively(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+) -> None:
+    def add_extra(staged: Path) -> None:
+        (staged.parent / "extra.txt").write_bytes(b"not ours")
+
+    sender = TamperingSender(add_extra)
+    outcome = await deliver(ef.standard_list(), html_path, settings, sender=sender)
+    assert outcome.status == "sent"
+    assert warning_lines(debug_logs) == [CLEANUP_WARNING.format("OSError")]
+    staged = Path(sender.calls[0].attachment.path)
+    assert not staged.exists()  # our one file is removed
+    assert (staged.parent / "extra.txt").read_bytes() == b"not ours"  # DA5
+    (staged.parent / "extra.txt").unlink()
+    staged.parent.rmdir()
+    assert_nothing_left(temp_root)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("remove_dir", [False, True], ids=["file-gone", "dir-gone"])
+async def test_already_removed_entries_are_ignored_silently(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    remove_dir: bool,
+) -> None:
+    def remove(staged: Path) -> None:
+        staged.unlink()
+        if remove_dir:
+            staged.parent.rmdir()
+
+    sender = TamperingSender(remove)
+    outcome = await deliver(ef.standard_list(), html_path, settings, sender=sender)
+    assert outcome.status == "sent" and outcome.message_id == MESSAGE_ID
+    assert warning_lines(debug_logs) == []
+    assert_nothing_left(temp_root)
+
+
+# ------------------------------------------------- failure mapping (EA-7, V44)
+
+
+def test_unreadable_attachment_markers_are_the_ea7_list() -> None:
+    assert email_delivery._UNREADABLE_ATTACHMENT_MARKERS == UNREADABLE_MARKERS
+
+
+@pytest.mark.parametrize("marker", _marker_variants(UNREADABLE_MARKERS))
+def test_rejected_unreadable_attachment_class(settings: Settings, marker: str) -> None:
+    detail = f"Request failed: {marker} {SAMPLE_STAGED}"
+    err = send_error(GmailSendErrorKind.REJECTED, detail)
+    assert failure_reason(err, settings) == UNREADABLE_REASON
+
+
+@pytest.mark.parametrize("detail", UNREADABLE_DETAILS)
+def test_unreadable_attachment_reason_has_no_path(
+    settings: Settings, debug_logs: pytest.LogCaptureFixture, detail: str
+) -> None:
+    for err in (
+        send_error(GmailSendErrorKind.REJECTED, detail),
+        raw_detail_error(GmailSendErrorKind.REJECTED, detail),
+    ):
+        reason = failure_reason(err, settings)
+        assert reason == UNREADABLE_REASON
+        assert "/" not in reason and STAGED_PREFIX not in reason
+        assert_reason_shape(reason)
+    # The path-bearing server text goes to DEBUG only.
+    with_detail = [r for r in debug_logs.records if detail in r.getMessage()]
+    assert with_detail and {r.levelno for r in with_detail} == {logging.DEBUG}
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        f"EACCES: permission denied, open '{SAMPLE_STAGED}'",
+        "Insufficient Permission: ENOENT",
+        "403 Forbidden: EPERM",
+        "invalid recipient: no such file",
+        "User-rate limit exceeded; eisdir",
+        "credentials: File does not exist: /x",
+    ],
+)
+def test_unreadable_attachment_row_is_checked_before_the_others(
+    settings: Settings, detail: str
+) -> None:
+    err = send_error(GmailSendErrorKind.REJECTED, detail)
+    assert failure_reason(err, settings) == UNREADABLE_REASON
+
+
+@pytest.mark.parametrize(
+    ("kind", "prefix"),
+    [
+        (GmailSendErrorKind.START_FAILED, "could not start the Gmail MCP server"),
+        (GmailSendErrorKind.INVALID_MESSAGE, "the email failed this app's own"),
+        (GmailSendErrorKind.UNKNOWN_REPLY, "unrecognised reply from send_email"),
+        (GmailSendErrorKind.TOOL_SCHEMA_CHANGED, "the Gmail MCP server's send_email"),
+    ],
+)
+def test_unreadable_attachment_row_is_rejected_only(
+    settings: Settings, kind: GmailSendErrorKind, prefix: str
+) -> None:
+    err = send_error(kind, "spawn npx ENOENT: no such file or directory")
+    assert failure_reason(err, settings).startswith(prefix)
+
+
+@pytest.mark.parametrize(
+    ("detail", "prefix"),
+    [
+        ("Insufficient Permission", "Gmail refused the send (permission"),
+        ("Invalid To header", "Gmail rejected a recipient address"),
+        ("User-rate limit exceeded", "Gmail rate or sending limit reached"),
+        ("Backend Error", "Gmail returned an error: Backend Error"),
+    ],
+)
+def test_other_rejected_rows_are_unchanged(
+    settings: Settings, detail: str, prefix: str
+) -> None:
+    err = send_error(GmailSendErrorKind.REJECTED, detail)
+    assert failure_reason(err, settings).startswith(prefix)
+
+
+@pytest.mark.anyio
+async def test_eacces_reply_maps_to_the_attachment_reason(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeSend(ef.send_script(attachment_reply="eacces"))
+    outcome = await deliver(ef.standard_list(), html_path, settings, sender=fake)
+    assert outcome.status == "failed"
+    assert outcome.reason == UNREADABLE_REASON
+    assert (outcome.send_calls, outcome.session_starts) == (1, 1)
+    assert len(fake.factory.calls) == 1
+    staged = fake.factory.last_attachment_snapshot().path
+    for record in records_at_or_above(debug_logs.records, logging.INFO):
+        assert staged not in record.getMessage()
+    assert any(
+        r.levelno == logging.DEBUG and ef.eacces_text(staged)[7:] in r.getMessage()
+        for r in debug_logs.records
+    )
+    assert_nothing_left(temp_root)
+
+
+@pytest.mark.anyio
+async def test_missing_file_reply_maps_to_the_attachment_reason(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+) -> None:
+    fake = VanishingFakeSend(ef.send_script(ef.Reply.success(MESSAGE_ID)))
+    temp_dir = RecordingTempDir()
+    outcome = await deliver(
+        ef.standard_list(), html_path, settings, sender=fake, make_temp_dir=temp_dir
+    )
+    assert outcome == EmailOutcome(
+        status="failed",
+        recipients=3,
+        message_id=None,
+        reason=UNREADABLE_REASON,
+        shown=outcome.shown,
+        omitted=0,
+        over_budget=False,
+        send_calls=1,
+        session_starts=1,
+    )
+    snapshot = fake.factory.last_attachment_snapshot()
+    assert not snapshot.exists
+    assert len(fake.factory.calls) == 1
+    assert warning_lines(debug_logs) == [f"Email delivery failed ({UNREADABLE_REASON})"]
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+# ------------------------------------------- property: the path is fixed code only
+
+
+def hostile_text(rng: random.Random) -> str:
+    """A random run of hostile path pieces (``/``, ``..``, NUL, LF, ``~`` ...)."""
+    return "".join(rng.choice(HOSTILE_PIECES) for _ in range(rng.randint(1, 8)))
+
+
+def hostile_property_list(rng: random.Random) -> ReadingList:
+    """A small ranked list with hostile titles, URLs, summaries and newsletters."""
+    n = rng.randint(1, 3)
+    base = ef.make_list(n, must=1, worth=n - 1, skim=0)
+    items = [
+        item.model_copy(
+            update={
+                "title": hostile_text(rng),
+                "url": rng.choice(
+                    [
+                        None,
+                        hostile_text(rng),
+                        f"https://example.com/{hostile_text(rng)}",
+                    ]
+                ),
+                "summary": hostile_text(rng),
+                "reason": hostile_text(rng),
+                "sources": [hostile_text(rng) for _ in range(rng.randint(1, 3))],
+            }
+        )
+        for item in base.items
+    ]
+    end = date(2000, 1, 1) + timedelta(days=rng.randrange(36_500))
+    meta = base.meta.model_copy(
+        update={
+            "end_date": end,
+            "start_date": end - timedelta(days=7),
+            "query": hostile_text(rng),
+        }
+    )
+    return base.model_copy(update={"items": items, "meta": meta})
+
+
+@pytest.mark.anyio
+async def test_attachment_path_is_always_dir_slash_dated_name(
+    settings: Settings, html_path: Path, temp_root: Path
+) -> None:
+    rng = random.Random(PROPERTY_SEED)
+    temp_dir = RecordingTempDir()
+    sender = RecordingSender()
+    for run in range(PROPERTY_RUNS):
+        rl = hostile_property_list(rng)
+        saved = html_path.parent / rng.choice(HOSTILE_HTML_NAMES)
+        outcome = await deliver(
+            rl, saved, settings, sender=sender, make_temp_dir=temp_dir
+        )
+        assert outcome.status == "sent", (run, outcome.reason)
+        call = sender.calls[-1]
+        name = f"reading-list-{rl.meta.end_date.isoformat()}.html"
+        expected = Path(temp_dir.made[-1]).resolve() / name
+        assert call.attachment.path == str(expected), run
+        assert call.arguments["attachments"] == [str(expected)]
+        assert call.attachment.data == call.message.html_body.encode("ascii")
+        assert not os.path.lexists(temp_dir.made[-1])
+    assert len(sender.calls) == len(temp_dir.made) == PROPERTY_RUNS
+    assert len(set(temp_dir.made)) == PROPERTY_RUNS
+    assert_nothing_left(temp_root, temp_dir.made)
+    assert sorted(p.name for p in html_path.parent.iterdir()) == [HTML_NAME]
+
+
+# -------------------------------------------------------- logs and privacy (EA-9)
+
+LOG_SCENARIOS = [
+    "sent",
+    "rejected-path-echo",
+    "timeout",
+    "unexpected-path-echo",
+    "preparation",
+    "cleanup",
+]
+
+
+def log_scenario_seams(
+    scenario: str, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """The seams for one EA-9 log scenario (every error text holds a temp path)."""
+    seams: dict[str, Any] = {"renderer": RecordingRenderer(marker_content())}
+    if scenario == "rejected-path-echo":
+        seams["sender"] = PathEchoSender(
+            lambda path: GmailSendError(
+                GmailSendErrorKind.REJECTED,
+                f"EACCES: permission denied, open '{path}'",
+                True,
+                1,
+            )
+        )
+        return seams
+    if scenario == "timeout":
+        seams["sender"] = RecordingSender(
+            send_error(GmailSendErrorKind.TIMEOUT_AFTER_SEND)
+        )
+        return seams
+    if scenario == "unexpected-path-echo":
+        seams["sender"] = PathEchoSender(lambda path: RuntimeError(f"boom {path}"))
+        return seams
+    seams["sender"] = RecordingSender()
+    if scenario == "preparation":
+
+        def failing_factory(*args: Any, **kwargs: Any) -> str:
+            raise PermissionError(13, "Permission denied", f"{root}/{STAGED_PREFIX}x")
+
+        seams["make_temp_dir"] = failing_factory
+    if scenario == "cleanup":
+
+        def failing_rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+            raise OSError(39, "Directory not empty", os.fspath(path))
+
+        monkeypatch.setattr(email_delivery, "os", os_with(rmdir=failing_rmdir))
+    return seams
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scenario", LOG_SCENARIOS)
+async def test_info_logs_hold_no_temp_path_address_or_body(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    caplog.set_level(logging.INFO)
+    seams = log_scenario_seams(scenario, temp_root, monkeypatch)
+    outcome = await deliver(ef.standard_list(), html_path, settings, **seams)
+
+    records = list(caplog.records)
+    assert records
+    for record in records:
+        text = record.getMessage()
+        assert record.levelno >= logging.INFO
+        assert str(temp_root) not in text and STAGED_PREFIX not in text
+        assert not text.startswith(STAGED_DEBUG)
+        assert HTML_MARKER not in text and TEXT_MARKER not in text
+        assert record.exc_info is None
+        assert_no_address(text)
+    if outcome.reason is not None:
+        assert str(temp_root) not in outcome.reason
+        assert STAGED_PREFIX not in outcome.reason
+        assert_reason_shape(outcome.reason)
+    lines = [line for _, line in delivery_lines(caplog)]
+    size = len(marker_content().html.encode())
+    attaching = f"Attaching the digest HTML as {HTML_NAME} ({size} bytes)"
+    estimates = [line for line in lines if SIZE_ESTIMATE_RE.fullmatch(line)]
+    if scenario == "preparation":
+        assert attaching not in lines and estimates == []
+        assert outcome.reason == PREPARE_REASON.format("PermissionError")
+    else:
+        assert lines.count(attaching) == 1 and len(estimates) == 1
+    if scenario == "cleanup":
+        assert CLEANUP_WARNING.format("OSError") in lines
+        for directory in temp_root.iterdir():  # the empty directory rmdir left
+            os.rmdir(directory)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scenario", ["sent", "rejected-path-echo", "cleanup"])
+async def test_the_temp_path_is_logged_at_debug_only(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    seams = log_scenario_seams(scenario, temp_root, monkeypatch)
+    await deliver(ef.standard_list(), html_path, settings, **seams)
+    staged = seams["sender"].calls[0].attachment.path
+    with_path = [r for r in debug_logs.records if str(temp_root) in r.getMessage()]
+    assert with_path
+    assert {r.levelno for r in with_path} == {logging.DEBUG}
+    assert (logging.DEBUG, f"{STAGED_DEBUG}{staged}") in delivery_lines(debug_logs)
+    for directory in temp_root.iterdir():
+        os.rmdir(directory)
+
+
+# ---------------------------------------------------- total size estimate (V45)
+
+
+def test_size_estimate_constants_follow_ea8() -> None:
+    assert email_delivery.QP_FACTOR == 1.07
+    assert email_delivery.BASE64_FACTOR == 1.37
+    assert email_delivery.MIME_OVERHEAD_BYTES == 2_048
+    assert email_delivery.estimated_message_bytes(0, 0) == 2_048
+
+
+@pytest.mark.parametrize("text_bytes", [0, 3_307, 8_000])
+def test_size_estimate_for_a_full_budget_body(text_bytes: int) -> None:
+    estimate = email_delivery.estimated_message_bytes(EMAIL_HTML_BUDGET, text_bytes)
+    ratio = (estimate - text_bytes) / EMAIL_HTML_BUDGET
+    assert 2.4 <= ratio <= 2.6
+    assert estimate == round(95_000 * (1.07 + 1.37)) + text_bytes + 2_048
+
+
+def test_size_estimate_agrees_with_stdlib_quopri_and_base64() -> None:
+    content = render_email(ef.size_300_list(), html_name=HTML_NAME)
+    data = content.html.encode("ascii")
+    text_bytes = len(content.text.encode())
+    assert 90_000 <= len(data) <= EMAIL_HTML_BUDGET
+    qp_part = len(quopri.encodestring(data))
+    encoded = base64.b64encode(data)
+    base64_part = len(encoded) + 2 * math.ceil(len(encoded) / 76)  # CRLF per line
+    measured_parts = qp_part + base64_part
+    analytic_parts = round(
+        len(data) * (email_delivery.QP_FACTOR + email_delivery.BASE64_FACTOR)
+    )
+    assert abs(analytic_parts - measured_parts) <= 0.10 * measured_parts
+    measured = measured_parts + text_bytes + email_delivery.MIME_OVERHEAD_BYTES
+    estimate = email_delivery.estimated_message_bytes(len(data), text_bytes)
+    assert abs(estimate - measured) <= 0.10 * measured
+
+
+# ------------------------------------------- umask and symlinked temp location (EA-3)
+
+
+@pytest.fixture
+def set_umask(request: pytest.FixtureRequest) -> Callable[[int], None]:
+    """Set the process umask for one test; the old one is restored afterwards."""
+
+    def apply(mask: int) -> None:
+        old = os.umask(mask)
+        request.addfinalizer(lambda: os.umask(old))
+
+    return apply
+
+
+@posix_only
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mask", [0o000, 0o022, 0o077, 0o277], ids=["000", "022", "077", "277"]
+)
+async def test_modes_are_exact_under_any_umask(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    set_umask: Callable[[int], None],
+    mask: int,
+) -> None:
+    set_umask(mask)  # 0o277: mkdtemp gives 0500 and os.open 0400 before the chmods
+    sender = RecordingSender()
+    outcome = await deliver(ef.standard_list(), html_path, settings, sender=sender)
+    assert outcome.status == "sent"
+    call = sender.calls[0]
+    assert_call_time_staging(call.attachment, call.message.html_body, temp_root)
+    assert_nothing_left(temp_root)
+
+
+@posix_only
+@pytest.mark.anyio
+async def test_file_left_0400_by_the_umask_is_a_preparation_failure(
+    settings: Settings,
+    html_path: Path,
+    temp_root: Path,
+    debug_logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    set_umask: Callable[[int], None],
+) -> None:
+    fchmods: list[int] = []
+
+    def ineffective_fchmod(fd: int, mode: int) -> None:
+        fchmods.append(mode)
+
+    monkeypatch.setattr(email_delivery, "os", os_with(fchmod=ineffective_fchmod))
+    set_umask(0o277)
+    temp_dir = RecordingTempDir()
+    content = marker_content()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(),
+        html_path,
+        settings,
+        sender=sender,
+        renderer=RecordingRenderer(content),
+        make_temp_dir=temp_dir,
+    )
+    assert fchmods == [0o600]
+    assert_preparation_failed(outcome, PermissionError, content, sender, debug_logs)
+    assert_nothing_left(temp_root, temp_dir.made)
+
+
+@pytest.mark.anyio
+async def test_a_symlinked_temp_location_is_resolved_before_sending(
+    settings: Settings,
+    html_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_root = tmp_path_factory.mktemp("realtemp")
+    link_root = tmp_path_factory.mktemp("linktemp") / "tmp"
+    link_root.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(link_root))
+    temp_dir = RecordingTempDir()
+    sender = RecordingSender()
+    outcome = await deliver(
+        ef.standard_list(), html_path, settings, sender=sender, make_temp_dir=temp_dir
+    )
+    assert outcome.status == "sent"
+    assert temp_dir.made[0].startswith(str(link_root))  # the raw mkdtemp result
+    call = sender.calls[0]
+    staged = assert_call_time_staging(
+        call.attachment, call.message.html_body, real_root
+    )
+    assert not str(staged).startswith(str(link_root))  # no symlink component
+    assert_nothing_left(real_root, temp_dir.made)

@@ -69,7 +69,7 @@
 | V42 | Flag-off `sys.modules` after `import newsletter_digest.cli` (empty cwd, `uv run --project`): `stat`/`pathlib`/`os` already present at interpreter start; whether `tempfile` is present (record, assert only what is true); no `newsletter_digest.email_*` | T096 | CPython 3.13.5, python-dotenv 1.2.4 (uv.lock) | Scratch probe `scratchpad/t096_v42_probe.py` via `uv run --project <project> python` from the empty `scratchpad/t096_empty` (`/usr/bin/env -u TMPDIR`). A `sys.meta_path` finder showed which module imports `tempfile`. In-suite: `test_v42_flag_off_cli_loads_no_email_module_in_a_fresh_interpreter` (fresh `sys.executable` child, empty cwd, valid `EMAIL_*` env, no `--email`; checked at start, after the import and after a flag-off run; positive control) | Recorded. At interpreter start `os` and `stat` are loaded, but **`pathlib` and `tempfile` are not** (the item's "pathlib already present" does not hold for a script run). After `import newsletter_digest.cli`: `pathlib` **and `tempfile`** are loaded. `tempfile` comes from python-dotenv (`cli.py:33` imports dotenv, whose `dotenv/main.py` imports `tempfile`), so its absence cannot be asserted (AP-6 item 5). No `newsletter_digest.email_*` module is loaded at start, after the import or after a flag-off run. The effect check replaces the `tempfile` assertion: under an empty child `TMPDIR`, the flag-off and `--telegram` runs cause no audit event at all (no mkdir, open or remove). |
 | V43 | The local FastMCP stdio child under mcp's minimal environment reads a 0600 file in a 0700 directory; its SHA-256 equals `sha256(htmlBody)` (no npx, no Gmail) | T094 | mcp 1.30.0, langchain-mcp-adapters 0.3.2, CPython 3.13.5, Linux 6.6 WSL2 | `tests/test_gmail_mcp_send.py::test_v43_stdio_child_reads_the_private_copy`: the real `send_gmail_message` through a real `MultiServerMCPClient` (test-local factory, never `_default_send_client`) to the local FastMCP stdio `send_email`, which reads each `attachments` path **in the child** and appends one JSON record (exists, SHA-256, modes, uid, environment names) to `<calls file>.attachments.jsonl`; same run once more from the scratch probe `<scratchpad>/t094/t094_v43_probe.py` to print the values | Confirmed. The child (same uid as the app) read the 0600 file in the 0700 `newsletter-digest-email-<n>` directory, and its SHA-256 equals `sha256(htmlBody)`. The child's environment held exactly `HOME, LOGNAME, PATH, SHELL, TERM, USER` (mcp's `DEFAULT_INHERITED_ENV_VARS`) plus `LC_CTYPE`, which CPython sets itself at start-up (PEP 538 locale coercion). A marker variable set only in the parent did not reach the child. No `TMPDIR` is needed (the full path is passed). Extra: when the file is removed after the EA-4 check, the child answers 1.1.11's `Error: File does not exist: <path>`, which gives REJECTED with exactly one call and one session (`test_v43_stdio_child_missing_file_is_rejected_once`). A real npx/Node server is still only checked by the manual send (acceptance 43). |
 | V44 | Error-text markers for "server could not read the attachment" (`file does not exist`, `no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email with`): verified `File does not exist: <path>` from source; Node `EACCES`/`EISDIR` texts are general knowledge, not run; confirm on the manual send | T092 (re-checked by T099) | server 1.1.11 (read from source, `verified_facts.md`), nodemailer 7.x not run | `email_delivery._UNREADABLE_ATTACHMENT_MARKERS` holds exactly these eight lower-case markers, matched case-insensitively against the redacted detail **before** the permission row; scratch probe: `File does not exist: /tmp/x` and `EACCES: permission denied, open '/tmp/x'` both map to `the mail server could not read the attachment file; nothing was sent`, `Insufficient Permission` still maps to the permission row | Recorded. Only `File does not exist: <path>` is verified (utl.js 103-105). The `EACCES`/`EISDIR` (and `ENOENT`/`EPERM`/`ENOTDIR`) texts are Node/nodemailer general knowledge and were **not run** (no Node, no npx); `failed to send email with` is the server's stderr text, listed defensively. Confirm on the manual send (acceptance 43). |
-| V45 | `estimated_message_bytes(95_000, t)` is 2.4-2.6 x the HTML; stdlib `quopri` + `base64` of the synthetic 300-item email HTML agree within 10% | T095 |  |  | TODO |
+| V45 | `estimated_message_bytes(95_000, t)` is 2.4-2.6 x the HTML; stdlib `quopri` + `base64` of the synthetic 300-item email HTML agree within 10% | T095 | CPython 3.13.5 stdlib `quopri`, `base64` | `tests/test_email_delivery.py::test_size_estimate_for_a_full_budget_body` and `::test_size_estimate_agrees_with_stdlib_quopri_and_base64` (scratch probe `<scratchpad>/T095_v45.py` for the numbers) | Confirmed. `estimated_message_bytes(95_000, t) = 231_800 + t + 2_048`, so `(est - t) / 95_000 = 2.4616` for t = 0, 3_307, 8_000. Synthetic `size_300` email HTML: 94_592 bytes, 897 `=` signs; `quopri.encodestring` 98_500 bytes (1.041 x, below the analytic 1.07), base64 with CRLF every 76 characters 129_444 bytes (1.368 x); measured parts 227_944 vs analytic 230_804 (1.3% high); whole estimate 236_159 vs measured 233_299 (+1.2%), well inside 10%. nodemailer's real LF-only output (`newline: 'unix'`) would be about 1.7 KB smaller still; not run. |
 
 ## Task notes
 
@@ -5892,3 +5892,100 @@ has one def, so that guard has no real-tree mutant).
 Mistake fixed on the way (learnings T097): the first (g) draft exempted *every*
 module-level assignment target in gmail_mcp as "the definition", which also exempted a
 module-level `GMAIL_SEND_ARG_MAP["cc"] = "cc"`; the `map-written-later` case caught it.
+
+## T095 — email_delivery tests (attachment): byte identity, modes, cleanup matrix, preparation failures, failure mapping, logs, size estimate (V45)
+
+- **Result.** `tests/test_email_delivery.py` now collects 317 tests (the whole file
+  runs in about 3.5 s). The full suite gives **5373 passed, 2 deselected, 2 xfailed**, with
+  other agents' uncommitted edits in the tree. `ruff format --check .` (64 files),
+  `ruff check .` and `pyrefly check` (0 errors) are clean. There are 0
+  `newsletter-digest-email-*` entries in `/tmp` before and after the full suite.
+  **V45 filled** (table above).
+- **Pre-existing hunks changed (AP-6 item 2, T095-owned):**
+  (1) `test_cancellation_is_not_swallowed`, the allowed cancellation extension. It gains
+  the `temp_root` fixture. The hanging sender now takes `(settings, message,
+  **kwargs)` and snapshots the attachment. The call sits in
+  `try/except anyio.get_cancelled_exc_class(): record; raise`. New asserts: the
+  CancelledError propagated once, the file existed while the sender waited, and the file,
+  its directory and the temp root are empty afterwards. The original `scope.cancelled_caught`
+  and `pytest.fail` lines are kept.
+  (2) Additive only: new stdlib import lines (`base64`, `math`, `quopri`, `random`,
+  `tempfile`, `types`, `datetime.date/timedelta`, `html.unescape`) and
+  `from newsletter_digest.render import write_reading_list`, all as new lines. No
+  existing import line was edited: new names come through the existing `email_delivery`
+  / `gmail_mcp` module imports (learnings T062). There is also a new `temp_root` fixture
+  in the fixtures section. Everything else is appended after the last existing test.
+  `git diff` shows only the cancellation-test lines as `-` lines.
+- **Decision: the `temp_root` fixture** points `tempfile.tempdir` at a
+  `tmp_path_factory` directory, not at `tmp_path`, because `tmp_path` holds the saved HTML
+  and the "out_dir holds only the HTML" checks would see it. Only
+  `test_default_factory_stages_in_the_system_temp_location` (and the pre-existing
+  tests) use the real system temp location. It asserts the directory is gone afterwards.
+- **Decision: failing `os` calls are faked with an `os` proxy module set on
+  `email_delivery.os` only** (`types.ModuleType` copy of `vars(os)` plus overrides). So
+  gmail_mcp's EA-4 re-check, `tempfile` and pytest keep the real functions (learnings
+  T092 probe trap). It is used for `open`, `fdopen` (short writer), `chmod`, `fchmod`,
+  `unlink` and `rmdir`.
+- **Deviation from the task text: "factory returns a 0755 dir" is NOT a preparation
+  failure in the real code.** EA-3 itself `chmod`s the directory to 0700 before
+  checking it, so a 0755 factory directory is repaired and the send goes ahead
+  (`test_factory_dir_0755_is_made_private_before_writing`). The failure case needs a
+  0755 directory whose `chmod` has no effect (proxy no-op). That gives `PermissionError`
+  -> `could not prepare the attachment (PermissionError)`
+  (`test_factory_dir_0755_that_stays_0755_is_a_preparation_failure`). Both are
+  tested; the code follows EA-3, so this is a task-text mismatch, not a defect.
+- **Additions beyond the task list (found by mutation):** umask matrix 000/022/077/277
+  (exact 0600/0700 at call time; 277 makes mkdtemp give 0500 and os.open 0400 before the
+  explicit chmods); an ineffective `fchmod` under umask 277 -> preparation failure
+  (file-mode check); a symlinked temp location is resolved before sending (otherwise
+  gmail_mcp's realpath check refuses it); a planted symlink at the file name (to an
+  existing file and dangling) -> `FileExistsError`, target untouched or not created; a
+  non-Exception `BaseException` from the sender or while staging propagates after cleanup
+  and is never turned into a preparation failure; a factory returning a missing path ->
+  `FileNotFoundError`, cleanup silent; unlink failure -> one WARNING and no rmdir; an extra
+  entry in the directory -> WARNING `(OSError)`, the extra file is left (DA5, never
+  rmtree); start retry -> one directory, the same path; EA-6 order checked with the real
+  helper over the fakes: `unlink`, `rmdir` are the last two events, after `close#i`.
+- **Failure mapping.** `_UNREADABLE_ATTACHMENT_MARKERS` is pinned to the EA-7 list
+  (a private name, read on purpose: the eight markers are the contract). Each
+  marker x 3 case variants maps to the fixed reason. The seven reply texts
+  (`File does not exist`, EACCES, EISDIR, ENOENT, EPERM, ENOTDIR, `Failed to send email
+  with`) give the reason with no path, and the path-bearing detail appears at DEBUG
+  only. Mixed details (permission/recipient/rate text plus an attachment marker) take the
+  attachment row first. Non-REJECTED kinds with `ENOENT` text keep their own reasons. End
+  to end: the fake's EACCES reply, and a really missing file (the sender wrapper deletes it
+  after the EA-4 re-check and before the session starts), both give `failed`, 1 call,
+  1 start, and the fixed reason.
+- **Property test:** seed 20261108, 200 lists of 1-3 items with titles, URLs,
+  summaries, reasons, newsletter names and the query built from `/`, `..`, NUL, LF, CRLF,
+  `~`, `\`, `../../etc/passwd`, `~/.gmail-mcp/credentials.json`,
+  `reading-list-1999-01-01.html` ...; random `end_date` 2000-2099 and a hostile
+  `html_path` name. The path is always `<resolved mkdtemp dir>/reading-list-<end>.html`,
+  the bytes equal the body and every directory is removed. Plus 200 random dates from
+  1000-01-01 to 9999-12-31: `attachment_name` always fullmatches `ATTACHMENT_NAME_RE` and
+  round-trips the date.
+- **Byte identity:** `standard`, `cjk_heavy`, `hostile`, `hostile(lone_surrogate)`,
+  both empty states and `size_300`. File bytes == `htmlBody` == `message.html_body` ==
+  `content.html.encode("ascii")` (== UTF-8), one render call, equal to an independent
+  `render_email`. `size_300`: body and attachment <= 95,000 bytes, all 10 Must-read
+  titles in the attachment, and the exact omitted sentence present.
+- **Mutation check (scratch plugin `<scratchpad>/T095_mut/`, exec-mutant of
+  `email_delivery`, one process per mutant):** 28 mutants, all killed after the
+  umask/symlink tests were added. The list: cleanup removed, `except BaseException`,
+  no chmod, no dir owner check, no size check, `encode("ascii","replace")`, no O_EXCL,
+  no O_EXCL+O_NOFOLLOW, attachment row after permission, drop `eacces` / `file does not
+  exist`, staged path at INFO, reason with exception text, detail in the attachment
+  reason, `dir=html_path.parent`, name from `html_path`, rmdir FileNotFoundError not
+  ignored, rmtree, WARNING with the path, unlink errors swallowed, QP-only estimate,
+  second render, no file mode check, no fchmod, file 0644, no resolve, raw directory
+  recorded late, size line at DEBUG. Before the extra tests, `no-file-mode-check`,
+  `no-fchmod` and `no-resolve` survived; they are equivalent under a normal umask and a
+  symlink-free `/tmp`.
+- **Process note:** the `no-cleanup` mutant leaked 76 `newsletter-digest-email-*`
+  directories into the real `/tmp` through the default-factory tests. Only those were
+  removed: mtime inside the mutation window, each holding at most one
+  `reading-list-*.html`. `/tmp` is back to 0 (see learnings T095).
+- **No defect found in `email_delivery.py`.** One observation: if a `make_temp_dir`
+  seam returned a regular file path, `_stage_attachment` would `chmod` that file to 0700
+  before failing the is-a-directory check. Only a test seam can do this (mkdtemp always
+  creates a directory), so it is not tested and not reported as a defect.
