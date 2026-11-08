@@ -66,7 +66,7 @@
 | V39 | No new dependency: `os`, `stat`, `tempfile`, `pathlib` are stdlib; `uv lock --check` passes; `pyproject.toml`/`uv.lock` unchanged | T089 | CPython 3.13.5 stdlib; uv.lock (114 packages) | `sys.stdlib_module_names` membership for the four modules; `uv lock --check`; `git status` on uv.lock; no `uv add` run | Confirmed. All four are in `sys.stdlib_module_names`; `uv lock --check` passes (Resolved 114 packages); uv.lock is unchanged. The only pyproject.toml change is the user-approved ruff setting `extend-exclude = ["*.md"]` under `[tool.ruff]` (no dependency change; see the T089 section). |
 | V40 | `tempfile.mkdtemp(prefix=...)` honours `TMPDIR` / `tempfile.tempdir` at call time, creates 0700 under the current umask, returns an absolute path; `Path.resolve(strict=True)` of it equals itself under `/tmp` on WSL | T092 | CPython 3.13.5 stdlib, Linux 6.6 WSL2 | Scratch probe `<scratchpad>/T092_probe.py` run with `python3 -I`, `TMPDIR` unset, cwd = scratchpad; every directory removed afterwards | Confirmed. `gettempdir()` is `/tmp`; the default `mkdtemp(prefix=...)` returns an absolute path directly under `/tmp`, `Path(d).resolve(strict=True) == d`, mode 0700. Mode 0700 under umask 077 and 022, but **0500 under umask 277**: mkdtemp's mode is filtered by the umask, so EA-3's explicit `os.chmod(directory, 0o700)` is needed. `tempfile.tempdir = X` is honoured at call time; `TMPDIR` is honoured only while `tempfile.tempdir` is None (it caches the first lookup), so tests should set `tempfile.tempdir` (AP-6 item 4). |
 | V41 | `os.O_NOFOLLOW`, `O_CLOEXEC` exist on Linux/WSL; `O_CREAT|O_EXCL` refuses a planted symlink (`FileExistsError`) and an existing file; `fchmod` 0600 survives umask 077 and 022 (scratch probe under the scratchpad) | T092 | CPython 3.13.5 stdlib, Linux 6.6 WSL2 | Same probe, inside a scratch work directory (never the project tree) | Confirmed. Both flags exist. `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC` raises `FileExistsError` for a planted symlink to an existing file, for a **dangling** symlink (the target is not created) and for an existing file. Under umask 077 and 022 the open gives 0600; under umask 777 it gives 0000 and `fchmod(fd, 0o600)` restores 0600 in all three cases. |
-| V42 | Flag-off `sys.modules` after `import newsletter_digest.cli` (empty cwd, `uv run --project`): `stat`/`pathlib`/`os` already present at interpreter start; whether `tempfile` is present (record, assert only what is true); no `newsletter_digest.email_*` | T096 |  |  | TODO |
+| V42 | Flag-off `sys.modules` after `import newsletter_digest.cli` (empty cwd, `uv run --project`): `stat`/`pathlib`/`os` already present at interpreter start; whether `tempfile` is present (record, assert only what is true); no `newsletter_digest.email_*` | T096 | CPython 3.13.5, python-dotenv 1.2.4 (uv.lock) | Scratch probe `scratchpad/t096_v42_probe.py` via `uv run --project <project> python` from the empty `scratchpad/t096_empty` (`/usr/bin/env -u TMPDIR`). A `sys.meta_path` finder showed which module imports `tempfile`. In-suite: `test_v42_flag_off_cli_loads_no_email_module_in_a_fresh_interpreter` (fresh `sys.executable` child, empty cwd, valid `EMAIL_*` env, no `--email`; checked at start, after the import and after a flag-off run; positive control) | Recorded. At interpreter start `os` and `stat` are loaded, but **`pathlib` and `tempfile` are not** (the item's "pathlib already present" does not hold for a script run). After `import newsletter_digest.cli`: `pathlib` **and `tempfile`** are loaded. `tempfile` comes from python-dotenv (`cli.py:33` imports dotenv, whose `dotenv/main.py` imports `tempfile`), so its absence cannot be asserted (AP-6 item 5). No `newsletter_digest.email_*` module is loaded at start, after the import or after a flag-off run. The effect check replaces the `tempfile` assertion: under an empty child `TMPDIR`, the flag-off and `--telegram` runs cause no audit event at all (no mkdir, open or remove). |
 | V43 | The local FastMCP stdio child under mcp's minimal environment reads a 0600 file in a 0700 directory; its SHA-256 equals `sha256(htmlBody)` (no npx, no Gmail) | T094 | mcp 1.30.0, langchain-mcp-adapters 0.3.2, CPython 3.13.5, Linux 6.6 WSL2 | `tests/test_gmail_mcp_send.py::test_v43_stdio_child_reads_the_private_copy`: the real `send_gmail_message` through a real `MultiServerMCPClient` (test-local factory, never `_default_send_client`) to the local FastMCP stdio `send_email`, which reads each `attachments` path **in the child** and appends one JSON record (exists, SHA-256, modes, uid, environment names) to `<calls file>.attachments.jsonl`; same run once more from the scratch probe `<scratchpad>/t094/t094_v43_probe.py` to print the values | Confirmed. The child (same uid as the app) read the 0600 file in the 0700 `newsletter-digest-email-<n>` directory, and its SHA-256 equals `sha256(htmlBody)`. The child's environment held exactly `HOME, LOGNAME, PATH, SHELL, TERM, USER` (mcp's `DEFAULT_INHERITED_ENV_VARS`) plus `LC_CTYPE`, which CPython sets itself at start-up (PEP 538 locale coercion). A marker variable set only in the parent did not reach the child. No `TMPDIR` is needed (the full path is passed). Extra: when the file is removed after the EA-4 check, the child answers 1.1.11's `Error: File does not exist: <path>`, which gives REJECTED with exactly one call and one session (`test_v43_stdio_child_missing_file_is_rejected_once`). A real npx/Node server is still only checked by the manual send (acceptance 43). |
 | V44 | Error-text markers for "server could not read the attachment" (`file does not exist`, `no such file`, `enoent`, `eacces`, `eisdir`, `eperm`, `enotdir`, `failed to send email with`): verified `File does not exist: <path>` from source; Node `EACCES`/`EISDIR` texts are general knowledge, not run; confirm on the manual send | T092 (re-checked by T099) | server 1.1.11 (read from source, `verified_facts.md`), nodemailer 7.x not run | `email_delivery._UNREADABLE_ATTACHMENT_MARKERS` holds exactly these eight lower-case markers, matched case-insensitively against the redacted detail **before** the permission row; scratch probe: `File does not exist: /tmp/x` and `EACCES: permission denied, open '/tmp/x'` both map to `the mail server could not read the attachment file; nothing was sent`, `Insufficient Permission` still maps to the permission row | Recorded. Only `File does not exist: <path>` is verified (utl.js 103-105). The `EACCES`/`EISDIR` (and `ENOENT`/`EPERM`/`ENOTDIR`) texts are Node/nodemailer general knowledge and were **not run** (no Node, no npx); `failed to send email with` is the server's stderr text, listed defensively. Confirm on the manual send (acceptance 43). |
 | V45 | `estimated_message_bytes(95_000, t)` is 2.4-2.6 x the HTML; stdlib `quopri` + `base64` of the synthetic 300-item email HTML agree within 10% | T095 |  |  | TODO |
@@ -5653,3 +5653,112 @@ Decisions and checks:
 - **In-flight files of other tasks** (not touched): `tests/test_email_delivery.py`
   (T095) had nine unused imports (`ruff check .` F401) and 1 failing test under a
   custom `TMPDIR` at the time of my runs.
+
+## T096 — CLI and flag-off tests (attachment): six keys end to end, TMPDIR left empty, out_dir untouched, subprocess checks (V42)
+
+New tests only. No source change, no fixture or golden change.
+
+`tests/test_cli_email.py` (appended block "the HTML attachment through the CLI"):
+- `test_email_sends_six_keys_and_the_body_bytes_as_the_attachment` (one and three
+  recipients): exactly one `send_email` call whose key set equals a literal six-key set
+  (spelled out in the test, so it does not depend only on `ef.SEND_ARGUMENT_KEYS`), with
+  no forbidden key. `attachments == [snapshot.path]`. The call-time snapshot exists, is
+  not a symlink, its bytes equal `htmlBody.encode("ascii")` and the independent
+  `render_email(...)` output, it is 0600 in a 0700 directory, and the path is
+  `<tempfile.tempdir>/newsletter-digest-email-*/reading-list-<date>.html`. The
+  directory is gone afterwards. The sent line is `sent_line(1)` / `sent_line(3)`.
+- `test_email_step_leaves_out_dir_with_only_the_saved_html_unchanged`: wraps
+  `send_reading_list_email` to record the saved HTML's bytes, inode and `st_mtime_ns`
+  before the email step and the `out_dir` listing at call time. After the run they are
+  identical, and `out_dir` lists only `reading-list-<date>.html`. The attachment is not
+  under `out_dir`.
+- `test_no_staged_directory_remains_after_any_outcome`, seven cases: sent; FAILED for
+  an `Error:` reply, for `File does not exist` and for the EACCES reply (both give the
+  new EA-7 reason), and for a start failure twice (0 calls); OUTCOME UNKNOWN for a
+  timeout after the call and for a transport error after the call. Each case checks
+  that exactly one directory was made under `tempfile.tempdir` with
+  `prefix=ATTACHMENT_DIR_PREFIX`, that it no longer exists, that `tempfile.tempdir` is
+  empty, that every call's `attachments` is that directory's file, that `out_dir` holds
+  only the HTML, and that there is no "Could not remove" warning.
+- `test_start_failure_then_success_stages_one_directory_for_one_call`: two sessions,
+  one 2 s pause (recorded, not slept), one directory, one call. The snapshot path is the
+  staged file and its bytes equal `htmlBody`. The directory is gone afterwards.
+- `test_help_names_the_attached_html`: `--help` holds the sentence (compared with all
+  whitespace removed, because click splits `reading-` / `list-...`). The `--email`
+  option's `help` ends with it.
+- Item (6): `test_ed3_event_order_with_email` / `_without_email` are unchanged and green.
+
+`tests/test_flag_off_identity.py` (appended block "the email attachment with the flag
+off"):
+- `run_tmpdir_child` runs the **unchanged** T082 `EMAIL_CHILD_SCRIPT` (written to its
+  own file as before) through a new wrapper script `TMPDIR_WRAPPER_SCRIPT`. The child
+  gets `TMPDIR=<tmp_path>/child-tmp` (empty). The wrapper installs `sys.addaudithook`
+  for `open`, `os.mkdir`, `os.rmdir`, `os.remove`, `os.rename`, `os.chmod`,
+  `os.symlink` and `os.link`, keeps the events whose path is under `TMPDIR`, then runs
+  the child with `runpy.run_path`. It reports the events, the entries left, and (after
+  the snapshot) `tempfile.gettempdir()` as a positive control: it must equal `TMPDIR`,
+  so the child really would have used it.
+- `test_flag_off_child_leaves_its_tmpdir_untouched` (no flags, valid `EMAIL_*` env) and
+  `test_telegram_alone_child_leaves_its_tmpdir_untouched` (fake `MockTransport`, as the
+  T082 test does): **no audit event at all** under `TMPDIR`, and it stays empty.
+- `test_email_child_stages_in_its_tmpdir_and_leaves_it_empty`: exactly one `os.mkdir`
+  (`newsletter-digest-email-*`), an `open` of the staged file, and the last two events
+  are `os.remove(file)` then `os.rmdir(directory)`. There is no rename, symlink or link.
+  The only other events are tempfile's one-off writability probe (open + remove of a
+  random top-level name). `TMPDIR` is empty afterwards.
+- `test_v42_flag_off_cli_loads_no_email_module_in_a_fresh_interpreter`: a fresh
+  interpreter from an empty cwd with a valid `EMAIL_*` env but no `--email`. It records
+  `os`/`stat`/`pathlib`/`tempfile` in `sys.modules` at start, after
+  `import newsletter_digest.cli`, and after a flag-off run, and checks that no
+  `newsletter_digest.email_*` module is loaded at any of these points. The positive
+  control imports `email_delivery` and sees both email modules. Asserted: `os` and `stat`
+  at start, `pathlib` after the import. `tempfile` is not asserted (see V42).
+
+Decisions not covered by the spec / tradeoffs:
+- **Audit hook instead of only "empty afterwards".** An empty `TMPDIR` alone would also
+  pass if the child ignored `TMPDIR`. The audit events give the positive control
+  (`--email` creates its directory exactly there) and show that the flag-off and
+  `--telegram` runs touch nothing at all. That is stronger than "empty afterwards"
+  (EA-10 "no `tempfile` call"). The hook only records and never blocks.
+- **The T082 helper and child script are unchanged.** The wrapper reuses
+  `EMAIL_CHILD_SCRIPT` through `runpy`, so no existing hunk was edited and no keyword
+  was added to `run_email_child`. `run_tmpdir_child` repeats the checks that the
+  existing helper makes on the report (package file, no `.env`, exit 0).
+- **CLI directory counting** uses `TempDirRecorder` injected through one more
+  `partial(..., make_temp_dir=...)` on top of `use_fast_sender`. It delegates to the
+  real `tempfile.mkdtemp`, so it stages in the monkeypatched `tempfile.tempdir`. The
+  six-key and `out_dir` tests use the **default** `make_temp_dir` (no injection), which
+  proves that the default reads `tempfile.tempdir` at call time.
+- **"File does not exist" through the CLI** is produced for real: the staged file is
+  deleted in the `_default_send_client` hook, which runs after `build_send_arguments`
+  (EA-4) and before the session. So the fake server answers the verified
+  `Error: File does not exist: <path>`, and cleanup has to cope with a file that is
+  already gone. It does, with no warning.
+- The start-failure reason holds the server detail, so that case checks a prefix.
+
+Mutation check (scratch plugin `scratchpad/t096_mut/t096_mutplugin.py`, which
+exec-mutates the module text and runs one process per mutant; only the new CLI tests
+are selected): every mutant was killed.
+
+| Mutant | New CLI tests failed |
+|---|---|
+| no `_remove_staged` call in `finally` | 11/12 |
+| no `os.rmdir` | 11/12 |
+| `make_temp_dir(..., dir=html_path.parent)` (stage in `out_dir`) | 10/12 |
+| second file written to `out_dir` | 8/12 |
+| saved HTML rewritten with the same bytes (new mtime) | 1/12 |
+| cleanup only on `sent` | 6/12 |
+| a second `make_temp_dir` call | 8/12 |
+| attachment bytes differ from the body by one space | 11/12 |
+| help sentence removed | 1/12 |
+
+Modified pre-existing hunks: none. Both files only gained lines.
+`git diff -- tests/test_cli_email.py tests/test_flag_off_identity.py` shows no `-`
+line. The one non-appended line is the new `import tempfile` in the import block of
+`test_cli_email.py`.
+
+Observed, not mine: 12 `newsletter-digest-email-*` directories in `/tmp`, created at
+08:02:04 by another task's probe (the T094 notes mention theirs). My runs leave none:
+a before/after listing around a mutant run showed no new entry. I did not remove them.
+
+Verification: `uv run ruff format --check src tests` (64 files) and `uv run ruff check .` pass, `uv run pyrefly check` reports 0 errors, and `uv run pytest -q` gives 5367 passed, 2 xfailed, 2 deselected. That run includes the in-flight uncommitted files of T094, T095 and T097. My two files plus `test_agent.py` (FR-057) give 192 passed.

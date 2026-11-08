@@ -34,6 +34,7 @@ import importlib.machinery
 import logging
 import socket
 import sys
+import tempfile
 import types
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -1291,3 +1292,315 @@ def test_ed3_event_order_without_email(
     assert len(real_run.factory.clients) == 1
     assert_agent_path_clean(real_run)
     assert "Email:" not in result.stderr
+
+
+# --- the HTML attachment through the CLI (T096; EA-7, EA-10, EA-11) -----------------
+#
+# ``tempfile.tempdir`` points at an empty ``tmp_path / "tmp"``: ``mkdtemp`` reads it at
+# call time (V40), so the default ``make_temp_dir`` stages there, and the directory
+# can be checked for leftovers. ``AttachmentSnapshot`` holds the file as the fake
+# server saw it, because the file is gone once the CLI returns.
+
+#: The six ``send_email`` keys (EA-3), spelled out independently of ``ef``.
+SIX_SEND_KEYS = frozenset(
+    {"to", "subject", "body", "htmlBody", "mimeType", "attachments"}
+)
+ATTACHMENT_HELP = "The same HTML is attached as reading-list-YYYY-MM-DD.html."
+UNREADABLE_REASON = (
+    "the mail server could not read the attachment file; nothing was sent"
+)
+
+
+@pytest.fixture
+def private_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Create an empty ``tmp_path / "tmp"`` and make it ``tempfile.tempdir``."""
+    path = tmp_path / "tmp"
+    path.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(path))
+    return path
+
+
+@dataclass
+class TempDirRecorder:
+    """A ``make_temp_dir`` that delegates to ``tempfile.mkdtemp`` and records.
+
+    Attributes:
+        made: Every directory created, in order.
+        kwargs: The keyword arguments of each call.
+    """
+
+    made: list[Path] = field(default_factory=list)
+    kwargs: list[dict[str, Any]] = field(default_factory=list)
+
+    def __call__(self, **kwargs: Any) -> str:
+        """Create the directory with the real ``mkdtemp`` and record it."""
+        self.kwargs.append(kwargs)
+        raw = tempfile.mkdtemp(**kwargs)
+        self.made.append(Path(raw))
+        return raw
+
+
+def record_temp_dirs(monkeypatch: pytest.MonkeyPatch) -> TempDirRecorder:
+    """Inject a :class:`TempDirRecorder` on top of the current send patch.
+
+    Wraps whatever ``email_delivery.send_reading_list_email`` is at this moment
+    (for example the :func:`use_fast_sender` partial) in one more ``partial``.
+    """
+    recorder = TempDirRecorder()
+    current = email_delivery.send_reading_list_email
+    monkeypatch.setattr(
+        email_delivery,
+        "send_reading_list_email",
+        partial(current, make_temp_dir=recorder),
+    )
+    return recorder
+
+
+def remove_staged_before_the_call(
+    monkeypatch: pytest.MonkeyPatch, side: SendSide, recorder: TempDirRecorder
+) -> None:
+    """Delete the staged file once the arguments are checked, before the session.
+
+    ``build_send_arguments`` runs before the client is built (EA-4), so the fake
+    server then answers the verified ``Error: File does not exist: <path>``.
+    """
+
+    def client(connections: dict[str, Any]) -> ef.FakeSendClient:
+        (directory,) = recorder.made
+        (directory / HTML_NAME).unlink()
+        return side.client(connections)
+
+    monkeypatch.setattr(gmail_mcp, "_default_send_client", client)
+
+
+def assert_staged_under(snapshot: ef.AttachmentSnapshot, base: Path) -> None:
+    """The call-time attachment was ``<base>/newsletter-digest-email-*/<HTML_NAME>``."""
+    path = Path(snapshot.path)
+    assert path.is_absolute()
+    assert path.name == HTML_NAME
+    assert path.parent.parent == base.resolve()
+    assert path.parent.name.startswith(gmail_mcp.ATTACHMENT_DIR_PREFIX)
+
+
+def staged_left(base: Path) -> list[str]:
+    """Every entry left in ``base`` (it must be empty after a run)."""
+    return sorted(entry.name for entry in base.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("raw_to", "count"),
+    [(RAW_EMAIL_TO, 3), ("Reader@Example.com", 1)],
+    ids=["three-recipients", "one-recipient"],
+)
+def test_email_sends_six_keys_and_the_body_bytes_as_the_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+    env_ok: None,
+    fake_run: FakeRunDigest,
+    send: SendSide,
+    out_dir: Path,
+    private_tmp: Path,
+    raw_to: str,
+    count: int,
+) -> None:
+    monkeypatch.setenv("EMAIL_TO", raw_to)
+    result = run_cli(out_dir, "--email")
+    assert result.exit_code == 0, result.output
+    assert email_line(result) == sent_line(count)
+    assert "with 1 attachment" in email_line(result)
+    ((name, args),) = send.calls
+    assert name == "send_email"
+    assert set(args) == SIX_SEND_KEYS == ef.SEND_ARGUMENT_KEYS
+    assert not set(args) & ef.FORBIDDEN_SEND_KEYS
+    (snapshot,) = send.factory.attachment_snapshots
+    assert args["attachments"] == [snapshot.path]
+    assert snapshot.exists and not snapshot.is_symlink
+    assert snapshot.data == args["htmlBody"].encode("ascii")
+    expected = render_email(ef.standard_list(), html_name=HTML_NAME)
+    assert snapshot.data == expected.html.encode("ascii")
+    assert (snapshot.file_mode, snapshot.dir_mode) == (0o600, 0o700)
+    assert_staged_under(snapshot, private_tmp)
+    assert not Path(snapshot.path).parent.exists()
+    assert staged_left(private_tmp) == []
+    assert_no_traceback(result)
+
+
+def test_email_step_leaves_out_dir_with_only_the_saved_html_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    email_env: None,
+    fake_run: FakeRunDigest,
+    send: SendSide,
+    out_dir: Path,
+    private_tmp: Path,
+) -> None:
+    html_path = out_dir / HTML_NAME
+    seen: dict[str, Any] = {}
+    original = email_delivery.send_reading_list_email
+
+    async def sender(
+        settings: Settings, message: gmail_mcp.OutgoingEmail, *, send_timeout: float
+    ) -> gmail_mcp.GmailSendReceipt:
+        seen["at_call"] = staged_left(out_dir)
+        return await gmail_mcp.send_gmail_message(
+            settings, message, send_timeout=send_timeout
+        )
+
+    async def wrapped(
+        reading_list: ReadingList, path: Path, settings: Settings
+    ) -> email_delivery.EmailOutcome:
+        info = path.stat()
+        seen["before"] = (path.read_bytes(), info.st_ino, info.st_mtime_ns)
+        seen["listing"] = staged_left(out_dir)
+        return await original(reading_list, path, settings, sender=sender)
+
+    monkeypatch.setattr(email_delivery, "send_reading_list_email", wrapped)
+    result = run_cli(out_dir, "--email")
+    assert result.exit_code == 0, result.output
+    assert email_line(result) == sent_line(3)
+    assert stdout_paths(result) == [html_path]
+    info = html_path.stat()
+    assert (html_path.read_bytes(), info.st_ino, info.st_mtime_ns) == seen["before"]
+    assert seen["listing"] == seen["at_call"] == staged_left(out_dir) == [HTML_NAME]
+    (snapshot,) = send.factory.attachment_snapshots
+    assert not Path(snapshot.path).is_relative_to(out_dir.resolve())
+    assert_staged_under(snapshot, private_tmp)
+    assert staged_left(private_tmp) == []
+
+
+@dataclass(frozen=True)
+class CleanupCase:
+    """One outcome after which the private temp directory must be gone.
+
+    Attributes:
+        scripts: The fake sessions.
+        status: ``sent``, ``failed`` or ``unknown``.
+        reason: The ED-12/EA-7 reason (unused for ``sent``).
+        calls: ``send_email`` calls expected.
+        remove_file: Delete the staged file after the argument check, so the
+            server answers ``Error: File does not exist: <path>``.
+    """
+
+    scripts: Sequence[ef.SessionScript]
+    status: str
+    reason: str = ""
+    calls: int = 1
+    remove_file: bool = False
+
+
+CLEANUP_CASES: dict[str, CleanupCase] = {
+    "sent": CleanupCase([ef.send_script()], "sent"),
+    "failed-error-reply": CleanupCase(
+        [ef.send_script(ef.Reply.server_error("Backend unavailable")), _spare()],
+        "failed",
+        "Gmail returned an error: Backend unavailable",
+    ),
+    "failed-file-does-not-exist": CleanupCase(
+        [ef.send_script(), _spare()], "failed", UNREADABLE_REASON, remove_file=True
+    ),
+    "failed-eacces-reply": CleanupCase(
+        [ef.send_script(attachment_reply="eacces"), _spare()],
+        "failed",
+        UNREADABLE_REASON,
+    ),
+    "failed-start-twice": CleanupCase(
+        [ef.send_script(enter_fault=START_FAULT)] * 2,
+        "failed",
+        "could not start the Gmail MCP server after 2 attempts",
+        calls=0,
+    ),
+    "unknown-timeout-after-call": CleanupCase(
+        [ef.send_script(ef.Reply.hang()), _spare()],
+        "unknown",
+        "no reply from the Gmail MCP server within 45 s after the send was issued",
+    ),
+    "unknown-transport-after-call": CleanupCase(
+        [
+            ef.send_script(ef.Reply.raising_group(anyio.BrokenResourceError())),
+            _spare(),
+        ],
+        "unknown",
+        "the Gmail MCP connection failed after the send was issued "
+        "(BrokenResourceError)",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(CLEANUP_CASES.values()), ids=list(CLEANUP_CASES))
+def test_no_staged_directory_remains_after_any_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    email_env: None,
+    fake_run: FakeRunDigest,
+    send: SendSide,
+    out_dir: Path,
+    private_tmp: Path,
+    caplog: pytest.LogCaptureFixture,
+    case: CleanupCase,
+) -> None:
+    monkeypatch.setenv("EMAIL_SEND_TIMEOUT", "45")
+    send.scripts = list(case.scripts)
+    use_fast_sender(monkeypatch, send)
+    recorder = record_temp_dirs(monkeypatch)
+    if case.remove_file:
+        remove_staged_before_the_call(monkeypatch, send, recorder)
+    html_path = out_dir / HTML_NAME
+    result = run_cli(out_dir, "--email")
+
+    line = email_line(result)
+    if case.status == "sent":
+        assert result.exit_code == 0, result.output
+        assert line == sent_line(3)
+    else:
+        assert result.exit_code == 3, result.output
+        build = failed_line if case.status == "failed" else unknown_line
+        if case.calls:
+            assert line == build(case.reason, html_path)
+        else:
+            assert line.startswith(f"Email: FAILED ({case.reason} (")
+    assert recorder.kwargs == [{"prefix": gmail_mcp.ATTACHMENT_DIR_PREFIX}]
+    (directory,) = recorder.made
+    assert directory.parent == private_tmp
+    assert not directory.exists()
+    assert staged_left(private_tmp) == []
+    assert len(send.calls) == case.calls
+    for _, args in send.calls:
+        assert args["attachments"] == [str(directory.resolve() / HTML_NAME)]
+    assert staged_left(out_dir) == [HTML_NAME]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("Could not remove" in message for message in warnings)
+    assert_no_traceback(result)
+
+
+def test_start_failure_then_success_stages_one_directory_for_one_call(
+    monkeypatch: pytest.MonkeyPatch,
+    email_env: None,
+    fake_run: FakeRunDigest,
+    send: SendSide,
+    out_dir: Path,
+    private_tmp: Path,
+) -> None:
+    send.scripts = [ef.send_script(enter_fault=START_FAULT), ef.send_script()]
+    use_fast_sender(monkeypatch, send)
+    recorder = record_temp_dirs(monkeypatch)
+    result = run_cli(out_dir, "--email")
+    assert result.exit_code == 0, result.output
+    assert email_line(result) == sent_line(3)
+    assert send.opened == 2
+    assert send.sleeps == [2.0]
+    (directory,) = recorder.made
+    ((_, args),) = send.calls
+    (snapshot,) = send.factory.attachment_snapshots
+    assert args["attachments"] == [snapshot.path]
+    assert snapshot.path == str(directory.resolve() / HTML_NAME)
+    assert snapshot.data == args["htmlBody"].encode("ascii")
+    assert not directory.exists()
+    assert staged_left(private_tmp) == []
+
+
+def test_help_names_the_attached_html() -> None:
+    result = CliRunner().invoke(cli.digest, ["--help"])
+    assert result.exit_code == 0, result.output
+    # Click may break the hyphenated name across lines (learnings T060).
+    assert "".join(ATTACHMENT_HELP.split()) in "".join(result.output.split())
+    option = next(param for param in cli.digest.params if param.name == "email")
+    help_text = getattr(option, "help", None)
+    assert isinstance(help_text, str)
+    assert help_text.endswith(ATTACHMENT_HELP)

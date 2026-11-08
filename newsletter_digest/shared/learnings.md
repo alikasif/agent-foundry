@@ -566,3 +566,18 @@
 - (T094) A FIFO opened `O_RDONLY` without `O_NONBLOCK` blocks until a writer opens
   it. A test that plants a FIFO where code opens a file needs a daemon writer thread
   (`os.close(os.open(p, os.O_WRONLY))`), or the test hangs.
+- (T096) The quoted `"PATH=$PATH"` must come **after** `/usr/bin/env`. Written first
+  (`"PATH=$PATH" /usr/bin/env uv ...`), bash treats the quoted word as the command name
+  (a quoted assignment is not an assignment) and fails with exit 127 and "No such file".
+- (T096) To prove a subprocess CLI run has no temp-file side effects, a wrapper script
+  can `sys.addaudithook` (`open`, `os.mkdir`, `os.rmdir`, `os.remove`, `os.rename`, ...),
+  run the unchanged child with `runpy.run_path(child, run_name="__main__")`, and print
+  the events under `TMPDIR` as an extra last JSON line. Take `tempfile.gettempdir()`
+  as the positive control only **after** snapshotting the events, because it writes
+  and removes a probe file in `TMPDIR` itself. Never add an audit hook inside the
+  pytest process: it cannot be removed.
+- (T096, V42) python-dotenv 1.2.4 (`dotenv/main.py`) imports `tempfile`, so `tempfile`
+  is in `sys.modules` after `import newsletter_digest.cli` even with every flag off.
+  `pathlib` is **not** loaded at interpreter start in a script run, only `os` and
+  `stat` are. Flag-off proofs therefore assert effects (no email module, nothing under
+  an empty `TMPDIR`), not module absence.

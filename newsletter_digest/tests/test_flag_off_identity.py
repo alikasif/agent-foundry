@@ -1090,3 +1090,296 @@ def test_written_html_matches_ranked_golden_with_and_without_email(
     assert pdf_files(tmp_path) == []
     assert len(fake_send.calls) == (1 if email else 0)
     assert (no_space(EMAIL_SENT_LINE) in no_space(result.stderr)) is email
+
+
+# --- the email attachment with the flag off (T096; EA-10, acceptance 40, V42) -------
+#
+# The T082 child runs unchanged inside a wrapper that sets ``TMPDIR`` to an empty
+# test directory and records, through ``sys.addaudithook``, every create, open,
+# remove and rename under it. Without ``--email`` nothing may touch it; with
+# ``--email`` exactly one private directory is made there and removed again.
+
+STAGED_DIR_PREFIX = "newsletter-digest-email-"
+#: Audit events that create, open, change or remove a filesystem entry.
+TMPDIR_AUDIT_EVENTS = (
+    "open",
+    "os.mkdir",
+    "os.rmdir",
+    "os.remove",
+    "os.rename",
+    "os.chmod",
+    "os.symlink",
+    "os.link",
+)
+
+TMPDIR_WRAPPER_SCRIPT = '''\
+"""T096 wrapper: record filesystem effects under TMPDIR, then run the T082 child."""
+
+import json
+import os
+import runpy
+import sys
+
+TMPDIR = os.path.abspath(os.environ["TMPDIR"])
+WATCHED = set(json.loads(os.environ["T096_AUDIT_EVENTS"]))
+events = []
+
+
+def under_tmpdir(value):
+    try:
+        text = os.fsdecode(value)
+    except TypeError:
+        return None
+    full = os.path.abspath(text)
+    if full == TMPDIR or full.startswith(TMPDIR + os.sep):
+        return os.path.relpath(full, TMPDIR)
+    return None
+
+
+def hook(event, args):
+    if event not in WATCHED or not args:
+        return
+    try:
+        where = under_tmpdir(args[0])
+    except Exception as exc:
+        events.append([event, "<hook error: " + type(exc).__name__ + ">"])
+        return
+    if where is not None:
+        events.append([event, where])
+
+
+sys.addaudithook(hook)
+child = sys.argv[1]
+sys.argv = [child, *sys.argv[2:]]
+runpy.run_path(child, run_name="__main__")
+seen, left = list(events), sorted(os.listdir(TMPDIR))
+
+import tempfile  # positive control: the child really uses TMPDIR as its temp dir
+
+print(
+    json.dumps(
+        {
+            "tmpdir": TMPDIR,
+            "events": seen,
+            "left": left,
+            "gettempdir": tempfile.gettempdir(),
+            "left_after_control": sorted(os.listdir(TMPDIR)),
+        }
+    )
+)
+'''
+
+
+def run_tmpdir_child(
+    tmp_path: Path, mode: str, extra_env: dict[str, str]
+) -> tuple[dict[str, object], dict[str, object], Path]:
+    """Run the T082 child in ``mode`` with an empty ``TMPDIR`` under the T096 wrapper.
+
+    Returns the child's report, the wrapper's effects report (audit events under
+    ``TMPDIR`` as ``[event, relative path]``, the entries left, the child's
+    ``tempfile.gettempdir()``) and the ``TMPDIR`` path.
+    """
+    child_tmp = (tmp_path / "child-tmp").resolve()
+    child_tmp.mkdir()
+    child = tmp_path / "t082_email_child.py"
+    child.write_text(EMAIL_CHILD_SCRIPT, encoding="utf-8")
+    wrapper = tmp_path / "t096_tmpdir_wrapper.py"
+    wrapper.write_text(TMPDIR_WRAPPER_SCRIPT, encoding="utf-8")
+    watched, control = (
+        (DELIVERY_MODULES, "newsletter_digest.delivery")
+        if mode == "email"
+        else (EMAIL_MODULES, "newsletter_digest.email_delivery")
+    )
+    env = email_child_env(
+        {
+            **extra_env,
+            "TMPDIR": str(child_tmp),
+            "T096_AUDIT_EVENTS": json.dumps(TMPDIR_AUDIT_EVENTS),
+        }
+    )
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(wrapper),
+            str(child),
+            str(PROJECT_ROOT),
+            str(tmp_path / "out"),
+            mode,
+            json.dumps(watched),
+            control,
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=CHILD_TIMEOUT_S,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    *_, report_line, effects_line = done.stdout.splitlines()
+    report, effects = json.loads(report_line), json.loads(effects_line)
+    assert isinstance(report, dict) and isinstance(effects, dict)
+    assert Path(report["package_file"]).resolve().is_relative_to(SOURCE_DIR)
+    assert report["dotenv"] == "", "the child must not find any .env"
+    assert report["exit_code"] == 0, (report["exception"], report["stderr"])
+    assert effects["tmpdir"] == str(child_tmp)
+    assert effects["gettempdir"] == str(child_tmp), "the child ignored TMPDIR"
+    assert effects["left_after_control"] == []
+    return report, effects, child_tmp
+
+
+def test_flag_off_child_leaves_its_tmpdir_untouched(tmp_path: Path) -> None:
+    report, effects, child_tmp = run_tmpdir_child(
+        tmp_path, "none", EMAIL_ENV_CASES["valid"]
+    )
+    assert report["settings"] == [{"telegram": False, "email": False}]
+    assert report["after_run"] == []
+    assert effects["events"] == []
+    assert effects["left"] == []
+    assert list(child_tmp.iterdir()) == []
+
+
+def test_telegram_alone_child_leaves_its_tmpdir_untouched(tmp_path: Path) -> None:
+    env = {**TELEGRAM_ENV_CASES["valid"], **EMAIL_ENV_CASES["valid"]}
+    report, effects, child_tmp = run_tmpdir_child(tmp_path, "telegram", env)
+    assert report["settings"] == [{"telegram": True, "email": False}]
+    assert report["events"] == ["sendDocument"], "the fake Telegram was not used"
+    assert report["after_run"] == []
+    assert effects["events"] == []
+    assert effects["left"] == []
+    assert list(child_tmp.iterdir()) == []
+
+
+def test_email_child_stages_in_its_tmpdir_and_leaves_it_empty(tmp_path: Path) -> None:
+    report, effects, child_tmp = run_tmpdir_child(
+        tmp_path, "email", EMAIL_ENV_CASES["valid"]
+    )
+    assert report["settings"] == [{"telegram": False, "email": True}]
+    assert report["calls"] == [
+        ["send_email", sorted(ef.SEND_ARGUMENT_KEYS), list(ef.RECIPIENTS)]
+    ]
+    assert no_space(EMAIL_SENT_LINE) in no_space(str(report["stderr"]))
+    events = effects["events"]
+    assert isinstance(events, list)
+    made = [path for event, path in events if event == "os.mkdir"]
+    assert len(made) == 1, f"expected one staged directory, got {events!r}"
+    (directory,) = made
+    assert directory.startswith(STAGED_DIR_PREFIX) and os.sep not in directory
+    staged_file = f"{directory}{os.sep}{RANKED_HTML_NAME}"
+    assert ["open", staged_file] in events
+    assert events[-2:] == [["os.remove", staged_file], ["os.rmdir", directory]]
+    assert not [e for e in events if e[0] in ("os.rename", "os.symlink", "os.link")]
+    # Anything else is tempfile's one-off writability probe: open, then remove.
+    for name in {path for _, path in events} - {directory, staged_file}:
+        assert os.sep not in name
+        assert [e for e in events if e[1] == name] == [
+            ["open", name],
+            ["os.remove", name],
+        ]
+    assert effects["left"] == []
+    assert list(child_tmp.iterdir()) == []
+
+
+V42_STDLIB = ("os", "stat", "pathlib", "tempfile")
+V42_CHILD_SCRIPT = '''\
+"""T096 child (V42): stdlib and email modules loaded by a flag-off CLI."""
+
+import sys
+
+STDLIB = ("os", "stat", "pathlib", "tempfile")
+
+
+def present():
+    return {name: name in sys.modules for name in STDLIB}
+
+
+def email_modules():
+    return sorted(n for n in sys.modules if n.startswith("newsletter_digest.email_"))
+
+
+at_start = present()
+email_at_start = email_modules()
+project_root, out_dir = sys.argv[1], sys.argv[2]
+sys.path.append(project_root)
+
+import json
+
+import newsletter_digest
+import newsletter_digest.cli as cli
+
+after_import = present()
+email_after_import = email_modules()
+
+from click.testing import CliRunner
+from dotenv import find_dotenv
+
+from tests.flag_off_fixture import build_ranked_reading_list
+
+
+async def fake_run_digest(settings):
+    return build_ranked_reading_list()
+
+
+cli.run_digest = fake_run_digest
+result = CliRunner().invoke(cli.digest, ["--model", "x/y", "--out", out_dir])
+after_run = present()
+email_after_run = email_modules()
+
+import newsletter_digest.email_delivery  # positive control: the detector sees it
+
+print(
+    json.dumps(
+        {
+            "package_file": newsletter_digest.__file__,
+            "dotenv": find_dotenv(usecwd=True),
+            "exit_code": result.exit_code,
+            "exception": repr(result.exception),
+            "stdout_lines": result.stdout.splitlines(),
+            "at_start": at_start,
+            "after_import": after_import,
+            "after_run": after_run,
+            "email_at_start": email_at_start,
+            "email_after_import": email_after_import,
+            "email_after_run": email_after_run,
+            "email_after_control": email_modules(),
+        }
+    )
+)
+'''
+
+
+def test_v42_flag_off_cli_loads_no_email_module_in_a_fresh_interpreter(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "t096_v42_child.py"
+    script.write_text(V42_CHILD_SCRIPT, encoding="utf-8")
+    empty_cwd = tmp_path / "cwd"
+    empty_cwd.mkdir()
+    out_dir = tmp_path / "out"
+    done = subprocess.run(
+        [sys.executable, str(script), str(PROJECT_ROOT), str(out_dir)],
+        cwd=empty_cwd,
+        env=email_child_env(EMAIL_ENV_CASES["valid"]),
+        capture_output=True,
+        text=True,
+        timeout=CHILD_TIMEOUT_S,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    report = json.loads(done.stdout.splitlines()[-1])
+    assert Path(report["package_file"]).resolve().is_relative_to(SOURCE_DIR)
+    assert report["dotenv"] == "", "the child must not find any .env"
+    assert report["exit_code"] == 0, report["exception"]
+    assert report["stdout_lines"] == [str(out_dir / RANKED_HTML_NAME)]
+    assert list(empty_cwd.iterdir()) == []
+    for stage in ("at_start", "after_import", "after_run"):
+        assert sorted(report[stage]) == sorted(V42_STDLIB)
+    assert report["at_start"]["os"] and report["at_start"]["stat"]
+    assert report["after_import"]["pathlib"]
+    # V42: ``tempfile`` is already loaded by ``import newsletter_digest.cli``
+    # (python-dotenv's ``dotenv.main`` imports it), so its absence is not asserted
+    # (AP-6 item 5); the effect checks above (an untouched TMPDIR) stand instead.
+    assert report["email_at_start"] == []
+    assert report["email_after_import"] == []
+    assert report["email_after_run"] == []
+    assert report["email_after_control"] == sorted(EMAIL_MODULES)
