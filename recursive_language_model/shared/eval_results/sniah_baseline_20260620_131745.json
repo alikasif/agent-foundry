@@ -1,0 +1,11 @@
+{
+  "benchmark": "sniah",
+  "approach": "baseline",
+  "score": 0.0,
+  "n_items": 10,
+  "config": {
+    "mode": "offline",
+    "note": "inspired by, not reproducing paper"
+  },
+  "seed": 42
+}
