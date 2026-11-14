@@ -1,0 +1,507 @@
+"""CLI entry point for the Recursive Language Model (RLM) agent."""
+
+from __future__ import annotations
+
+import logging
+import os
+import platform
+import sys
+from pathlib import Path
+from typing import Any
+
+import anyio
+import click
+from dotenv import load_dotenv
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.syntax import Syntax
+
+from rlm.agent import RLMAgent
+from rlm.languages.default import build_default_registry
+from rlm.loop import AgentLoop
+from rlm.prompts import BANNER, SLASH_COMMANDS
+from rlm.sandbox import PythonSandbox
+from rlm.subagents import SubagentRunner, default_model_for_depth
+
+# Load .env at import time so Click's envvar resolution picks up
+# OPENROUTER_API_KEY, OPENAI_API_BASE, RLM_ROOT_MODEL, and RLM_SUB_MODEL
+# from the .env file before it parses CLI options.
+load_dotenv()
+
+console = Console()
+
+
+def _setup_logging(log_level: str) -> logging.Logger:
+    """Configure and return the application logger.
+
+    Args:
+        log_level: One of ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``.
+
+    Returns:
+        A configured ``logging.Logger`` instance.
+    """
+    level = getattr(logging, log_level.upper(), logging.WARNING)
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[
+            RichHandler(
+                console=console,
+                show_path=False,
+                markup=True,
+                rich_tracebacks=True,
+            )
+        ],
+    )
+    logger = logging.getLogger("rlm")
+    logger.setLevel(level)
+    return logger
+
+
+def _print_banner(model: str, base_url: str) -> None:
+    """Print the startup banner with session info and commands.
+
+    Args:
+        model: The model identifier in use.
+        base_url: The API base URL.
+    """
+    console.print(BANNER, style="bold cyan")
+    console.print(f"  Model:   [bold]{model}[/bold]")
+    console.print(f"  Provider: [bold]{base_url}[/bold]")
+    console.print(f"  Python:  [bold]{platform.python_version()}[/bold]")
+    console.print()
+    console.print("  [dim]Slash commands:[/dim]")
+    for cmd, desc in SLASH_COMMANDS.items():
+        if cmd == "quit":
+            continue
+        console.print(f"    [bold]/{cmd}[/bold]  {desc}")
+    console.print()
+
+
+def _print_help() -> None:
+    """Print available slash commands."""
+    console.print("[bold]Available commands:[/bold]")
+    for cmd, desc in SLASH_COMMANDS.items():
+        if cmd == "quit":
+            continue
+        console.print(f"  [bold]/{cmd}[/bold]  {desc}")
+    console.print("  [bold]exit[/bold]   Exit the session (type 'exit')")
+    console.print()
+
+
+def _print_history(turn_count: int, model: str) -> None:
+    """Print conversation history info.
+
+    Args:
+        turn_count: Number of turns taken so far.
+        model: The model identifier in use.
+    """
+    console.print(f"  Turns:  [bold]{turn_count}[/bold]")
+    console.print(f"  Model:  [bold]{model}[/bold]")
+    console.print()
+
+
+def _print_session_summary(turn_count: int, model: str) -> None:
+    """Print session summary on exit.
+
+    Args:
+        turn_count: Total number of turns taken.
+        model: The model identifier used.
+    """
+    console.print()
+    console.print(
+        Panel(
+            f"Session ended.\n Turns: {turn_count}\n Model: {model}",
+            title="Summary",
+            border_style="cyan",
+        )
+    )
+
+
+def _handle_load_command(
+    path_str: str,
+    sandbox: PythonSandbox,
+    console: Console,
+) -> None:
+    """Handle the /load <path> command: load a file as the context store.
+
+    Args:
+        path_str: Path string supplied by the user.
+        sandbox: The active PythonSandbox.
+        console: Rich console for output.
+    """
+    path = Path(path_str.strip()).expanduser()
+    if not path.exists():
+        console.print(f"[red]File not found: {path}[/red]")
+        return
+    if not path.is_file():
+        console.print(f"[red]Not a file: {path}[/red]")
+        return
+    # lock=True so the per-turn loop call does not overwrite the file context.
+    sandbox.set_context(path, lock=True)
+    from rlm.context import ContextStore
+
+    store = sandbox.namespace.get("context")
+    if isinstance(store, ContextStore):
+        size_mb = store.size / 1_048_576
+        size_str = f"{size_mb:.2f} MB" if size_mb >= 0.1 else f"{store.size} chars"
+        console.print(
+            f"[green]Loaded:[/green] {path.name} "
+            f"({size_str}, {store._line_count} lines)"
+        )
+        console.print(f"  [dim]Spill path: {store.path}[/dim]")
+    else:
+        console.print(f"[green]Loaded:[/green] {path.name}")
+
+
+def _display_code(code: str, turn: int | None = None) -> None:
+    """Display code with syntax highlighting.
+
+    Args:
+        code: Source code to display.
+        turn: Optional turn number for the panel title.
+    """
+    # Determine language from code block or default to python
+    # For simplicity, we'll assume python for display since most code will be python
+    # A more sophisticated approach would detect language from context
+    title = f"Code (turn {turn})" if turn is not None else "Code"
+    syntax = Syntax(code, "python", theme="monokai", line_numbers=True)
+    console.print(Panel(syntax, title=title, border_style="blue"))
+
+
+def _display_result(result: object, turn: int | None = None) -> None:
+    """Display execution result with Rich formatting.
+
+    Args:
+        result: A SandboxResult with stdout, stderr, and exception fields.
+        turn: Optional turn number for the panel title.
+    """
+    from rlm.sandbox import SandboxResult
+
+    if not isinstance(result, SandboxResult):
+        return
+    suffix = f" (turn {turn})" if turn is not None else ""
+    if result.stdout:
+        console.print(
+            Panel(result.stdout, title=f"stdout{suffix}", border_style="green")
+        )
+    if result.stderr:
+        console.print(
+            Panel(result.stderr, title=f"stderr{suffix}", border_style="yellow")
+        )
+    if result.exception:
+        console.print(
+            Panel(result.exception, title=f"exception{suffix}", border_style="red")
+        )
+
+
+async def _run_turn(
+    agent_loop: AgentLoop,
+    history: list[dict[str, str]],
+    model: str,
+    logger: logging.Logger,
+    user_query: str = "",
+) -> tuple[str, list[dict[str, str]], int]:
+    """Run a single agent turn and display results.
+
+    Args:
+        agent_loop: The AgentLoop instance.
+        history: Current conversation history.
+        model: The model identifier (for display).
+        logger: Logger instance for flow visibility.
+        user_query: The user's latest query, forwarded to the sandbox
+            as the ``context`` variable.
+
+    Returns:
+        A tuple of (response_text, updated_history, turns_used).
+    """
+    # Track whether FINAL() was called so we can surface it distinctly.
+    final_triggered: list[object] = []
+
+    # Live-output state. The status spinner shows while waiting for the first
+    # token of each LLM call (free-tier models can take many seconds). Flags
+    # are reset per-LLM-call (in on_llm_start) so every self-debug iteration
+    # renders its own thinking header and reasoning→answer separator.
+    status_holder: dict[str, Any] = {"status": None}
+    flags = {"reasoning": False, "answer": False}
+
+    def _stop_status() -> None:
+        """Stop the waiting spinner before printing (printing under it garbles)."""
+        status = status_holder["status"]
+        if status is not None:
+            status.stop()
+            status_holder["status"] = None
+
+    def on_llm_start() -> None:
+        """Show a waiting spinner and reset per-call display flags."""
+        flags["reasoning"] = False
+        flags["answer"] = False
+        status = console.status("[dim]Thinking…[/dim]", spinner="dots")
+        status.start()
+        status_holder["status"] = status
+
+    def on_reasoning_token(delta: str) -> None:
+        """Stream the model's reasoning, dim and distinct from the answer."""
+        _stop_status()
+        if not flags["reasoning"]:
+            flags["reasoning"] = True
+            console.print("💭 thinking…", style="dim italic")
+        console.print(delta, end="", markup=False, style="grey50")
+
+    def on_stream_token(delta: str) -> None:
+        """Stream the final answer token-by-token."""
+        _stop_status()
+        if not flags["answer"]:
+            flags["answer"] = True
+            if flags["reasoning"]:
+                # Separate the reasoning block from the answer.
+                console.print()
+        console.print(delta, end="", markup=False)
+
+    def on_turn(
+        turn_idx: int,
+        response: str,
+        code_blocks: list[tuple[str, str]],
+        results: list[object],
+    ) -> None:
+        # Ensure no spinner is left running (e.g. a turn with no tokens).
+        _stop_status()
+        # Add a newline after streaming completes so structured panels
+        # start on a fresh line
+        console.print()
+        # Show code blocks with syntax highlighting
+        _highlighted_langs = ("python", "bash", "javascript", "sql", "awk")
+        for lang, code in code_blocks:
+            title = f"Code ({lang}) (turn {turn_idx})"
+            hl_lang = lang if lang in _highlighted_langs else "python"
+            syntax = Syntax(code, hl_lang, theme="monokai", line_numbers=True)
+            console.print(Panel(syntax, title=title, border_style="blue"))
+        # Show execution results; detect FINAL()
+        from rlm.sandbox import SandboxResult as SandboxRes
+
+        for (lang, _code), result in zip(code_blocks, results):
+            console.print(f"▸ executing {lang} block…", style="dim")
+            if isinstance(result, SandboxRes) and result.final_value is not None:
+                final_triggered.append(result.final_value)
+            _display_result(result, turn=turn_idx)
+
+    response, _final_value, updated_history = await agent_loop.run_turn(
+        history,
+        logger=logger,
+        on_turn=on_turn,
+        on_stream_token=on_stream_token,
+        on_reasoning_token=on_reasoning_token,
+        on_llm_start=on_llm_start,
+        user_query=user_query,
+    )
+
+    # Surface FINAL() output in a distinct panel if triggered.
+    if final_triggered:
+        console.print(
+            Panel(
+                str(final_triggered[-1]),
+                title="FINAL answer",
+                border_style="bold green",
+            )
+        )
+
+    turns_used = (len(updated_history) - len(history)) // 2
+    return response, updated_history, turns_used
+
+
+def _repl(
+    root_model: str,
+    sub_model: str,
+    api_key: str,
+    base_url: str,
+    logger: logging.Logger,
+) -> None:
+    """Run the interactive REPL loop.
+
+    Args:
+        root_model: Model identifier for the root agent (depth 0).
+        sub_model: Model identifier for recursive children (depth >= 1).
+        api_key: The API key for the LLM provider.
+        base_url: The base URL for the OpenAI-compatible API.
+        logger: Logger instance for flow visibility.
+    """
+    _print_banner(f"{root_model} (sub: {sub_model})", base_url)
+
+    # Root agent runs at depth 0.
+    model_for_depth = default_model_for_depth(root_model, sub_model)
+    agent = RLMAgent(model=model_for_depth(0), api_key=api_key, base_url=base_url)
+
+    # Wire a SubagentRunner so llm_query / llm_query_many work in agent code.
+    def _progress_note(depth: int, preview: str) -> None:
+        console.print(f"  [dim]↳ subagent (depth {depth}): {preview}…[/dim]")
+
+    child_runner = SubagentRunner(
+        model_for_depth=model_for_depth,
+        api_key=api_key,
+        base_url=base_url,
+        depth=0,
+        progress_fn=_progress_note,
+    )
+
+    # Create a shared sandbox and registry; pass both into the loop so the
+    # sandbox namespace persists across turns and /reset clears it correctly.
+    sandbox = PythonSandbox(child_runner=child_runner)
+    registry = build_default_registry(sandbox)
+    agent_loop = AgentLoop(agent=agent, sandbox=sandbox, registry=registry)
+
+    history: list[dict[str, str]] = []
+    turn_count = 0
+
+    while True:
+        try:
+            user_input = console.input("[bold cyan]rlm> [/bold cyan]")
+        except (EOFError, KeyboardInterrupt):
+            _print_session_summary(turn_count, root_model)
+            break
+
+        user_input = user_input.strip()
+        if not user_input:
+            continue
+
+        if user_input.startswith("/") or user_input == "exit":
+            cmd = user_input.lstrip("/").strip()
+            if cmd in ("exit", "quit"):
+                _print_session_summary(turn_count, root_model)
+                break
+            if cmd == "help":
+                _print_help()
+                continue
+            if cmd == "reset":
+                history = []
+                # reset() clears the live Python namespace via sandbox.reset()
+                agent_loop.reset()
+                turn_count = 0
+                logger.info("Session reset — history and namespace cleared.")
+                console.print("[yellow]Session reset.[/yellow]")
+                continue
+            if cmd == "history":
+                _print_history(turn_count, root_model)
+                continue
+            if cmd.startswith("load ") or cmd == "load":
+                parts = cmd.split(None, 1)
+                if len(parts) < 2:
+                    console.print(
+                        "[red]Usage: /load <path>[/red]\n"
+                        "  Example: /load /data/big_corpus.txt"
+                    )
+                else:
+                    _handle_load_command(parts[1], sandbox, console)
+                continue
+            console.print(f"[red]Unknown command: /{cmd}[/red]")
+            continue
+
+        logger.info(f"[bold]User:[/bold] {user_input}")
+        history.append({"role": "user", "content": user_input})
+
+        try:
+            response, history, turns = anyio.run(
+                _run_turn, agent_loop, history, root_model, logger, user_input
+            )
+            turn_count += turns if turns > 0 else 1
+            logger.info(
+                f"[bold]Agent responded[/bold] — {turns} self-debug turn(s), "
+                f"{len(history)} total history entries."
+            )
+        except Exception as exc:
+            logger.error(f"Agent error: {exc}")
+            console.print(
+                Panel(
+                    str(exc),
+                    title="Error",
+                    border_style="red",
+                )
+            )
+            if history and history[-1]["role"] == "user":
+                history.pop()
+
+
+@click.command()
+@click.option(
+    "--root-model",
+    envvar="RLM_ROOT_MODEL",
+    default="openrouter/anthropic/claude-sonnet-4",
+    help="Model identifier for the root agent (depth 0).",
+    show_default=True,
+)
+@click.option(
+    "--sub-model",
+    envvar="RLM_SUB_MODEL",
+    default="openrouter/anthropic/claude-3.5-haiku",
+    help="Model identifier for recursive children (depth >= 1).",
+    show_default=True,
+)
+@click.option(
+    "--api-key",
+    envvar="OPENROUTER_API_KEY",
+    default=None,
+    help="API key for the LLM provider.",
+)
+@click.option(
+    "--base-url",
+    envvar="OPENAI_API_BASE",
+    default="https://openrouter.ai/api/v1",
+    help="Base URL for the OpenAI-compatible API.",
+    show_default=True,
+)
+@click.option(
+    "--log-level",
+    default="WARNING",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    help="Control logging verbosity.  DEBUG shows every LLM call, sandbox "
+    "execution, and observation.  INFO shows turn summaries.  WARNING "
+    "(default) only shows errors.",
+    show_default=True,
+)
+def main(
+    root_model: str,
+    sub_model: str,
+    api_key: str | None,
+    base_url: str,
+    log_level: str,
+) -> None:
+    """Recursive Language Model (RLM) Agent -- interactive CLI REPL.
+
+    An agent that uses executable code as its unified action space and can
+    recurse over context-by-reference. Type a task in natural language and
+    the agent will write and execute code to accomplish it.
+    """
+    logger = _setup_logging(log_level)
+
+    if not api_key:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+
+    if not api_key:
+        console.print(
+            "[bold red]Error:[/bold red] OPENROUTER_API_KEY is not set. "
+            "Set it via --api-key, the OPENROUTER_API_KEY environment "
+            "variable, or a .env file.",
+        )
+        sys.exit(1)
+
+    # The OpenAI Agents SDK reads OPENAI_API_KEY internally for tracing
+    # and provider setup. Mirror the router key so everything works.
+    os.environ.setdefault("OPENAI_API_KEY", api_key)
+
+    logger.debug(
+        f"Starting session — root_model={root_model}, sub_model={sub_model}, "
+        f"base_url={base_url}, log_level={log_level}"
+    )
+
+    _repl(
+        root_model=root_model,
+        sub_model=sub_model,
+        api_key=api_key,
+        base_url=base_url,
+        logger=logger,
+    )
+
+
+if __name__ == "__main__":
+    main()
