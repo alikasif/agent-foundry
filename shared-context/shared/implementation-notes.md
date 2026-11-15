@@ -196,3 +196,12 @@ Sources: ctx7 `/websites/code_claude` (pages code.claude.com/docs/en/hooks and h
 - Defects/limitations found (not fixed, documented): (1) lexical search has no stop-word list or minimum score, so a prompt sharing only common words injects unrelated entries (`xfail(strict)` test `test_unrelated_prompt_with_only_stopwords_injects_nothing`); (2) bare lowercase `key=<64 hex>` is not redacted (`xfail(strict)`, known deferred gap; note uppercase `KEY=<hex>` is redacted).
 - The live test (`SHARED_CONTEXT_LIVE=1`) was NOT run in this task (no real `claude` calls allowed here); it is skipped by default.
 - Criterion 5 test checks structure (both stores subclass `StoreContract`, no overridden contract tests); the normal suite runs both classes.
+
+## Final review fix wave (one wave: C1, R9/C2, I1-I12, cheap minors)
+
+### Stage 1: scrubber (C1)
+- New separate hex pass `_HEX_RUN` (`(?<![0-9A-Fa-f])[0-9A-Fa-f]{32,}(?![0-9A-Fa-f])`) runs after the keyed patterns and before the entropy candidates, whatever the run is glued to (`key=`, `x-`, `note-`, ...). 48+ hex chars are always redacted; 32-47 only with a key word (`secret|token|key|passw|pwd|credential|auth`) in the 30 chars before. Linear (a start inside a run fails the lookbehind); two new units in the 100 KB linear-time test.
+- Policy kept as before: a 40-char git SHA with no key word stays (also when glued, `commit-<sha>`); a 64-hex sha256 digest is redacted (it was already, via `sha256:`); UUIDs (dash-separated groups) are untouched.
+- `extra_patterns` matches now set `risky` (the entry is held), like credentials and denylist terms. The earlier test asserting the opposite was flipped.
+- Removed the dead first `_entropy`/`_looks_secret` definitions (shadowed duplicates).
+- The strict xfail for bare `key=<64 hex>` is now a normal passing test.

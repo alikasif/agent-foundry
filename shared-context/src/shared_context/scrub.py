@@ -85,6 +85,11 @@ _VALUE = [
 
 _CANDIDATE = re.compile(r"[A-Za-z0-9+/_=-]{24,}")
 _HEX = re.compile(r"[0-9a-fA-F]+")
+# Hex runs are checked on their own, whatever they are glued to (`key=<hex>`, `note-<hex>`):
+# inside one `_CANDIDATE` token they would fail the pure-hex test, and hex entropy (<= 4.0)
+# never reaches the 2-class threshold. Linear: a start inside a run fails the lookbehind.
+_HEX_RUN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32,}(?![0-9A-Fa-f])")
+_HEX_ALWAYS = 48  # 32-47 hex chars need a key word just before (a 40-char git SHA alone is clean)
 _KEY_NEAR = re.compile(r"(?i)secret|token|key|passw|pwd|credential|auth")
 _ENTROPY_MIN = 4.0
 _ENTROPY_MIN_2CLASS = 4.2
@@ -103,20 +108,6 @@ class ScrubResult:
     redactions: int
     risky: bool
     reasons: list[str]
-
-
-def _entropy(s: str) -> float:
-    n = len(s)
-    return -sum(c / n * math.log2(c / n) for c in Counter(s).values())
-
-
-def _looks_secret(tok: str) -> bool:
-    if _HEX.fullmatch(tok) and len(tok) == 40:
-        return False  # git SHA
-    classes = sum(
-        (any(c.islower() for c in tok), any(c.isupper() for c in tok), any(c.isdigit() for c in tok))
-    )
-    return classes >= 3 and _entropy(tok) >= _ENTROPY_MIN
 
 
 def _entropy(s: str) -> float:
@@ -192,6 +183,20 @@ def scrub(text: str, rules: ScrubRules) -> ScrubResult:
 
     found = 0
 
+    def hex_repl(m: re.Match[str]) -> str:
+        nonlocal found
+        tok = m.group(0)
+        before = m.string[max(0, m.start() - 30) : m.start()]
+        if len(tok) >= _HEX_ALWAYS or _KEY_NEAR.search(before):
+            found += 1
+            return REDACTED
+        return tok
+
+    text = _HEX_RUN.sub(hex_repl, text)
+    note("credential", found)
+
+    found = 0
+
     def entropy_repl(m: re.Match[str]) -> str:
         nonlocal found
         before = m.string[max(0, m.start() - 30) : m.start()]
@@ -212,7 +217,7 @@ def scrub(text: str, rules: ScrubRules) -> ScrubResult:
         text, n = _apply_user(text, re.compile(pattern))
         note("custom_pattern", n)
 
-    risky = "credential" in reasons or "customer_data" in reasons
+    risky = bool(reasons)  # credentials, denylisted terms and user patterns all hold the entry
     return ScrubResult(text=text, redactions=count, risky=risky, reasons=reasons)
 
 

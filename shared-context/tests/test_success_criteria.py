@@ -346,12 +346,12 @@ def test_seeded_secrets_and_injection_neutralised(world, tmp_path):
     assert len(alex.entry_files("held")) >= 10
 
 
-@pytest.mark.xfail(strict=True, reason="known deferred scrubber gap: bare lowercase key=<64 hex> is not redacted")
-def test_known_gap_bare_hex_assignment_is_not_redacted():
-    """Documented deferred gap: `key=<64 hex>` (lowercase, bare) passes the scrubber unredacted."""
+def test_bare_hex_assignment_is_redacted():
+    """Former gap (final review C1): `key=<64 hex>` (lowercase, bare) is redacted."""
     secret = "0123456789abcdef" * 4
     result = scrub(f"key={secret}", ScrubRules())
     assert secret not in result.text
+    assert result.risky
 
 
 
