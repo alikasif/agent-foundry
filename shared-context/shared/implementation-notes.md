@@ -43,3 +43,13 @@
 ### Task 3 fix round 3
 - Correction to round 2: the env-reference exemption is case-sensitive and covers only `$UPPER_SNAKE` / `${UPPER_SNAKE}` (letters A-Z, digits, underscore, starting with a letter or `_`). Lowercase or mixed-case `$`-values (`$ecret123`, `$Hunter2`, `${db_pass}`) are redacted.
 - Residual: a real password written as `$` followed only by uppercase letters/digits/underscores (e.g. `$SUMMER2024`) is indistinguishable from an env reference and is left unredacted.
+
+## Task 4: GitStore
+- `GitStore(root, index_path, repo_roots=None, *, stale_days=90, now=<utc clock>)`. The constructor creates `entries/` and `held/` and runs `refresh()`, so a deleted or stale index is rebuilt on open. `usage.jsonl` lives in `index_path.parent`.
+- Markdown files are the source of truth. The FTS5 index (tokenizer `unicode61 tokenchars '_'`, matching `\w+`) only selects candidates (OR of quoted query tokens). Score and ordering are then computed exactly as in InMemoryStore (overlap/len(query) + 1.0 repo boost, ties by id), so both stores satisfy the same contract. bm25 is not used for ranking because its scale is corpus-dependent and cannot be combined safely with the fixed repo boost.
+- `get_entry`, `find_session_entries` and `list_held` read the files directly; only `search` uses the index. A hit whose file vanished or became malformed is dropped.
+- Stale view (never written to disk): non-held, non-stale entries are returned with `status=stale` and a derived `stale_reason` ("older than N days" or "linked path missing: <path>") when `created` is older than `stale_days`, or a `repo:<name>@<sha>:<path>` evidence item names a repo in `repo_roots` whose path is missing. Unparseable `created` values are never stale; a naive timestamp is treated as UTC. Held entries are never restaged.
+- Entry ids must match `[A-Za-z0-9_-]+` (path-traversal guard): `write_entry` raises ValueError, `get_entry` returns None, other lookups raise KeyError. A file whose frontmatter id differs from its filename is skipped with a warning.
+- `write_entry` writes the new file atomically (temp file in the same dir + `os.replace`) before deleting the copy in the other area, so a crash can leave a duplicate but never lose the entry. `refresh()` resolves a duplicate id across areas in favour of `held/` (fail closed) and warns.
+- `set_status` for an unknown id and `record_use` for an unknown id raise KeyError. Added `test_record_use_unknown_entry_raises` to the contract suite.
+- Tests inject a fixed `now` because contract fixtures use a fixed `created` date that would otherwise age past 90 days.

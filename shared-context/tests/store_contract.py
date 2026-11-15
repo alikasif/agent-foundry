@@ -119,6 +119,10 @@ class StoreContract:
         store.record_use("E1", "sess-9", kind="feedback_helpful")
         store.record_use("E1", "sess-9", "feedback_unhelpful")
 
+    def test_record_use_unknown_entry_raises(self, store):
+        with pytest.raises(KeyError):
+            store.record_use("nope", "sess-9")
+
     def test_refresh_does_not_raise(self, store):
         store.write_entry(make_entry("E1"))
         store.refresh()
