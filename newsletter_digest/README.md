@@ -34,6 +34,7 @@ step after the HTML is written; see [Email delivery](#email-delivery).
 uv sync
 cp .env.example .env     # then edit .env and set OPENROUTER_API_KEY
 uv run newsletter-digest --help
+uv run newsletter-digest --window 1w --email
 ```
 
 ## Gmail MCP setup

@@ -1,0 +1,30 @@
+[project]
+name = "shared-context"
+version = "0.1.0"
+description = "Shared, scrubbed project memory for Claude Code sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.3,<3",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+shared-context = "shared_context.cli:main"
+shared-context-mcp = "shared_context.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shared_context"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "anyio>=4.16.0",
+    "pytest>=9.2.0",
+]

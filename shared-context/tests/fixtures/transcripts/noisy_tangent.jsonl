@@ -1,0 +1,3 @@
+{"type":"user","isSidechain":false,"sessionId":"synthetic-noise","uuid":"u1","message":{"role":"user","content":"Unrelated, but what is a good name for a cat?"}}
+{"type":"assistant","isSidechain":false,"sessionId":"synthetic-noise","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Some popular choices are Miso, Pixel, and Biscuit."}]}}
+{"type":"user","isSidechain":false,"sessionId":"synthetic-noise","uuid":"u2","message":{"role":"user","content":"Ha, Biscuit it is. Anyway, back to work later."}}
