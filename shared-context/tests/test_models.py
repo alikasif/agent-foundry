@@ -44,3 +44,12 @@ def test_enum_values():
     assert {k.value for k in Kind} == {
         "decision", "gotcha", "convention", "dead_end", "runbook_note", "other"
     }
+
+
+@pytest.mark.parametrize(
+    "front",
+    ["<<<<<<< HEAD\ntitle: a\n=======\ntitle: b\n>>>>>>> other\n", "title: [unclosed\n"],
+)
+def test_load_entry_wraps_yaml_errors_as_valueerror(front):
+    with pytest.raises(ValueError):
+        load_entry(f"---\n{front}---\nbody")

@@ -105,7 +105,10 @@ def load_entry(text: str) -> Entry:
                 raise ValueError("unterminated frontmatter")
         else:
             front, body = rest[: idx + 1], rest[idx + 5 :]
-    meta = yaml.safe_load(front) or {}
+    try:
+        meta = yaml.safe_load(front) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid frontmatter YAML: {exc}") from exc
     if not isinstance(meta, dict):
         raise ValueError("frontmatter must be a mapping")
     try:
