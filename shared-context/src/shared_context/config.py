@@ -8,7 +8,22 @@ from pathlib import Path
 import yaml
 
 ENV_STORE = "SHARED_CONTEXT_STORE"
+ENV_STATE = "SHARED_CONTEXT_STATE"
 DEFAULT_HOME = Path.home() / ".shared-context"
+
+
+def resolve_state_dir() -> Path:
+    """Local, per-user state (capture cursors, sync queue, locks, index, logs).
+
+    Env SHARED_CONTEXT_STATE wins; default ``~/.shared-context/state``.
+    """
+    env = os.environ.get(ENV_STATE)
+    return Path(env) if env else Path.home() / ".shared-context" / "state"
+
+
+def index_path(state_dir: Path) -> Path:
+    """Local GitStore FTS index; ``usage.jsonl`` lives next to it."""
+    return Path(state_dir) / "index" / "index.db"
 
 
 @dataclass
