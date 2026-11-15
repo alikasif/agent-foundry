@@ -195,8 +195,14 @@ class StoreSync:
                 if rc != 0:
                     self._enqueue(message)
                     return False
-            if self._quiet_rc("diff", "--cached", "--quiet") != 0:
-                rc, _ = self._git("commit", "--quiet", "-m", message)
+            # Scope the check and the commit to the store paths so anything else
+            # already staged in the repo is never swept into the commit.
+            staged = [
+                p for p in paths
+                if paths and self._quiet_rc("diff", "--cached", "--quiet", "--", p) != 0
+            ]
+            if staged:
+                rc, _ = self._git("commit", "--quiet", "-m", message, "--", *staged)
                 if rc != 0:
                     self._enqueue(message)
                     return False

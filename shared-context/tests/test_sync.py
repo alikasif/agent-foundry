@@ -171,3 +171,26 @@ def test_fallback_identity_when_none_configured(world, monkeypatch):
 def test_git_timeout_never_raises(world):
     sync = StoreSync(world["alex"], world["tmp"] / "st", 0, git_timeout_s=0.0001)
     assert sync.pull(force=True) is False
+
+
+def test_prestaged_unrelated_file_not_committed(world):
+    alex = world["alex"]
+    (alex / "config.yaml").write_text("a: 1\n", encoding="utf-8")
+    git(alex, "add", "config.yaml")
+    (alex / "entries" / "e1.md").write_text("x\n", encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("add e1") is True
+    assert git(alex, "show", "--name-only", "--format=", "HEAD").split() == ["entries/e1.md"]
+    assert git(alex, "diff", "--cached", "--name-only").split() == ["config.yaml"]
+
+
+def test_no_store_dirs_and_unrelated_staged_commits_nothing(world):
+    alex = world["alex"]
+    (alex / "entries").rmdir()
+    (alex / "held").rmdir()
+    before = git(alex, "rev-parse", "HEAD")
+    (alex / "config.yaml").write_text("a: 1\n", encoding="utf-8")
+    git(alex, "add", "config.yaml")
+    assert world["alex_sync"].commit_and_push("nothing") is True
+    assert git(alex, "rev-parse", "HEAD") == before
+    assert git(alex, "diff", "--cached", "--name-only").split() == ["config.yaml"]
+    assert not (world["alex_sync"].state_dir / "queue.json").exists()
