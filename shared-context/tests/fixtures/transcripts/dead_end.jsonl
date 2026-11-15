@@ -1,0 +1,4 @@
+{"type":"user","isSidechain":false,"sessionId":"synthetic-dead-end","uuid":"u1","message":{"role":"user","content":"Builds are slow. Try raising the parallel worker count in build.cfg."}}
+{"type":"assistant","isSidechain":false,"sessionId":"synthetic-dead-end","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Theory: the build is CPU-bound, so more workers should help. I raised workers from 4 to 16."}]}}
+{"type":"user","isSidechain":false,"sessionId":"synthetic-dead-end","uuid":"u2","message":{"role":"user","content":"No change at all. Still 12 minutes."}}
+{"type":"assistant","isSidechain":false,"sessionId":"synthetic-dead-end","uuid":"a2","message":{"role":"assistant","content":[{"type":"text","text":"The worker theory was wrong: the build is bound by a single serial codegen step, so more workers do not help. Caching the codegen output cut the build to 3 minutes."}]}}
