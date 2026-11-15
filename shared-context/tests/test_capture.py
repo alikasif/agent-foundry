@@ -518,10 +518,90 @@ def test_store_error_on_one_entry_does_not_stop_others(tmp_path, state_dir, capl
     items = [learning(topic_key="bad", body="BODY-MARKER-BAD"), learning(topic_key="good")]
     with caplog.at_level(logging.DEBUG):
         res = run(path, store, StubModelClient([resp(*items)]), state_dir, make_cfg(tmp_path))
-    assert res.created == 1 and res.skipped_reason is None
+    assert res == CaptureResult(created=1, updated=0, held=0, retracted=0, skipped_reason="store_error")
     assert [e.topic_key for e in store.find_session_entries(SID)] == ["good"]
     assert "OSError" in caplog.text
     assert "BODY-MARKER-BAD" not in caplog.text and "disk full" not in caplog.text
+    state = read_state(state_dir)
+    assert state["cursor"] == 0  # chunk is re-read next run
+    assert state["calls"] == 1 and state["last_run"] == NOW
+
+
+class _SwitchStore(InMemoryStore):
+    """InMemoryStore whose writes / status changes fail while `broken` is set."""
+
+    def __init__(self, broken_topics=None, fail_status=False):
+        super().__init__()
+        self.broken_topics = broken_topics  # None = all writes fail; set() = none fail
+        self.fail_status = fail_status
+
+    def write_entry(self, entry):
+        if self.broken_topics is None or entry.topic_key in self.broken_topics:
+            raise OSError("locked")
+        super().write_entry(entry)
+
+    def set_status(self, entry_id, status, reason=None):
+        if self.fail_status:
+            raise OSError("locked")
+        super().set_status(entry_id, status, reason)
+
+
+def test_all_writes_failing_is_store_error_and_cursor_kept(tmp_path, state_dir):
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    store = _SwitchStore(broken_topics=None)
+    res = run(path, store, StubModelClient([resp(learning(), learning(topic_key="t2"))]),
+              state_dir, make_cfg(tmp_path))
+    assert res == CaptureResult(0, 0, 0, 0, "store_error")
+    assert read_state(state_dir)["cursor"] == 0
+
+
+def test_rerun_after_store_recovers_is_idempotent(tmp_path, state_dir):
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    cfg = make_cfg(tmp_path)
+    store = _SwitchStore(broken_topics={"bad"})
+    items = [learning(topic_key="bad"), learning(topic_key="good")]
+    client = StubModelClient([resp(*items), resp(*items)])
+    assert run(path, store, client, state_dir, cfg).skipped_reason == "store_error"
+    [good] = store.find_session_entries(SID)
+    store.broken_topics = set()  # store recovers
+    res = run(path, store, client, state_dir, cfg, mode="precompact", now=NOW + 1)
+    assert res == CaptureResult(created=1, updated=1, held=0, retracted=0, skipped_reason=None)
+    assert "too many open files" in client.prompts[1]  # same chunk re-read
+    by_key = {e.topic_key: e for e in store.find_session_entries(SID)}
+    assert sorted(by_key) == ["bad", "good"]  # no duplicates
+    assert by_key["good"].id == good.id
+    assert read_state(state_dir)["cursor"] == path.stat().st_size
+
+
+def test_permanently_failing_store_bounded_by_call_cap(tmp_path, state_dir):
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    cfg = make_cfg(tmp_path, max_calls_per_session=2)
+    store = _SwitchStore(broken_topics=None)
+    client = StubModelClient([resp(learning())] * 5)
+    reasons = [run(path, store, client, state_dir, cfg, mode="precompact", now=NOW + i).skipped_reason
+               for i in range(4)]
+    assert reasons == ["store_error", "store_error", "call_cap", "call_cap"]
+    assert len(client.prompts) == 2
+    assert read_state(state_dir) == {"cursor": 0, "last_run": NOW + 1, "calls": 2}
+
+
+def test_failed_retraction_is_store_error_and_retried(tmp_path, state_dir):
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    cfg = make_cfg(tmp_path)
+    store = _SwitchStore(broken_topics=set(), fail_status=True)
+    client = StubModelClient([resp(learning()), resp(retract=["export-file-handle-leak"]),
+                              resp(retract=["export-file-handle-leak"])])
+    run(path, store, client, state_dir, cfg)
+    size1 = read_state(state_dir)["cursor"]
+    append(path, line("user", "Wrapping up; the first theory was wrong."))
+    res = run(path, store, client, state_dir, cfg, mode="final", now=NOW + 1)
+    assert res == CaptureResult(0, 0, 0, 0, "store_error")
+    assert read_state(state_dir)["cursor"] == size1
+    store.fail_status = False
+    res = run(path, store, client, state_dir, cfg, mode="final", now=NOW + 2)
+    assert res == CaptureResult(0, 0, 0, 1, None)
+    assert store.find_session_entries(SID)[0].status == Status.STALE
+    assert read_state(state_dir)["cursor"] == path.stat().st_size
 
 
 def test_store_lookup_failure_is_store_error(tmp_path, state_dir):

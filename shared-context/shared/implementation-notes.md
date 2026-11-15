@@ -99,3 +99,8 @@
 - Existing entries passed to the extractor: this session's entries sorted by (created, id) descending, capped at `MAX_EXISTING` (100, from extract). Older ones beyond 100 are not shown to the model, so a learning about such a topic may get a new topic_key and create a new entry instead of updating.
 - Logging never includes transcript text, entry bodies, titles, topic keys or exception messages (exception type only).
 - For Task 9: two background runs for the same session can race on the state file (no lock); last writer wins, which may re-process a chunk (updates, not duplicates) or count one call too few. Capture does not commit or push; hooks do that after `run_capture`.
+
+### Task 7 fix round 1 (review finding: failed writes lost the chunk)
+- If any entry write or retraction (`set_status`) raises, the other entries are still processed, but the cursor is NOT advanced and the result has `skipped_reason="store_error"`. The counts (`created`/`updated`/`held`/`retracted`) still report what succeeded, so `skipped_reason` is no longer always paired with zero counts. `calls` and `last_run` are saved.
+- Retry semantics: the next run re-extracts the same chunk. Entries already written on the failed run are found by `find_session_entries` and updated by topic_key, so the retry creates no duplicates (it relies on the model reusing the topic_key, which the prompt asks for, since the existing entries are shown to it). Every retry is a real model call and increments `calls`, so a permanently failing store is bounded by `max_calls_per_session`, after which runs return `call_cap` and the chunk stays unprocessed.
+- Throttle still applies to incremental retries (last_run is set on the failed run).

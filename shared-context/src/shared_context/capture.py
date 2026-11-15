@@ -386,6 +386,7 @@ def _run(session_id, transcript_path, mode, store, client, rules, state_dir, cfg
     created_at = datetime.fromtimestamp(now, UTC).isoformat()
     author = resolve_author() if learnings else "unknown"
     res = CaptureResult(0, 0, 0, 0, None)
+    store_failed = False
     for item in learnings:
         try:
             scrubber = _Scrubber(rules)
@@ -395,6 +396,7 @@ def _run(session_id, transcript_path, mode, store, client, rules, state_dir, cfg
             store.write_entry(entry)
         except Exception as exc:
             log.warning("could not write captured entry: %s", type(exc).__name__)
+            store_failed = True
             continue
         by_topic[topic_key] = entry
         if existing:
@@ -418,9 +420,19 @@ def _run(session_id, transcript_path, mode, store, client, rules, state_dir, cfg
             store.set_status(target.id, Status.STALE, RETRACT_REASON)
         except Exception as exc:
             log.warning("could not retract entry %s: %s", target.id, type(exc).__name__)
+            store_failed = True
             continue
         res.retracted += 1
 
+    if store_failed:
+        # Keep the cursor so the whole chunk is re-extracted next run; entries that were
+        # written now are updated by topic_key then, so the retry creates no duplicates.
+        # The call counter was already incremented, so the call cap bounds the retries.
+        _save_state(spath, state)
+        res.skipped_reason = "store_error"
+        log.warning("capture %s: store failures; chunk will be retried (created=%d updated=%d)",
+                    mode, res.created, res.updated)
+        return res
     state["cursor"] = chunk.end
     _save_state(spath, state)  # after the writes: a crash re-runs the chunk, which updates by topic
     log.info("capture %s: created=%d updated=%d held=%d retracted=%d",
