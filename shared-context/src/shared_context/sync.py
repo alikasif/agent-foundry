@@ -24,6 +24,63 @@ _MAX_PUSH_ATTEMPTS = 3
 _FALLBACK_IDENTITY = ("-c", "user.name=shared-context", "-c", "user.email=shared-context@localhost")
 
 
+MAX_OUTPUT_BYTES = 1_000_000
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Best effort: kill `proc` and its descendants (git's remote helpers). Never raises."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        else:
+            os.killpg(proc.pid, 9)  # the child leads its own session/group
+    except Exception:  # noqa: BLE001
+        pass
+    with contextlib.suppress(Exception):
+        proc.kill()
+
+
+def run_command(argv: list[str], cwd: Path, env: dict, timeout: float) -> tuple[int, str]:
+    """Run `argv` (no shell) and return (returncode, stdout+stderr); -1 on spawn error or timeout.
+
+    Output goes to temporary FILES, not pipes: a grandchild (e.g. git-remote-https
+    or ssh) that inherits the output handle can then never keep us waiting after
+    the child exits or is killed, so `timeout` holds. On timeout the whole process
+    tree is killed. Never raises.
+    """
+    try:
+        with tempfile.TemporaryFile() as out_f:
+            kwargs: dict = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out_f,
+                                stderr=subprocess.STDOUT)
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+            try:
+                proc = subprocess.Popen(argv, **kwargs)
+            except (OSError, ValueError) as exc:
+                return -1, f"{type(exc).__name__}: could not start {argv[0] if argv else ''}"
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=2)
+                rc = -1
+            out_f.seek(0)
+            data = out_f.read(MAX_OUTPUT_BYTES)
+        text = data.decode("utf-8", "replace")
+        if rc == -1:
+            text = f"timed out after {timeout}s\n{text}"
+        return rc, text
+    except Exception as exc:  # noqa: BLE001 - sync must never break a session
+        return -1, f"{type(exc).__name__}"
+
+
 class StoreSync:
     def __init__(
         self,
@@ -45,25 +102,12 @@ class StoreSync:
     def _run(self, *args: str) -> tuple[int, str]:
         """Run git in the store repo. Returns (returncode, combined output); -1 on spawn error/timeout."""
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_EDITOR": "true"}
-        try:
-            proc = subprocess.run(
-                ["git", *args],
-                cwd=self.repo,
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self._timeout,
-                stdin=subprocess.DEVNULL,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("git %s failed to run: %s", args[0] if args else "", exc)
-            return -1, str(exc)
-        out = (proc.stdout or "") + (proc.stderr or "")
-        if proc.returncode != 0:
-            log.warning("git %s exited %d: %s", args[0] if args else "", proc.returncode, out.strip())
-        return proc.returncode, out
+        rc, out = run_command(["git", *args], self.repo, env, self._timeout)
+        if rc == -1:
+            log.warning("git %s failed to run: %s", args[0] if args else "", out.strip())
+        elif rc != 0:
+            log.warning("git %s exited %d: %s", args[0] if args else "", rc, out.strip())
+        return rc, out
 
     def _git(self, *args: str) -> tuple[int, str]:
         """Like _run, but with a local-only fallback identity when none is configured."""
@@ -75,13 +119,7 @@ class StoreSync:
 
     def _quiet_rc(self, *args: str) -> int:
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        try:
-            return subprocess.run(
-                ["git", *args], cwd=self.repo, env=env, capture_output=True,
-                timeout=self._timeout, stdin=subprocess.DEVNULL,
-            ).returncode
-        except (OSError, subprocess.SubprocessError):
-            return -1
+        return run_command(["git", *args], self.repo, env, self._timeout)[0]
 
     def _branch(self) -> str | None:
         rc, out = self._run("rev-parse", "--abbrev-ref", "HEAD")

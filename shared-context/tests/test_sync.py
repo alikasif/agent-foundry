@@ -194,3 +194,68 @@ def test_no_store_dirs_and_unrelated_staged_commits_nothing(world):
     assert git(alex, "rev-parse", "HEAD") == before
     assert git(alex, "diff", "--cached", "--name-only").split() == ["config.yaml"]
     assert not (world["alex_sync"].state_dir / "queue.json").exists()
+
+
+# ---- timeouts must hold even when a grandchild keeps the child's output open ----
+
+_GRANDCHILD = "import time; time.sleep(8)"
+
+
+def _spawner_script(child_sleep: float) -> str:
+    # Child: start a long-lived grandchild that inherits stdout/stderr, print its
+    # pid, then either exit at once or hang itself.
+    return (
+        "import subprocess, sys, time\n"
+        f"p = subprocess.Popen([sys.executable, '-c', {_GRANDCHILD!r}])\n"
+        "print('grandchild', p.pid, flush=True)\n"
+        f"time.sleep({child_sleep})\n"
+    )
+
+
+def _kill_pid_from(out: str) -> None:
+    import signal
+
+    for token in out.split():
+        if token.isdigit():
+            try:
+                os.kill(int(token), signal.SIGTERM)
+            except OSError:
+                pass
+
+
+def test_run_command_timeout_not_blocked_by_grandchild(tmp_path):
+    import sys
+    import time
+
+    from shared_context.sync import run_command
+
+    t0 = time.monotonic()
+    rc, out = run_command([sys.executable, "-c", _spawner_script(30)], cwd=tmp_path,
+                          env=dict(os.environ), timeout=1.5)
+    elapsed = time.monotonic() - t0
+    _kill_pid_from(out)
+    assert rc == -1
+    assert elapsed < 4.5, elapsed
+
+
+def test_run_command_child_exit_not_blocked_by_grandchild(tmp_path):
+    import sys
+    import time
+
+    from shared_context.sync import run_command
+
+    t0 = time.monotonic()
+    rc, out = run_command([sys.executable, "-c", _spawner_script(0)], cwd=tmp_path,
+                          env=dict(os.environ), timeout=20)
+    elapsed = time.monotonic() - t0
+    _kill_pid_from(out)
+    assert rc == 0
+    assert "grandchild" in out
+    assert elapsed < 4.5, elapsed
+
+
+def test_run_command_missing_executable_never_raises(tmp_path):
+    from shared_context.sync import run_command
+
+    rc, _ = run_command(["definitely-not-a-real-binary-xyz"], cwd=tmp_path, env=dict(os.environ), timeout=5)
+    assert rc == -1

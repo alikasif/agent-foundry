@@ -362,6 +362,79 @@ def test_prompt_hook_skips_pull_when_store_lock_held(tmp_path):
     assert sync.calls == []
 
 
+def test_hanging_pull_bounded_by_deadline(tmp_path, monkeypatch):
+    """A pull that hangs must not delay the prompt; recall uses the local store."""
+    import threading
+
+    monkeypatch.setattr(hooks, "PULL_DEADLINE_S", 0.5)
+    release = threading.Event()
+
+    class HangingSync(FakeSync):
+        def pull(self, force=False):
+            self.calls.append("pull")
+            release.wait(10)
+            return True
+
+    store = mem_store(make_entry("E1"))
+    sync = HangingSync()
+    t0 = time.monotonic()
+    rc, out, _ = run_main("prompt-submit", prompt_payload(), tmp_path, store=store, sync=sync)
+    elapsed = time.monotonic() - t0
+    try:
+        assert rc == 0
+        assert elapsed < 3, elapsed
+        assert "E1" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert store.refreshes == 0  # an abandoned pull never touches the store
+    finally:
+        release.set()
+        for t in threading.enumerate():
+            if t.name == hooks.PULL_THREAD_NAME:
+                t.join(5)
+    assert store.refreshes == 0  # not even after the abandoned pull finishes
+    assert "deadline" in log_text(tmp_path)
+
+
+def test_prompt_pull_lock_uses_short_ttl(tmp_path):
+    lock = tmp_path / "state" / "locks" / "store.lock"
+    seen = {}
+
+    class InspectingSync(FakeSync):
+        def pull(self, force=False):
+            seen["lock"] = json.loads(lock.read_text(encoding="utf-8"))
+            return False
+
+    run_main("prompt-submit", prompt_payload(), tmp_path, store=mem_store(make_entry("E1")),
+             sync=InspectingSync())
+    assert seen["lock"]["ttl"] == hooks.PULL_LOCK_TTL_S <= 60
+    assert not lock.exists()  # released after the pull
+
+
+def test_worker_takes_over_orphaned_prompt_lock(tmp_path):
+    """The host killed a prompt hook mid-pull: its lock must not starve workers for long."""
+    state = tmp_path / "state"
+    lock = state / "locks" / "store.lock"
+    assert hooks.acquire_lock(lock, time.time(), ttl_s=hooks.PULL_LOCK_TTL_S)
+    old = time.time() - hooks.PULL_LOCK_TTL_S - 5
+    os.utime(lock, (old, old))
+    assert hooks.PULL_LOCK_TTL_S < hooks.STORE_LOCK_WAIT_S < hooks.LOCK_STALE_S
+    transcript = write_transcript(tmp_path / "t.jsonl", "content")
+    sync = FakeSync()
+    hooks.worker_main("incremental", SID, str(transcript), cfg=Config(store_path=tmp_path / "s"),
+                      state_dir=state, client=StubModelClient([resp(learning())]),
+                      store_factory=lambda c, s: mem_store(),
+                      sync_factory=lambda c, s, now, git_timeout_s: sync, now=lambda: NOW, sleep=boom)
+    assert any(isinstance(c, tuple) for c in sync.calls)  # committed without waiting
+    assert sync.calls[-1] == "flush"
+
+
+def test_lock_ttl_in_file_overrides_default_threshold(tmp_path):
+    lock = tmp_path / "l.lock"
+    now = time.time()
+    assert hooks.acquire_lock(lock, now, ttl_s=30)
+    assert not hooks.acquire_lock(lock, now + 20)
+    assert hooks.acquire_lock(lock, now + 40)  # 600 s default ignored: the holder said 30
+
+
 def test_repo_name_best_effort(tmp_path, world):
     assert hooks.repo_name(None) is None
     assert hooks.repo_name(12) is None

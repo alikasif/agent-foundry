@@ -38,6 +38,10 @@ from typing import Any, TextIO
 from shared_context.config import Config, index_path, resolve_state_dir
 
 log = logging.getLogger("shared_context.hooks")  # fixed name: also correct under `python -m`
+# Without any handler, logging's last-resort handler would print warnings to the
+# host's stderr (e.g. from an abandoned pull thread after the hook's file handler
+# was removed).
+logging.getLogger("shared_context").addHandler(logging.NullHandler())
 
 GUARD_ENV = "SHARED_CONTEXT_CAPTURE"
 PROMPT_EVENT = "prompt-submit"
@@ -56,6 +60,9 @@ HOOK_TIMEOUTS = {"prompt-submit": 30, "after-turn": 30, "session-end": 10, "pre-
 HOOK_MODULE = "shared_context.hooks"
 
 PULL_GIT_TIMEOUT_S = 3  # per git call in the prompt hook; keeps an unreachable remote cheap
+PULL_DEADLINE_S = 5.0  # wall clock for the whole prompt-hook sync step (defence in depth)
+PULL_LOCK_TTL_S = 45  # store.lock held by a prompt hook is stale after this (host may kill us)
+PULL_THREAD_NAME = "shared-context-pull"
 WORKER_GIT_TIMEOUT_S = 30
 LOCK_STALE_S = 600
 STORE_LOCK_WAIT_S = 60
@@ -140,14 +147,25 @@ def _hook_logging(state_dir: Path) -> Iterator[None]:
 
 # -------------------------------------------------------------------- locks
 
-def acquire_lock(path: Path, now: float, stale_s: float = LOCK_STALE_S) -> str | None:
+def _read_lock(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def acquire_lock(path: Path, now: float, stale_s: float = LOCK_STALE_S, *, ttl_s: float | None = None) -> str | None:
     """Atomically create `path`. Returns an owner token, or None if held.
 
-    A lock whose mtime is older than `stale_s` (a crashed worker) is taken over.
+    The holder records its own `ttl` in the file (default `stale_s`). A lock older
+    (by mtime) than the holder's ttl is stale (a crashed or killed process) and
+    is taken over; if the file has no readable ttl, `stale_s` applies.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    ttl = float(ttl_s if ttl_s is not None else stale_s)
     for _ in range(2):
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -156,14 +174,16 @@ def acquire_lock(path: Path, now: float, stale_s: float = LOCK_STALE_S) -> str |
                 age = now - path.stat().st_mtime
             except FileNotFoundError:
                 continue  # released meanwhile; try again
-            if age <= stale_s:
+            held_ttl = _read_lock(path).get("ttl")
+            limit = float(held_ttl) if isinstance(held_ttl, (int, float)) and held_ttl > 0 else stale_s
+            if age <= limit:
                 return None
             log.info("taking over a stale lock (%ds old)", int(age))
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
             continue
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(token)
+            json.dump({"token": token, "ttl": ttl}, fh)
         return token
     return None
 
@@ -172,7 +192,7 @@ def release_lock(path: Path, token: str | None = None) -> None:
     """Remove the lock; with `token`, only if we still own it."""
     path = Path(path)
     try:
-        if token is not None and path.read_text(encoding="utf-8") != token:
+        if token is not None and _read_lock(path).get("token") != token:
             return
         path.unlink()
     except (FileNotFoundError, OSError):
@@ -316,31 +336,54 @@ def _save_seen(path: Path, ids: set[str]) -> None:
         log.warning("could not save injected ids: %s", type(exc).__name__)
 
 
-def _pull_step(store: Any, cfg: Config, state_dir: Path, now: Callable[[], float],
-               sync_factory: SyncFactory) -> None:
+def _sync_in_thread(cfg: Config, state_dir: Path, now: Callable[[], float],
+                    sync_factory: SyncFactory, result: dict) -> None:
+    """Pull (and flush the queue if the remote answered). Never touches the store."""
     lock = state_dir / "locks" / "store.lock"
-    token = acquire_lock(lock, time.time())
+    try:
+        token = acquire_lock(lock, time.time(), ttl_s=PULL_LOCK_TTL_S)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("store lock failed: %s", type(exc).__name__)
+        return
     if not token:
         log.info("store repo busy (a capture worker is syncing); pull skipped")
         return
     try:
         sync = sync_factory(cfg, state_dir, now, PULL_GIT_TIMEOUT_S)
-        try:
-            pulled = sync.pull()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("pull failed: %s", type(exc).__name__)
-            return
-        if pulled:
-            store.refresh()
+        result["pulled"] = bool(sync.pull())
+        if result["pulled"]:
             # The remote was just reachable: retry queued pushes now. Offline, the
             # background worker retries instead, so the prompt is never delayed.
             sync.flush_queue()
-    except StoreNotReady:
-        raise
     except Exception as exc:  # noqa: BLE001 - recall still runs on the local copy
         log.warning("sync step failed: %s", type(exc).__name__)
     finally:
         release_lock(lock, token)
+
+
+def _pull_step(store: Any, cfg: Config, state_dir: Path, now: Callable[[], float],
+               sync_factory: SyncFactory) -> None:
+    """Sync step bounded by a wall-clock deadline (PULL_DEADLINE_S).
+
+    The git work runs in a daemon thread. If it misses the deadline it is
+    abandoned: recall continues on the local store, the store is NOT refreshed
+    (the thread never touches the store; the caller refreshes only after a pull
+    that finished in time, so the index is never rebuilt under a running search),
+    and the thread dies with the process. Its store.lock then goes stale after
+    PULL_LOCK_TTL_S, so workers are delayed at most that long.
+    """
+    import threading
+
+    result: dict = {}
+    thread = threading.Thread(target=_sync_in_thread, name=PULL_THREAD_NAME, daemon=True,
+                              args=(cfg, state_dir, now, sync_factory, result))
+    thread.start()
+    thread.join(PULL_DEADLINE_S)
+    if thread.is_alive():
+        log.warning("pull exceeded the %.1fs deadline; using the local store", PULL_DEADLINE_S)
+        return
+    if result.get("pulled"):
+        store.refresh()
 
 
 def _prompt(payload: object, cfg: Config | None, state_dir: Path, out: TextIO, now: Callable[[], float],
