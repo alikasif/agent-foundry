@@ -15,10 +15,9 @@ _NOT_ALREADY = r"(?!\[REDACTED\])"
 # Whole-match credential patterns.
 _WHOLE = [
     re.compile(
-        r"-----BEGIN [A-Z ]{0,30}PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z ]{0,30}PRIVATE KEY(?: BLOCK)?-----",
+        r"-----BEGIN [A-Z ]{0,30}PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]{0,30}PRIVATE KEY(?: BLOCK)?-----|\Z)",
         re.S,
     ),
-    re.compile(r"-----BEGIN [A-Z ]{0,30}PRIVATE KEY(?: BLOCK)?-----.*", re.S),  # unterminated
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}\b"),

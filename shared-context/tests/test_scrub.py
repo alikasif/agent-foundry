@@ -120,7 +120,7 @@ def test_load_rules_rejects_empty_matching_pattern(tmp_path: Path, pattern: str)
 
 @pytest.mark.parametrize(
     "unit",
-    ["a-", "a.", "password ", "token=", 'pass="', "x", "aA1", "://", "Basic ", "0"],
+    ["a-", "a.", "password ", "token=", 'pass="', "x", "aA1", "://", "Basic ", "0", "-----BEGIN PRIVATE KEY-----\n"],
 )
 def test_scrub_is_linear_on_large_input(unit: str) -> None:
     import time
