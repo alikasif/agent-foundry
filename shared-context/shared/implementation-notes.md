@@ -214,3 +214,8 @@ Sources: ctx7 `/websites/code_claude` (pages code.claude.com/docs/en/hooks and h
 - Windows: `os.replace`/`os.unlink` in the store retry `PermissionError` up to 5 times with 50/100/150/200 ms sleeps (about 0.5 s worst case), then re-raise.
 - `load_config`: integer keys must be real ints (bools and quoted numbers rejected with ValueError naming the key); `store_path` must be a string; `~` is expanded in `store_path` from the file and from `SHARED_CONTEXT_STORE`. Decision: wrong types raise rather than being coerced, so the problem is visible (the CLI still reports it as "not configured" and hooks log `ValueError`; a clearer CLI message was not added to keep scope).
 - Hooks expand `~` in the payload's `transcript_path` before spawning the worker.
+
+### Stage 3: relevance floor (I6)
+- New `store/relevance.py`, used by BOTH `GitStore` and `InMemoryStore` (their duplicated `_tokens`/scoring helpers are gone): content tokens are 3+ characters and not in a ~150-word English stop list; a hit needs at least 2 matching content tokens, or all of them when the query has 2 or fewer. Score = matched / query content tokens, plus 1.0 repo boost (unchanged). The FTS candidate query uses content tokens only.
+- Tradeoff: tokens under 3 characters (`db`, `ci`, `id`) no longer match on their own; a query must share real words with an entry. Stop-word list is English only.
+- Contract tests added to `StoreContract` (run for both stores); the strict xfail `test_unrelated_prompt_with_only_stopwords_injects_nothing` now passes normally; the recall top-3 criterion test is unchanged and green.

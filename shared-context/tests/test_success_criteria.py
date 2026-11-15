@@ -193,8 +193,6 @@ def test_recall_top3_on_similar_task(world):
     assert unrelated.rc == 0 and unrelated.stdout == "" and unrelated.injected_ids == []
 
 
-@pytest.mark.xfail(strict=True, reason="known limitation: lexical search has no stop-word list or minimum "
-                   "score, so a prompt sharing only common words ('is', 'a', 'the') injects unrelated entries")
 def test_unrelated_prompt_with_only_stopwords_injects_nothing(world):
     _alex, sam, _clock, _ids = _seed_kb(world)
     res = sam.prompt("what is a good name for a cat", "sam-cat")

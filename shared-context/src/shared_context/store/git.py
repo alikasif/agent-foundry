@@ -21,12 +21,11 @@ from pathlib import Path
 
 from shared_context.config import Config
 from shared_context.models import Entry, Status, dump_entry, load_entry
+from shared_context.store import relevance
 from shared_context.store.base import SearchHit
 
 log = logging.getLogger(__name__)
 
-_REPO_BOOST = 1.0
-_TOKEN = re.compile(r"\w+")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _REPO_EVIDENCE = re.compile(r"^repo:([^@:]+)@([^:]+):(.+)$")
 _SCHEMA = """
@@ -37,12 +36,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
 """
 
 
-def _tokens(text: str) -> set[str]:
-    return set(_TOKEN.findall(text.lower()))
-
-
-def _doc_text(e: Entry) -> str:
-    return " ".join([e.title, e.topic_key, e.body, *e.applies_to])
+_doc_text = relevance.doc_text
 
 
 def _utcnow() -> datetime:
@@ -245,7 +239,7 @@ class GitStore:
         limit: int = 3,
         include_stale: bool = True,
     ) -> list[SearchHit]:
-        q = _tokens(query)
+        q = relevance.content_tokens(query)
         if not q:
             return []
         match = " OR ".join(f'"{t}"' for t in sorted(q))
@@ -262,12 +256,9 @@ class GitStore:
             e = self._view(e)
             if e.status == Status.STALE and not include_stale:
                 continue
-            overlap = len(q & _tokens(_doc_text(e)))
-            if overlap == 0:
+            score = relevance.score(q, e, repo)
+            if score is None:
                 continue
-            score = overlap / len(q)
-            if repo is not None and repo in e.applies_to:
-                score += _REPO_BOOST
             hits.append(SearchHit(entry=e, score=score))
         hits.sort(key=lambda h: (-h.score, h.entry.id))
         return hits[:limit]

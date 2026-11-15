@@ -2,18 +2,11 @@
 from __future__ import annotations
 
 import copy
-import re
 from collections.abc import Iterator
 
 from shared_context.models import Entry, Status
+from shared_context.store import relevance
 from shared_context.store.base import SearchHit
-
-_REPO_BOOST = 1.0
-_TOKEN = re.compile(r"\w+")
-
-
-def _tokens(text: str) -> set[str]:
-    return set(_TOKEN.findall(text.lower()))
 
 
 class InMemoryStore:
@@ -39,7 +32,7 @@ class InMemoryStore:
         limit: int = 3,
         include_stale: bool = True,
     ) -> list[SearchHit]:
-        q = _tokens(query)
+        q = relevance.content_tokens(query)
         if not q:
             return []
         hits: list[SearchHit] = []
@@ -48,13 +41,9 @@ class InMemoryStore:
                 continue
             if e.status == Status.STALE and not include_stale:
                 continue
-            doc = _tokens(" ".join([e.title, e.topic_key, e.body, *e.applies_to]))
-            overlap = len(q & doc)
-            if overlap == 0:
+            score = relevance.score(q, e, repo)
+            if score is None:
                 continue
-            score = overlap / len(q)
-            if repo is not None and repo in e.applies_to:
-                score += _REPO_BOOST
             hits.append(SearchHit(entry=copy.deepcopy(e), score=score))
         hits.sort(key=lambda h: (-h.score, h.entry.id))
         return hits[:limit]

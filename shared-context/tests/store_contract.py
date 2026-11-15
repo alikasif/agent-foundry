@@ -83,6 +83,23 @@ class StoreContract:
         store.write_entry(make_entry("E1", applies_to=["my-repo"]))
         assert store.search("zebra", repo="my-repo") == []
 
+    # -- relevance floor (final review I6): one shared helper for every store
+    def test_search_stop_words_and_short_tokens_match_nothing(self, store):
+        store.write_entry(make_entry("E1", body="Use exponential backoff for the payment retries in a job."))
+        assert store.search("what is the weather for the trip") == []
+        assert store.search("is a the for in of to") == []
+
+    def test_search_long_query_needs_two_matching_content_tokens(self, store):
+        store.write_entry(make_entry("E1"))
+        assert store.search("payments weather holiday mountain") == []
+        assert [h.entry.id for h in store.search("payments retry weather holiday")] == ["E1"]
+
+    def test_search_short_query_needs_all_content_tokens(self, store):
+        store.write_entry(make_entry("E1"))
+        assert store.search("payments weather") == []
+        assert [h.entry.id for h in store.search("the payments")] == ["E1"]
+        assert [h.entry.id for h in store.search("payments retry")] == ["E1"]
+
     def test_stale_included_by_default_excluded_when_asked(self, store):
         store.write_entry(make_entry("E1", status=Status.STALE, stale_reason="old"))
         store.write_entry(make_entry("E2"))
