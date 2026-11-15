@@ -49,6 +49,10 @@ SECRETS: list[tuple[str, str, str]] = [
     ("passphrase", "passphrase = 'fake horse staple'", "fake horse staple"),
     ("pass_segment", "pass=fakeP4ss", "fakeP4ss"),
     ("pwd_segment", "DB_PWD=fakeP4ssword", "fakeP4ssword"),
+    ("dollar_password_1", "password=$ecret123", "$ecret123"),
+    ("dollar_password_2", "password=$ummer2024", "$ummer2024"),
+    ("dollar_password_quoted", "password='$Hunter2'", "$Hunter2"),
+    ("dollar_lower_braces", "password=${db_pass}", "db_pass"),
 ]
 
 DENYLIST = ["Acme Corp", "Globex"]
@@ -59,6 +63,7 @@ CUSTOMER_TEXT = [
 ]
 
 CLEAN_TEXT = [
+    "password=$DB_PASSWORD", "password=${DB_PASSWORD}",
     "bypass=true", "compass=north", "passport=AB123456", "passthrough=enabled", "keepass=installed",
     "pass=true", "password_policy: strict", "password_hash = bcrypt(pw)", "token_count = len(tokens)",
     "tokenizer=sentencepiece", "secret_name=prod-db-creds", "api_key_env=OPENAI_API_KEY",

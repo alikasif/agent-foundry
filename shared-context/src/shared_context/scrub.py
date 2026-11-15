@@ -45,7 +45,8 @@ _BENIGN_SUFFIX = re.compile(
 _BENIGN_VALUE = re.compile(
     r"(?i)(?:true|false|null|none|nil|yes|no|on|off)"  # literals
     r"|[A-Za-z_][\w.]{0,60}\([\w., ]{0,60}\)"  # simple call: get_password_from_vault()
-    r"|\$\{?[A-Z_][A-Z0-9_]{0,60}\}?"  # env reference: $DB_PASS, ${DB_PASS}
+    # env reference, UPPER_SNAKE only (case-sensitive): $DB_PASS, ${DB_PASS}; $Hunter2 is a password
+    r"|(?-i:\$\{?[A-Z_][A-Z0-9_]{0,60}\}?)"
 )
 
 
