@@ -584,6 +584,57 @@ def test_worker_flushes_queue_on_later_run(tmp_path, world):
     assert not (state / "sync" / "queue.json").exists()
 
 
+def test_worker_publishes_even_when_capture_changed_nothing(tmp_path):
+    """I2: a dirty tree left by MCP confirm or a busy lock earlier is published by any later run."""
+    transcript = write_transcript(tmp_path / "t.jsonl", "content")
+    sync = FakeSync()
+    hooks.worker_main("incremental", SID, str(transcript), cfg=Config(store_path=tmp_path / "s"),
+                      state_dir=tmp_path / "state", client=StubModelClient([resp()]),
+                      store_factory=lambda c, s: mem_store(),
+                      sync_factory=lambda c, s, now, git_timeout_s: sync, now=lambda: NOW)
+    assert [c for c in sync.calls if isinstance(c, tuple)] == [("commit", "shared-context: incremental capture (+0 ~0 -0)")]
+    assert sync.calls[-1] == "flush"
+
+
+def test_publish_store_runs_under_store_lock(tmp_path):
+    state = tmp_path / "state"
+    lock = state / "locks" / "store.lock"
+    seen = []
+
+    class LockCheckingSync(FakeSync):
+        def commit_and_push(self, message):
+            seen.append(lock.exists())
+            return super().commit_and_push(message)
+
+    sync = LockCheckingSync()
+    ok = hooks.publish_store(Config(store_path=tmp_path / "s"), state, "msg", sleep=boom,
+                             sync_factory=lambda c, s, now, t: sync)
+    assert ok is True and seen == [True] and sync.calls == [("commit", "msg")]
+    assert not lock.exists()
+
+
+def test_publish_store_gives_up_when_lock_busy(tmp_path):
+    state = tmp_path / "state"
+    lock = state / "locks" / "store.lock"
+    assert hooks.acquire_lock(lock, time.time())
+    ok = hooks.publish_store(Config(store_path=tmp_path / "s"), state, "msg", wait_s=0,
+                             sleep=lambda s: None, sync_factory=boom)
+    assert ok is False and lock.exists()
+
+
+def test_publish_store_with_real_git_pushes(tmp_path, world):
+    state = tmp_path / "state"
+    store = GitStore(world["alex"], index_path(state))
+    store.write_entry(make_entry("E1"))
+    assert hooks.publish_store(Config(store_path=world["alex"]), state, "cli change", sleep=boom) is True
+    assert remote_files(world["remote"]) == ["entries/E1.md"]
+
+
+def test_gitstore_writes_local_exclude_for_held(tmp_path, world):
+    GitStore(world["alex"], index_path(tmp_path / "state"))
+    assert "/held/" in (world["alex"] / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("mode", ["final", "precompact"])
 def test_worker_final_and_precompact_modes(tmp_path, mode):
     transcript = write_transcript(tmp_path / "t.jsonl", "content")

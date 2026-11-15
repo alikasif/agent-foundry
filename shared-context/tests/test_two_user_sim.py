@@ -155,7 +155,12 @@ def test_held_entry_never_reaches_other_user(world):
     alex.capture("incremental", "alex-s3", transcript, reply(visible, model_hold, secret))
 
     assert len(alex.entry_files("held")) == 2 and len(alex.entry_files("entries")) == 1
-    assert sum(f.startswith("held/") for f in remote_files(remote)) == 2
+    # Ruling R9: held entries stay on the author's machine; nothing held is ever pushed.
+    assert sum(f.startswith("held/") for f in remote_files(remote)) == 0
+    history = git(remote, "log", "--all", "-p", "--format=%H %s")
+    assert "held/" not in git(remote, "log", "--all", "--name-only", "--format=")
+    for marker in ("HOLDMARKER", "SECRETMARKER", "ZEBRA", "QUOKKA", fake_secret):
+        assert marker not in history
     assert fake_secret not in "".join(p.read_text(encoding="utf-8") for p in alex.entry_files("held"))
 
     clock.advance(1)
@@ -171,11 +176,16 @@ def test_held_entry_never_reaches_other_user(world):
     tools = Tools(store, sam.cfg, session_id="sam-mcp", author=lambda: "Sam")
     found = tools.search_learnings("HOLDMARKER SECRETMARKER customer escalation deploy credentials token")
     assert "HOLDMARKER" not in found and "SECRETMARKER" not in found
-    held_ids = [p.stem for p in sam.entry_files("held")]
+    assert sam.entry_files("held") == []  # nothing held arrived on Sam's machine
+    held_ids = [p.stem for p in alex.entry_files("held")]
     assert len(held_ids) == 2
     for entry_id in held_ids:
         assert tools.read_learning(entry_id) == "Learning not found."
         assert tools.confirm_learning(entry_id) == "Learning not found."
+    # ... and on Alex's own machine the MCP tools do not reveal them either
+    alex_tools = Tools(alex.store(), alex.cfg, session_id="alex-mcp", author=lambda: "Alex")
+    for entry_id in held_ids:
+        assert alex_tools.read_learning(entry_id) == "Learning not found."
 
 
 def test_store_unreachable_session_unaffected(world, tmp_path):

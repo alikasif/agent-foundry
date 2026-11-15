@@ -325,13 +325,13 @@ def test_seeded_secrets_and_injection_neutralised(world, tmp_path):
         syn.FAKE_GH_TOKEN, "hunter2-fake-pw"]
     sources = collect_sources(alex, sam, remote)
     # the scan is not vacuous: every source is non-empty and holds a known benign marker
+    # (held entries such as "Seed aws_key" stay on Alex's machine (ruling R9), so Sam's tree and
+    # the remote are checked with a shared entry's marker instead)
     markers = {"store tree": b"Seed aws_key", "hooks.log": b"capture", "sqlite index": b"fts",
-               "state files": b"cursor", "remote history": b"Seed aws_key"}
-    for u in ("Alex", "Sam"):
-        markers[f"{u} store tree"] = b"Seed aws_key"
+               "state files": b"cursor", "remote history": b"INJMARKER"}
     for name, blob in sources.items():
         kind = name.split(" ", 1)[1] if " " in name and name != "remote history" else name
-        marker = markers[kind]
+        marker = b"INJMARKER" if name == "Sam store tree" else markers[kind]
         if name == "Sam hooks.log":
             marker = b"injected"
         if name == "Sam state files":

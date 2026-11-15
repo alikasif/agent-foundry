@@ -286,6 +286,22 @@ def test_held_reject_unretrievable_via_mcp_read_and_search(env):
     assert "No learnings found" in tools.search_learnings("payments retry")
 
 
+def test_cli_publish_uses_shared_locked_helper(tmp_path, monkeypatch):
+    """I2: the CLI publishes through hooks.publish_store (store.lock, commit, rebase, push)."""
+    from shared_context import hooks
+
+    cfg = Config(store_path=tmp_path / "store")
+    calls = []
+    monkeypatch.setenv("SHARED_CONTEXT_STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(hooks, "_load_cfg", lambda c: cfg)
+    monkeypatch.setattr(hooks, "_default_store",
+                        lambda c, s: GitStore(tmp_path / "store", tmp_path / "idx" / "index.db"))
+    monkeypatch.setattr(hooks, "publish_store", lambda c, s, m, **kw: calls.append((c, s, m)) or True)
+    ctx = cli._open_context()
+    assert ctx.publish("shared-context: confirm entry") is True
+    assert calls == [(cfg, tmp_path / "state", "shared-context: confirm entry")]
+
+
 def test_reject_git_store_deletes_file(tmp_path, monkeypatch, capsys):
     store = GitStore(tmp_path / "store", tmp_path / "state" / "index.db", now=lambda: NOW)
     e = Env(store, tmp_path, monkeypatch, capsys)

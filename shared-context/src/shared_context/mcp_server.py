@@ -72,11 +72,13 @@ class Tools:
     """The four tool functions; plain methods so tests call them directly."""
 
     def __init__(self, store: Any, cfg: Config, *, session_id: str | None = None,
-                 author: Callable[[], str] | None = None) -> None:
+                 author: Callable[[], str] | None = None,
+                 publish: Callable[[str], bool] | None = None) -> None:
         self.store = store
         self.cfg = cfg
         self.session_id = session_id or f"mcp-{os.getpid()}-{int(time.time())}"
         self._author = author or _default_author
+        self._publish = publish  # None: no git (tests, in-memory stores)
 
     # ---------------------------------------------------------- helpers
     def _guarded(self, name: str, fn: Callable[[], str]) -> str:
@@ -144,7 +146,17 @@ class Tools:
             if refusal:
                 return refusal
             self.store.set_status(entry.id, Status.CONFIRMED)
-            return f"Confirmed learning {entry.id}."
+            done = f"Confirmed learning {entry.id}."
+            if self._publish is None:
+                return done
+            try:
+                shared = bool(self._publish("shared-context: confirm entry"))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("publish failed: %s", type(exc).__name__)
+                shared = False
+            if shared:
+                return done + " Shared with the team."
+            return done + " Saved locally; it will be shared with the next sync."
 
         return self._guarded("confirm_learning", run)
 
@@ -160,15 +172,31 @@ class Tools:
         return self._guarded("feedback_learning", run)
 
 
+PUBLISH_LOCK_WAIT_S = 5  # a tool call must not block for the worker's 60 s
+PUBLISH_GIT_TIMEOUT_S = 15
+
+
+def default_publisher(cfg: Config, state_dir: Path) -> Callable[[str], bool]:
+    """Publish through the same locked helper as the CLI and the worker, with short waits."""
+    def publish(message: str) -> bool:
+        from shared_context import hooks
+
+        return hooks.publish_store(cfg, state_dir, message, wait_s=PUBLISH_LOCK_WAIT_S,
+                                   git_timeout_s=PUBLISH_GIT_TIMEOUT_S)
+
+    return publish
+
+
 def build_server(store: Any, cfg: Config, *, session_id: str | None = None,
-                 author: Callable[[], str] | None = None, guard: bool | None = None):
+                 author: Callable[[], str] | None = None, guard: bool | None = None,
+                 publish: Callable[[str], bool] | None = None):
     """Thin registration of the tool functions; ``guard`` defaults to the env check."""
     from mcp.server import MCPServer
 
     server = MCPServer("shared-context")
     if guard if guard is not None else guard_active():
         return server
-    tools = Tools(store, cfg, session_id=session_id, author=author)
+    tools = Tools(store, cfg, session_id=session_id, author=author, publish=publish)
     server.tool(name="search_learnings", description=SEARCH_DESC)(tools.search_learnings)
     server.tool(name="read_learning", description=READ_DESC)(tools.read_learning)
     server.tool(name="confirm_learning", description=CONFIRM_DESC)(tools.confirm_learning)
@@ -188,7 +216,7 @@ def make_default_server(state_dir: Path | None = None):
             store = _default_store(cfg, state)
         except Exception as exc:  # noqa: BLE001 - never crash the host's connection
             log.warning("store unavailable: %s", type(exc).__name__)
-    return build_server(store, cfg)
+    return build_server(store, cfg, publish=default_publisher(cfg, state) if store is not None else None)
 
 
 def main() -> int:

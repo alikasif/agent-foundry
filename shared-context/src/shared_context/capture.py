@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -341,8 +342,10 @@ def _run(session_id, transcript_path, mode, store, client, rules, state_dir, cfg
     spath = _state_path(state_dir, session_id)
     state = _load_state(spath)
 
-    if (mode == "incremental" and state["last_run"] is not None
-            and now - state["last_run"] < cfg.capture_min_interval_s):
+    last = state["last_run"]
+    # A future (clock skew) or non-finite last_run counts as expired, never as "throttled forever".
+    if (mode == "incremental" and last is not None and math.isfinite(last)
+            and 0 <= now - last < cfg.capture_min_interval_s):
         return _skip("throttled")
     if state["calls"] >= cfg.max_calls_per_session:
         log.info("capture call cap (%d) reached for this session", cfg.max_calls_per_session)

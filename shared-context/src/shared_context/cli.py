@@ -214,8 +214,6 @@ def clean(text: object, limit: int = MAX_TITLE) -> str:
 
 def _open_context() -> Context:
     """Open the configured GitStore; raises hooks.StoreNotReady when there is no clone."""
-    import time
-
     from shared_context.capture import resolve_author
     from shared_context.config import resolve_state_dir
 
@@ -224,8 +222,9 @@ def _open_context() -> Context:
     store = hooks._default_store(cfg, state)
 
     def publish(message: str) -> bool:
+        # Same path as the worker and MCP confirm: store.lock, recover, commit entries/, rebase, push.
         try:
-            return bool(hooks._default_sync(cfg, state, time.time, 30).commit_and_push(message))
+            return bool(hooks.publish_store(cfg, state, message))
         except Exception:  # noqa: BLE001 - the local change is already made
             return False
 

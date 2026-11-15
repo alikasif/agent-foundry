@@ -253,3 +253,40 @@ def test_import_prints_nothing_to_stdout():
         capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
     )
     assert proc.returncode == 0 and proc.stdout == ""
+
+
+# ---- final review I2: MCP confirm publishes (under store.lock, via the shared helper) ----
+
+def test_confirm_publishes_when_publisher_given(cfg):
+    sent = []
+    store = _store(make_entry("E1", author="alice"))
+    t = Tools(store, cfg, session_id="s", author=lambda: "me", publish=lambda m: sent.append(m) or True)
+    out = t.confirm_learning("E1")
+    assert out.startswith("Confirmed learning E1.") and "shared" in out.lower()
+    assert len(sent) == 1 and store.get_entry("E1").status == Status.CONFIRMED
+
+
+def test_confirm_publish_failure_says_saved_locally(cfg):
+    store = _store(make_entry("E1", author="alice"))
+    t = Tools(store, cfg, session_id="s", author=lambda: "me", publish=lambda m: False)
+    out = t.confirm_learning("E1")
+    assert out.startswith("Confirmed learning E1.") and "locally" in out
+    assert store.get_entry("E1").status == Status.CONFIRMED
+
+
+def test_refused_confirm_does_not_publish(cfg):
+    t = Tools(_store(make_entry("E1", author="me")), cfg, session_id="s", author=lambda: "me",
+              publish=lambda m: pytest.fail("must not publish"))
+    assert t.confirm_learning("E1").startswith("Refused")
+
+
+def test_default_publisher_uses_shared_helper_with_short_wait(cfg, tmp_path, monkeypatch):
+    import shared_context.hooks as hooks
+
+    calls = []
+    monkeypatch.setattr(hooks, "publish_store",
+                        lambda c, s, m, **kw: calls.append((c, s, m, kw)) or True)
+    publish = mcp_server.default_publisher(cfg, tmp_path / "state")
+    assert publish("shared-context: confirm entry") is True
+    (c, s, m, kw) = calls[0]
+    assert c is cfg and s == tmp_path / "state" and kw["wait_s"] <= 10

@@ -224,6 +224,19 @@ def test_throttled_run_skipped(tmp_path, state_dir):
     assert res.skipped_reason is None and len(client.prompts) == 3
 
 
+@pytest.mark.parametrize("last_run", ["future", "nan", "inf"])
+def test_throttle_treats_future_or_bad_last_run_as_expired(tmp_path, state_dir, last_run):
+    """Clock skew: a last_run in the future (or non-finite) must not block capture forever."""
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    value = {"future": NOW + 10_000, "nan": float("nan"), "inf": float("inf")}[last_run]
+    state_dir.mkdir(parents=True)
+    (state_dir / f"{SID}.json").write_text(json.dumps({"cursor": 0, "last_run": value, "calls": 0}),
+                                           encoding="utf-8")
+    client = StubModelClient([resp()])
+    res = run(path, InMemoryStore(), client, state_dir, make_cfg(tmp_path))
+    assert res.skipped_reason is None and len(client.prompts) == 1
+
+
 def test_final_retracts_wrong_entry(tmp_path, state_dir, store):
     src = (FIXTURES / "dead_end.jsonl").read_text(encoding="utf-8").splitlines(keepends=True)
     path = tmp_path / "t.jsonl"

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -121,24 +123,290 @@ def test_no_changes_makes_no_commit(world):
     assert git(world["alex"], "rev-parse", "HEAD") == before
 
 
-def test_only_entries_and_held_are_staged(world):
+def test_only_entries_are_staged_held_is_local(world):
+    """Ruling R9: held/ is local only (excluded via .git/info/exclude) and never committed."""
     (world["alex"] / "entries" / "e1.md").write_text("x\n", encoding="utf-8")
     (world["alex"] / "held" / "h1.md").write_text("y\n", encoding="utf-8")
     (world["alex"] / "stray.txt").write_text("z\n", encoding="utf-8")
     assert world["alex_sync"].commit_and_push("add") is True
     files = git(world["alex"], "show", "--name-only", "--format=", "HEAD").split()
-    assert sorted(files) == ["entries/e1.md", "held/h1.md"]
+    assert files == ["entries/e1.md"]
+    assert "held/" in (world["alex"] / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    status = git(world["alex"], "status", "--porcelain", "--untracked-files=all")
+    assert "held" not in status
+    assert "held/" not in git(world["remote"], "log", "--all", "--name-only", "--format=")
 
 
-def test_conflict_is_aborted_and_queued(world):
-    (world["sam"] / "entries" / "c.md").write_text("sam\n", encoding="utf-8")
-    assert world["sam_sync"].commit_and_push("sam") is True
-    (world["alex"] / "entries" / "c.md").write_text("alex\n", encoding="utf-8")
+def test_exclude_written_once(world):
+    StoreSync(world["alex"], world["tmp"] / "s2", 0)
+    StoreSync(world["alex"], world["tmp"] / "s3", 0)
+    text = (world["alex"] / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert text.count("/held/") == 1
+
+
+def test_conflict_outside_entries_is_aborted_and_queued(world):
+    for name, who in (("sam", "Sam"), ("alex", "Alex")):
+        (world[name] / "README.md").write_text(f"{who}\n", encoding="utf-8")
+        git(world[name], "commit", "-q", "-am", f"{who} readme")
+    git(world["sam"], "push", "-q", "origin", "main")
+    (world["alex"] / "entries" / "a.md").write_text("alex\n", encoding="utf-8")
     assert world["alex_sync"].commit_and_push("alex") is False
     assert not (world["alex"] / ".git" / "rebase-merge").exists()
     assert not (world["alex"] / ".git" / "rebase-apply").exists()
     queue = json.loads((world["alex_sync"].state_dir / "queue.json").read_text(encoding="utf-8"))
     assert len(queue) == 1
+
+
+# ---- final review I2-I5: real-git regression tests for the reviewer's probes ----
+
+def _entry_text(entry_id: str, status: str = "unverified", title: str = "first entry", body: str = "b\n") -> str:
+    return (f"---\nid: {entry_id}\ntitle: {title}\nkind: gotcha\nstatus: {status}\nauthor: alex\n"
+            f"created: '2026-11-14T00:00:00+00:00'\nsource_session: s1\ntopic_key: t-{entry_id}\n"
+            f"applies_to: []\nevidence: []\nhold_reason: null\nstale_reason: null\n---\n{body}")
+
+
+def _set_status(path: Path, status: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    path.write_text(re.sub(r"(?m)^status: \w+$", f"status: {status}", text), encoding="utf-8")
+
+
+def _remote_file(world, rel: str) -> str | None:
+    try:
+        return git(world["remote"], "show", f"main:{rel}")
+    except subprocess.CalledProcessError:
+        return None
+
+
+def _in_sync(repo: Path) -> bool:
+    return git(repo, "rev-parse", "HEAD") == git(repo, "rev-parse", "origin/main")
+
+
+def _no_markers_anywhere(world) -> None:
+    history = git(world["remote"], "log", "--all", "-p", "--format=")
+    for marker in ("<<<<<<<", ">>>>>>>", "\n=======\n"):
+        assert marker not in history
+
+
+def _shared_entry(world, eid: str = "E1") -> tuple[Path, Path]:
+    a = world["alex"] / "entries" / f"{eid}.md"
+    a.write_text(_entry_text(eid), encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("c1") is True
+    assert world["sam_sync"].pull(force=True) is True
+    s = world["sam"] / "entries" / f"{eid}.md"
+    assert s.is_file()
+    return a, s
+
+
+def test_probe2_dirty_tree_does_not_block_pull(world):
+    """An uncommitted local change (MCP confirm) is committed before the pull, and pushed by flush."""
+    a, s = _shared_entry(world)
+    _set_status(s, "confirmed")  # Sam's MCP confirm: file changed, nothing committed
+    (world["alex"] / "entries" / "E2.md").write_text(_entry_text("E2", title="second"), encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("c2") is True
+    assert world["sam_sync"].pull(force=True) is True
+    assert (world["sam"] / "entries" / "E2.md").is_file()
+    assert git(world["sam"], "status", "--porcelain") == ""
+    assert world["sam_sync"].flush_queue() is True  # ahead of origin: pushed
+    assert "status: confirmed" in _remote_file(world, "entries/E1.md")
+
+
+def test_flush_queue_pushes_when_ahead_without_queue(world):
+    (world["alex"] / "entries" / "e.md").write_text("x\n", encoding="utf-8")
+    git(world["alex"], "add", "entries/e.md")
+    git(world["alex"], "commit", "-q", "-m", "local only")
+    assert not (world["alex_sync"].state_dir / "queue.json").exists()
+    assert world["alex_sync"].flush_queue() is True
+    assert _remote_file(world, "entries/e.md") == "x"
+
+
+def test_successful_push_clears_stale_queue(world):
+    world["alex_sync"]._enqueue("old")
+    (world["alex"] / "entries" / "e.md").write_text("x\n", encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("now") is True
+    assert not (world["alex_sync"].state_dir / "queue.json").exists()
+
+
+def test_probe3_same_line_status_conflict_stale_wins(world):
+    """Sam confirms and pushes; Alex retracts the same entry: stale wins and nothing wedges."""
+    a, s = _shared_entry(world)
+    _set_status(s, "confirmed")
+    assert world["sam_sync"].commit_and_push("confirm") is True
+    _set_status(a, "stale")
+    assert world["alex_sync"].commit_and_push("retract") is True
+    assert "status: stale" in _remote_file(world, "entries/E1.md")
+    assert _in_sync(world["alex"])
+    # later pushes and pulls keep working
+    (world["alex"] / "entries" / "E3.md").write_text(_entry_text("E3", title="third"), encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("more") is True
+    assert world["alex_sync"].pull(force=True) is True
+    assert world["sam_sync"].pull(force=True) is True
+    assert "status: stale" in s.read_text(encoding="utf-8")
+    assert not (world["alex_sync"].state_dir / "queue.json").exists()
+    _no_markers_anywhere(world)
+
+
+def test_upstream_stale_beats_local_confirm(world):
+    a, s = _shared_entry(world)
+    _set_status(s, "stale")
+    assert world["sam_sync"].commit_and_push("stale") is True
+    _set_status(a, "confirmed")
+    assert world["alex_sync"].commit_and_push("confirm") is True
+    assert "status: stale" in _remote_file(world, "entries/E1.md")
+    assert "status: stale" in a.read_text(encoding="utf-8")
+    _no_markers_anywhere(world)
+
+
+def test_content_conflict_upstream_wins(world):
+    a, s = _shared_entry(world)
+    s.write_text(_entry_text("E1", body="sam's body\n"), encoding="utf-8")
+    assert world["sam_sync"].commit_and_push("sam edit") is True
+    a.write_text(_entry_text("E1", body="alex's body\n"), encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("alex edit") is True
+    assert "sam's body" in _remote_file(world, "entries/E1.md")
+    assert "sam's body" in a.read_text(encoding="utf-8")
+    assert _in_sync(world["alex"]) and git(world["alex"], "status", "--porcelain") == ""
+    _no_markers_anywhere(world)
+
+
+@pytest.mark.parametrize("deleter", ["upstream", "local"])
+def test_modify_delete_conflict_delete_wins(world, deleter):
+    a, s = _shared_entry(world)
+    if deleter == "upstream":
+        s.unlink()  # e.g. Sam's capture moved the entry to held/
+        assert world["sam_sync"].commit_and_push("delete") is True
+        _set_status(a, "confirmed")
+        assert world["alex_sync"].commit_and_push("modify") is True
+    else:
+        _set_status(s, "confirmed")
+        assert world["sam_sync"].commit_and_push("modify") is True
+        a.unlink()
+        assert world["alex_sync"].commit_and_push("delete") is True
+    assert _remote_file(world, "entries/E1.md") is None
+    assert not a.exists()
+    assert _in_sync(world["alex"]) and git(world["alex"], "status", "--porcelain") == ""
+    _no_markers_anywhere(world)
+
+
+def test_autostash_config_is_ignored(world):
+    git(world["sam"], "config", "rebase.autoStash", "true")
+    a, s = _shared_entry(world)
+    _set_status(a, "stale")
+    assert world["alex_sync"].commit_and_push("stale") is True
+    _set_status(s, "confirmed")
+    assert world["sam_sync"].pull(force=True) is True
+    assert "status: stale" in s.read_text(encoding="utf-8")
+    assert git(world["sam"], "stash", "list") == ""
+
+
+def _empty_world(tmp_path: Path, sam_branch: str):
+    remote = tmp_path / "empty.git"
+    remote.mkdir()
+    git(remote, "init", "-q", "--bare", "--initial-branch=main")
+    users = {}
+    for name in ("alex", "sam"):
+        dest = tmp_path / f"e-{name}"
+        git(tmp_path, "-c", "init.defaultBranch=main", "clone", "-q", str(remote), str(dest))
+        git(dest, "config", "user.name", name)
+        git(dest, "config", "user.email", f"{name}@example.com")
+        (dest / "entries").mkdir()
+        users[name] = (dest, StoreSync(dest, tmp_path / f"{name}-st", 0, now=Clock()))
+    git(users["sam"][0], "symbolic-ref", "HEAD", f"refs/heads/{sam_branch}")
+    return remote, users
+
+
+@pytest.mark.parametrize("sam_branch", ["main", "master"])
+def test_empty_remote_clone_can_pull_after_other_user_pushes(tmp_path, sam_branch):
+    """I4: a clone of an empty remote (unborn HEAD) picks up the first push, even if its
+    local default branch name differs."""
+    remote, users = _empty_world(tmp_path, sam_branch)
+    (alex, alex_sync), (sam, sam_sync) = users["alex"], users["sam"]
+    (alex / "entries" / "a.md").write_text("a\n", encoding="utf-8")
+    assert alex_sync.commit_and_push("first") is True
+    assert sam_sync.pull(force=True) is True
+    assert (sam / "entries" / "a.md").is_file()
+    assert git(sam, "symbolic-ref", "--short", "HEAD") == "main"
+    (sam / "entries" / "s.md").write_text("s\n", encoding="utf-8")
+    assert sam_sync.commit_and_push("second") is True
+    assert sorted(git(remote, "ls-tree", "-r", "--name-only", "main").split()) == ["entries/a.md", "entries/s.md"]
+    assert git(remote, "branch", "--format=%(refname:short)").split() == ["main"]
+
+
+def test_empty_remote_unborn_clone_with_local_entry_before_first_push(tmp_path):
+    remote, users = _empty_world(tmp_path, "master")
+    (alex, alex_sync), (sam, sam_sync) = users["alex"], users["sam"]
+    (alex / "entries" / "a.md").write_text("a\n", encoding="utf-8")
+    assert alex_sync.commit_and_push("first") is True
+    (sam / "entries" / "s.md").write_text("s\n", encoding="utf-8")  # written while still unborn
+    assert sam_sync.commit_and_push("sam") is True
+    assert sorted(git(remote, "ls-tree", "-r", "--name-only", "main").split()) == ["entries/a.md", "entries/s.md"]
+    assert git(remote, "branch", "--format=%(refname:short)").split() == ["main"]
+
+
+def test_empty_store_with_nothing_to_push_is_not_an_error(tmp_path):
+    _remote, users = _empty_world(tmp_path, "main")
+    alex, alex_sync = users["alex"]
+    assert alex_sync.commit_and_push("nothing") is True
+    assert alex_sync.flush_queue() is True
+    assert not (alex_sync.state_dir / "queue.json").exists()
+
+
+def test_stale_index_lock_is_removed(world):
+    lock = world["alex"] / ".git" / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    (world["alex"] / "entries" / "e.md").write_text("x\n", encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("after crash") is True
+    assert not lock.exists()
+    assert _remote_file(world, "entries/e.md") == "x"
+
+
+def test_fresh_index_lock_is_left_alone(world):
+    lock = world["alex"] / ".git" / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    (world["alex"] / "entries" / "e.md").write_text("x\n", encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("busy") is False  # another git may be running
+    assert lock.exists()
+    lock.unlink()
+
+
+def test_leftover_rebase_is_aborted_and_sync_continues(world):
+    a, s = _shared_entry(world)
+    _set_status(s, "confirmed")
+    assert world["sam_sync"].commit_and_push("confirm") is True
+    _set_status(a, "stale")
+    git(world["alex"], "commit", "-q", "-am", "stale")
+    # a killed sync leaves a rebase stopped on a conflict
+    subprocess.run(["git", "pull", "--rebase", "-q", "origin", "main"], cwd=world["alex"],
+                   capture_output=True, timeout=30)
+    assert (world["alex"] / ".git" / "rebase-merge").exists() or (world["alex"] / ".git" / "rebase-apply").exists()
+    assert world["alex_sync"].pull(force=True) is True
+    assert world["alex_sync"].flush_queue() is True
+    assert not (world["alex"] / ".git" / "rebase-merge").exists()
+    assert "status: stale" in _remote_file(world, "entries/E1.md")
+
+
+def test_legacy_tracked_held_file_does_not_block_sync(world):
+    """A held file tracked by an older version must not wedge pulls when it is moved locally."""
+    h = world["alex"] / "held" / "H1.md"
+    h.write_text("old held\n", encoding="utf-8")
+    git(world["alex"], "add", "-f", "held/H1.md")
+    git(world["alex"], "commit", "-q", "-m", "legacy held")
+    git(world["alex"], "push", "-q", "origin", "main")
+    assert world["sam_sync"].pull(force=True) is True
+    (world["sam"] / "held" / "H1.md").unlink()  # e.g. `held approve` moved it to entries/
+    (world["alex"] / "entries" / "n.md").write_text("n\n", encoding="utf-8")
+    assert world["alex_sync"].commit_and_push("new") is True
+    assert world["sam_sync"].pull(force=True) is True
+    assert (world["sam"] / "entries" / "n.md").is_file()
+    assert _remote_file(world, "held/H1.md") == "old held"  # never staged by sync
+
+
+@pytest.mark.parametrize("last", [2_000_000.0, float("nan"), float("inf")])
+def test_pull_throttle_treats_future_or_bad_timestamps_as_expired(world, last):
+    sync = world["sam_sync"]
+    sync._write_json_atomic(sync._last_pull_path(), {"at": last})
+    assert sync.pull() is True
 
 
 def test_corrupt_queue_treated_as_empty(world):

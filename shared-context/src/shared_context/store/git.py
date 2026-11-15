@@ -81,6 +81,10 @@ class GitStore:
         self._now = now
         (self.root / "entries").mkdir(parents=True, exist_ok=True)
         (self.root / "held").mkdir(parents=True, exist_ok=True)
+        if (self.root / ".git").is_dir():
+            from shared_context.sync import ensure_local_excludes
+
+            ensure_local_excludes(self.root)  # ruling R9: held/ never enters git
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         self.refresh()
 

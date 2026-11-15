@@ -558,13 +558,39 @@ def _work(mode, session_id, transcript_path, cfg, state, client, store_factory, 
         log.info("worker: store repo busy; sync left for a later run")
         return
     try:
-        if result.created or result.updated or result.retracted:
-            sync.commit_and_push(
-                f"shared-context: {mode} capture (+{result.created} ~{result.updated} -{result.retracted})"
-            )
+        # Always: also publishes changes left uncommitted earlier (an MCP confirm, a run that
+        # found the lock busy). commit_and_push skips the network when there is nothing to send.
+        sync.commit_and_push(
+            f"shared-context: {mode} capture (+{result.created} ~{result.updated} -{result.retracted})"
+        )
         sync.flush_queue()
     finally:
         release_lock(store_lock, token)
+
+
+def publish_store(cfg: Config, state_dir: Path, message: str, *, wait_s: float = STORE_LOCK_WAIT_S,
+                  git_timeout_s: float = WORKER_GIT_TIMEOUT_S, sleep: Callable[[float], None] = time.sleep,
+                  sync_factory: SyncFactory | None = None) -> bool:
+    """Publish local store changes (CLI commands, MCP confirm) under store.lock: recover, commit
+    entries/, push (pull --rebase on rejection). False when the lock stays busy for `wait_s` or the
+    push fails (the change stays committed locally and the queue retries it). Never raises."""
+    lock = Path(state_dir) / "locks" / "store.lock"
+    try:
+        token = _acquire_waiting(lock, wait_s, sleep)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("store lock failed: %s", type(exc).__name__)
+        return False
+    if not token:
+        log.info("store repo busy; publish left for the next sync")
+        return False
+    try:
+        sync = (sync_factory or _default_sync)(cfg, Path(state_dir), time.time, git_timeout_s)
+        return bool(sync.commit_and_push(message))
+    except Exception as exc:  # noqa: BLE001 - the local change is already made
+        log.warning("publish failed: %s", type(exc).__name__)
+        return False
+    finally:
+        release_lock(lock, token)
 
 
 # ------------------------------------------------------------------- init
