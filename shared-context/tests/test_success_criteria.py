@@ -214,14 +214,69 @@ INJECTIONS = [
 ]
 
 
-def _blob_dirs(*dirs: Path) -> bytes:
-    """All bytes under the dirs, except the local scrub-rules file (it legitimately lists the denylist)."""
-    chunks = []
-    for d in dirs:
-        for p in d.rglob("*"):
-            if p.is_file() and p.name != "config.yaml":
-                chunks.append(p.read_bytes())
-    return b"\n".join(chunks)
+def _read_all(paths) -> bytes:
+    return b"\n".join(p.read_bytes() for p in sorted(paths) if p.is_file())
+
+
+def collect_sources(alex: User, sam: User, remote: Path) -> dict[str, bytes]:
+    """Named byte sources for the leak scan. The local scrub-rules `config.yaml` is skipped (it lists the
+    denylist on purpose)."""
+    out: dict[str, bytes] = {}
+    for u in (alex, sam):
+        tree = [p for p in u.root.rglob("*") if p.is_file() and p.name != "config.yaml"]
+        files = [p for p in u.state.rglob("*") if p.is_file()]
+        out[f"{u.name} store tree"] = _read_all(tree)
+        out[f"{u.name} hooks.log"] = _read_all(p for p in files if p.name.startswith("hooks.log"))
+        out[f"{u.name} sqlite index"] = _read_all(p for p in files if ".db" in p.name)
+        out[f"{u.name} state files"] = _read_all(
+            p for p in files if not p.name.startswith("hooks.log") and ".db" not in p.name)
+    out["remote history"] = subprocess.run(
+        ["git", "log", "--all", "-p", "--format=%H%n%an%n%s%n%b"], cwd=remote,
+        capture_output=True, check=True, timeout=30).stdout
+    return out
+
+
+def scan(sources: dict[str, bytes], fragments: list[str]) -> list[tuple[str, str]]:
+    """(source name, fragment) for every fragment found (case-insensitive) in a source."""
+    return [(name, frag) for name, blob in sources.items() for frag in fragments
+            if frag.lower().encode() in blob.lower()]
+
+
+PLANT = "PLANTED-LEAK-FRAGMENT-9f3a"
+
+
+@pytest.mark.parametrize("kind", ["store file", "state file", "hooks.log", "sqlite index", "remote commit"])
+def test_leak_scanner_positive_control(world, kind):
+    """The scanner must flag a known fragment planted in each source type, under that source's name."""
+    alex, sam, remote, _clock = world
+    sam.prompt("anything at all", "sam-ctl")  # creates Sam's hooks.log and index
+    alex.prompt("anything at all", "alex-ctl")
+    assert scan(collect_sources(alex, sam, remote), [PLANT]) == []  # clean baseline
+    if kind == "store file":
+        (alex.root / "entries" / "plant.md").write_text(PLANT, encoding="utf-8")
+        expected = "Alex store tree"
+    elif kind == "state file":
+        (alex.state / "sync").mkdir(parents=True, exist_ok=True)
+        (alex.state / "sync" / "plant.txt").write_text(PLANT, encoding="utf-8")
+        expected = "Alex state files"
+    elif kind == "hooks.log":
+        with (alex.state / "hooks.log").open("a", encoding="utf-8") as fh:
+            fh.write(PLANT + "\n")
+        expected = "Alex hooks.log"
+    elif kind == "sqlite index":
+        with next((alex.state / "index").glob("*.db")).open("ab") as fh:
+            fh.write(PLANT.encode())
+        expected = "Alex sqlite index"
+    else:
+        (alex.root / "entries" / "plant.md").write_text(PLANT, encoding="utf-8")
+        git(alex.root, "add", "entries/plant.md")
+        git(alex.root, "commit", "-q", "-m", "plant")
+        git(alex.root, "push", "-q", "origin", "main")
+        (alex.root / "entries" / "plant.md").unlink()
+        git(alex.root, "rm", "-q", "--cached", "entries/plant.md")
+        git(alex.root, "commit", "-q", "-m", "unplant")  # gone from the tree, still in history
+        expected = "remote history"
+    assert (expected, PLANT) in scan(collect_sources(alex, sam, remote), [PLANT])
 
 
 def test_seeded_secrets_and_injection_neutralised(world, tmp_path):
@@ -270,16 +325,22 @@ def test_seeded_secrets_and_injection_neutralised(world, tmp_path):
     fragments = ["${db_pass}" if f == "db_pass" else f for _l, _t, f in SECRETS] + [
         t for _x, t in CUSTOMER_TEXT] + [
         syn.FAKE_GH_TOKEN, "hunter2-fake-pw"]
-    haystacks = {
-        "alex store tree": _blob_dirs(alex.root), "sam store tree": _blob_dirs(sam.root),
-        "alex state (index, log, queue)": _blob_dirs(alex.state), "sam state (index, log, usage)": _blob_dirs(sam.state),
-        "remote history": subprocess.run(["git", "log", "--all", "-p", "--format=%H%n%an%n%s%n%b"], cwd=remote,
-                                         capture_output=True, check=True, timeout=30).stdout,
-    }
-    assert (alex.state / "hooks.log").is_file() and (sam.state / "hooks.log").is_file()
-    assert any((alex.state / "index").glob("*.db")) and any((sam.state / "index").glob("*.db"))
-    leaks = [(where, frag) for where, blob in haystacks.items() for frag in fragments
-             if frag.lower().encode() in blob.lower()]
+    sources = collect_sources(alex, sam, remote)
+    # the scan is not vacuous: every source is non-empty and holds a known benign marker
+    markers = {"store tree": b"Seed aws_key", "hooks.log": b"capture", "sqlite index": b"fts",
+               "state files": b"cursor", "remote history": b"Seed aws_key"}
+    for u in ("Alex", "Sam"):
+        markers[f"{u} store tree"] = b"Seed aws_key"
+    for name, blob in sources.items():
+        kind = name.split(" ", 1)[1] if " " in name and name != "remote history" else name
+        marker = markers[kind]
+        if name == "Sam hooks.log":
+            marker = b"injected"
+        if name == "Sam state files":
+            marker = b"sam-inj"
+        assert blob and marker in blob, f"source {name!r} is empty or lacks marker {marker!r}"
+    assert len(sources) == 9
+    leaks = scan(sources, fragments)
     assert leaks == []
     # credential-bearing entries were held, not shared
     assert len(alex.entry_files("held")) >= 10

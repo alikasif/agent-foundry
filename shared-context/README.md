@@ -56,7 +56,7 @@ You mostly see one thing: a notice such as `Used 2 team learnings: <titles>` whe
 | `shared-context reindex` | rebuild the local search index from the store files |
 | `shared-context eval --transcripts DIR --labels FILE` | grade capture quality on transcripts you labelled (see Testing) |
 
-Mutating commands publish to the shared repo like capture does. Entries older than 90 days, or whose linked repo path is gone, show as stale.
+Mutating commands publish to the shared repo like capture does. Entries older than `stale_days` (90) show as stale. (The store can also mark an entry stale when a linked repo path is missing, but only when repo roots are supplied, which the shipped hooks and CLI do not do.)
 
 ## Safety model
 
