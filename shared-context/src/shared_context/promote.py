@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from shared_context.models import Status
@@ -23,6 +23,26 @@ log = logging.getLogger(__name__)
 GH_TIMEOUT_S = 10.0
 _NAME = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
 _LINK = re.compile(rf"pr:(?:(?P<owner>{_NAME})/)?(?P<repo>{_NAME})#(?P<num>[0-9]{{1,9}})")
+
+
+def gh_available() -> bool:
+    """True when the GitHub CLI is on PATH (it may still be unauthenticated)."""
+    return bool(shutil.which("gh"))
+
+
+def confirm_refusal(entry, author: Callable[[], str] | None, *, self_hint: str = "") -> str | None:
+    """Why `entry` may not be confirmed, or None when it may. Shared by the MCP tool and the CLI.
+
+    `author` returns the current user (evaluated lazily, only when the entry is otherwise
+    eligible); pass None to skip the self-confirmation check (CLI ``--allow-self``).
+    """
+    if entry.status == Status.HELD:
+        return "Not confirmed: this learning is held; approve it first."
+    if entry.status in (Status.CONFIRMED, Status.STALE):
+        return f"Not confirmed: this learning is already {entry.status.value}."
+    if author is not None and entry.author == author():
+        return "Refused: you are the author of this learning; a teammate must confirm it." + self_hint
+    return None
 
 
 def _parse_state(output: str) -> bool | None:

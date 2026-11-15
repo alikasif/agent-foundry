@@ -20,6 +20,7 @@ from typing import Any
 
 from shared_context.config import Config, resolve_state_dir
 from shared_context.models import Entry, Status
+from shared_context.promote import confirm_refusal
 from shared_context.recall import CHARS_PER_TOKEN, HEADER, wrap_entry
 
 log = logging.getLogger("shared_context.mcp")
@@ -139,10 +140,9 @@ class Tools:
             entry = self._lookup(id)
             if entry is None:
                 return NOT_FOUND
-            if entry.status in (Status.CONFIRMED, Status.STALE):
-                return f"Not confirmed: this learning is already {entry.status.value}."
-            if entry.author == self._author():
-                return "Refused: you are the author of this learning; a teammate must confirm it."
+            refusal = confirm_refusal(entry, self._author)
+            if refusal:
+                return refusal
             self.store.set_status(entry.id, Status.CONFIRMED)
             return f"Confirmed learning {entry.id}."
 

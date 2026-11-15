@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from store_contract import make_entry
 
-from shared_context import cli
+from shared_context import cli, promote
 from shared_context.config import Config
 from shared_context.models import Status
 from shared_context.store.git import GitStore
@@ -170,7 +170,8 @@ def test_usage_strips_escapes_from_titles_and_unknown_entries(env):
 def test_store_not_configured_message(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("SHARED_CONTEXT_STORE", str(tmp_path / "no-clone"))
     monkeypatch.setenv("SHARED_CONTEXT_STATE", str(tmp_path / "state"))
-    for argv in (["held"], ["usage"], ["reindex"]):
+    for argv in (["held"], ["usage"], ["reindex"], ["promote"], ["confirm", "x"], ["stale", "x"],
+                 ["held", "approve", "x"], ["held", "reject", "x"]):
         rc = cli.main(argv)
         cap = capsys.readouterr()
         assert rc == 1, argv
@@ -198,3 +199,216 @@ def test_unknown_command_exits_2():
     with pytest.raises(SystemExit) as exc:
         cli.main(["bogus"])
     assert exc.value.code == 2
+
+
+# ------------------------------------------------------------- held approve
+def test_held_approve_moves_to_entries_as_unverified(env):
+    env.store.write_entry(held("H1", title="Clean title", body="plain body"))
+    rc, out, _ = env.run("held", "approve", "H1")
+    e = env.store.get_entry("H1")
+    assert rc == 0 and e.status == Status.UNVERIFIED and e.hold_reason is None
+    assert e.body == "plain body"
+    assert "H1" in out and "unverified" in out
+    assert env.store.list_held() == []
+    assert [h.entry.id for h in env.store.search("clean title")] == ["H1"]
+    assert len(env.published) == 1
+
+
+def test_held_approve_rescrubs_hand_edited_secret_and_refuses_without_force(env):
+    env.store.write_entry(held(
+        "H1", title="token note", body="use password=hunter2secret here",
+        applies_to=["db password=sup3rsecretpw"], evidence=["see api_key=abcd1234efgh5678"]))
+    rc, out, err = env.run("held", "approve", "H1")
+    assert rc == 1 and "--force" in err
+    e = env.store.get_entry("H1")
+    assert e.status == Status.HELD  # still not released
+    assert "hunter2secret" not in e.body  # but the redacted text is what is on disk
+    assert "sup3rsecretpw" not in "".join(e.applies_to) and "abcd1234efgh5678" not in "".join(e.evidence)
+    assert "hunter2secret" not in out + err
+    assert len(env.published) == 1  # the redaction itself is pushed; the entry is not released
+    assert env.store.search("password") == []
+
+
+def test_held_approve_force_releases_redacted_version(env):
+    env.store.write_entry(held("H1", body="use password=hunter2secret here"))
+    rc, out, err = env.run("held", "approve", "H1", "--force")
+    e = env.store.get_entry("H1")
+    assert rc == 0 and e.status == Status.UNVERIFIED
+    assert "hunter2secret" not in e.body and "[REDACTED]" in e.body
+    assert "redacted" in out.lower() and "body" in out and "hunter2secret" not in out
+
+
+def test_held_approve_uses_store_denylist(env):
+    (env.ctx.cfg.store_path / "config.yaml").write_text("denylist:\n  - acme-customer\n", encoding="utf-8")
+    env.store.write_entry(held("H1", body="we talked to acme-customer about it"))
+    rc, _, err = env.run("held", "approve", "H1")
+    assert rc == 1 and "customer_data" in err
+    assert "acme-customer" not in env.store.get_entry("H1").body
+    rc, _, _ = env.run("held", "approve", "H1", "--force")
+    assert rc == 0 and env.store.get_entry("H1").status == Status.UNVERIFIED
+
+
+def test_held_approve_bad_rules_file_refuses(env):
+    (env.ctx.cfg.store_path / "config.yaml").write_text("denylist: 5\n", encoding="utf-8")
+    env.store.write_entry(held("H1"))
+    rc, _, err = env.run("held", "approve", "H1")
+    assert rc == 1 and "ValueError" in err and "Traceback" not in err
+    assert env.store.get_entry("H1").status == Status.HELD
+
+
+@pytest.mark.parametrize("sub", ["approve", "reject"])
+def test_held_approve_reject_unknown_or_not_held(env, sub):
+    env.store.write_entry(fresh("E1"))
+    for bad in ("nope", "E1"):
+        rc, out, err = env.run("held", sub, bad)
+        assert rc == 1 and "not found" in err.lower() and "Traceback" not in err
+    assert env.store.get_entry("E1").status == Status.UNVERIFIED
+    assert env.published == []
+
+
+def test_held_reject_removes(env):
+    env.store.write_entry(held("H1", title="payments retry secret", body="payments retry"))
+    rc, out, _ = env.run("held", "reject", "H1")
+    assert rc == 0 and "H1" in out
+    assert env.store.get_entry("H1") is None
+    assert env.store.list_held() == []
+    assert env.store.search("payments retry") == []
+    assert len(env.published) == 1
+
+
+def test_held_reject_unretrievable_via_mcp_read_and_search(env):
+    from shared_context.mcp_server import Tools
+
+    env.store.write_entry(held("H1", title="payments retry", body="payments retry"))
+    env.run("held", "reject", "H1")
+    tools = Tools(env.store, env.ctx.cfg, session_id="s", author=lambda: "me")
+    assert tools.read_learning("H1") == "Learning not found."
+    assert "No learnings found" in tools.search_learnings("payments retry")
+
+
+def test_reject_git_store_deletes_file(tmp_path, monkeypatch, capsys):
+    store = GitStore(tmp_path / "store", tmp_path / "state" / "index.db", now=lambda: NOW)
+    e = Env(store, tmp_path, monkeypatch, capsys)
+    store.write_entry(held("H1"))
+    assert (tmp_path / "store" / "held" / "H1.md").is_file()
+    assert e.run("held", "reject", "H1")[0] == 0
+    assert not (tmp_path / "store" / "held" / "H1.md").exists()
+    assert not (tmp_path / "store" / "entries" / "H1.md").exists()
+
+
+# ------------------------------------------------------------------ confirm
+def test_confirm_marks_confirmed(env):
+    env.store.write_entry(fresh("E1", author="alice"))
+    rc, out, _ = env.run("confirm", "E1")
+    assert rc == 0 and "E1" in out
+    assert env.store.get_entry("E1").status == Status.CONFIRMED
+    assert len(env.published) == 1
+
+
+def test_confirm_refuses_self_confirmation(env):
+    env.store.write_entry(fresh("E1", author="me"))
+    rc, _, err = env.run("confirm", "E1")
+    assert rc == 1 and "author" in err and "--allow-self" in err
+    assert env.store.get_entry("E1").status == Status.UNVERIFIED
+    assert env.published == []
+
+
+def test_confirm_allow_self(env):
+    env.store.write_entry(fresh("E1", author="me"))
+    rc, _, _ = env.run("confirm", "E1", "--allow-self")
+    assert rc == 0 and env.store.get_entry("E1").status == Status.CONFIRMED
+
+
+@pytest.mark.parametrize("status,extra", [
+    (Status.HELD, {"hold_reason": "r"}), (Status.STALE, {"stale_reason": "r"}), (Status.CONFIRMED, {})])
+def test_confirm_refuses_ineligible_statuses(env, status, extra):
+    env.store.write_entry(make_entry("E1", status=status, author="alice", created="2026-11-19T10:00:00Z", **extra))
+    rc, _, err = env.run("confirm", "E1", "--allow-self")
+    assert rc == 1 and err.strip()
+    assert env.store.get_entry("E1").status == status
+    assert env.published == []
+
+
+def test_confirm_unknown_id(env):
+    rc, _, err = env.run("confirm", "nope")
+    assert rc == 1 and "not found" in err.lower()
+
+
+def test_confirm_help_documents_allow_self(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["confirm", "--help"])
+    assert exc.value.code == 0
+    assert "--allow-self" in capsys.readouterr().out
+
+
+def test_mcp_and_cli_share_confirm_rule():
+    from shared_context import mcp_server
+
+    assert mcp_server.confirm_refusal is promote.confirm_refusal
+
+
+# -------------------------------------------------------------------- stale
+def test_stale_sets_reason(env):
+    env.store.write_entry(fresh("E1"))
+    rc, out, _ = env.run("stale", "E1", "--reason", "API was removed\x1b[2J")
+    e = env.store.get_entry("E1")
+    assert rc == 0 and e.status == Status.STALE
+    assert e.stale_reason == "API was removed[2J"
+    assert "\x1b" not in out
+    assert len(env.published) == 1
+
+
+def test_stale_default_reason(env):
+    env.store.write_entry(fresh("E1"))
+    assert env.run("stale", "E1")[0] == 0
+    assert env.store.get_entry("E1").stale_reason
+
+
+def test_stale_refuses_held_and_unknown(env):
+    env.store.write_entry(held("H1"))
+    rc, _, err = env.run("stale", "H1")
+    assert rc == 1 and "held" in err
+    assert env.store.get_entry("H1").status == Status.HELD
+    rc, _, err = env.run("stale", "nope")
+    assert rc == 1 and "not found" in err.lower()
+
+
+# ------------------------------------------------------------------ promote
+def test_promote_command_prints_count(env, monkeypatch):
+    monkeypatch.setattr(promote, "gh_available", lambda: True)
+    monkeypatch.setattr(promote, "promote_entries", lambda store: 2)
+    rc, out, _ = env.run("promote")
+    assert rc == 0 and "2" in out
+    assert len(env.published) == 1
+
+
+def test_promote_command_zero_does_not_publish(env, monkeypatch):
+    monkeypatch.setattr(promote, "gh_available", lambda: True)
+    monkeypatch.setattr(promote, "promote_entries", lambda store: 0)
+    rc, out, _ = env.run("promote")
+    assert rc == 0 and "0" in out and env.published == []
+
+
+def test_promote_command_gh_unavailable(env, monkeypatch):
+    monkeypatch.setattr(promote, "gh_available", lambda: False)
+    called = []
+    monkeypatch.setattr(promote, "promote_entries", lambda store: called.append(1) or 0)
+    rc, out, err = env.run("promote")
+    assert rc == 1 and "gh" in err and called == []
+
+
+def test_promote_end_to_end_with_patched_gh(env, monkeypatch):
+    env.store.write_entry(fresh("E1", evidence=["pr:acme/api#4"]))
+    monkeypatch.setattr(promote.shutil, "which", lambda n: "gh")
+    monkeypatch.setattr(promote, "run_command",
+                        lambda argv, cwd, e, t: (0, json.dumps({"state": "MERGED", "mergedAt": None})))
+    rc, out, _ = env.run("promote")
+    assert rc == 0 and "1" in out
+    assert env.store.get_entry("E1").status == Status.CONFIRMED
+
+
+def test_publish_failure_is_a_note_not_an_error(env):
+    env.ctx.publish = lambda msg: False
+    env.store.write_entry(fresh("E1", author="alice"))
+    rc, out, _ = env.run("confirm", "E1")
+    assert rc == 0 and "saved locally" in out

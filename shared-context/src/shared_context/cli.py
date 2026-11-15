@@ -269,6 +269,107 @@ def cmd_held_list(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
+def _find(ctx: Context, entry_id: str, *, held_only: bool = False):
+    """The entry, or None (also None for a non-held entry when `held_only`)."""
+    entry = ctx.store.get_entry(entry_id)
+    if entry is None or (held_only and entry.status != Status.HELD):
+        return None
+    return entry
+
+
+def _not_found(entry_id: str, what: str = "entry") -> int:
+    return _fail(f"{what} not found: {clean(entry_id, 64)}")
+
+
+def cmd_held_approve(ctx: Context, args: argparse.Namespace) -> int:
+    from shared_context.scrub import load_rules, scrub
+
+    entry = _find(ctx, args.id, held_only=True)
+    if entry is None:
+        return _not_found(args.id, "held entry")
+    rules = load_rules(Path(ctx.cfg.store_path) / "config.yaml")
+    changed: list[str] = []
+    reasons: list[str] = []
+    risky = False
+
+    def fix(name: str, text: str) -> str:
+        nonlocal risky
+        res = scrub(text, rules)
+        if res.risky:
+            risky = True
+            reasons.extend(r for r in res.reasons if r not in reasons)
+        if res.text != text:
+            if name not in changed:
+                changed.append(name)
+        return res.text
+
+    entry.title = fix("title", entry.title)
+    entry.topic_key = fix("topic_key", entry.topic_key)
+    entry.body = fix("body", entry.body)
+    entry.applies_to = [fix("applies_to", s) for s in entry.applies_to]
+    entry.evidence = [fix("evidence", s) for s in entry.evidence]
+    summary = f"redacted fields: {', '.join(changed)}" if changed else "no redactions needed"
+    if risky and not args.force:
+        if changed:  # keep the entry held, but never leave the secret on disk
+            ctx.store.write_entry(entry)
+            _published(ctx, "shared-context: redact held entry")
+        return _fail(f"not approved: the re-scrub still found {', '.join(reasons)} ({summary}). "
+                     "Edit the held entry or re-run with --force to release the redacted version.")
+    entry.status = Status.UNVERIFIED
+    entry.hold_reason = None
+    ctx.store.write_entry(entry)
+    print(f"Approved {clean(entry.id, 64)}: released as unverified ({summary}).")
+    _published(ctx, "shared-context: approve held entry")
+    return 0
+
+
+def cmd_held_reject(ctx: Context, args: argparse.Namespace) -> int:
+    entry = _find(ctx, args.id, held_only=True)
+    if entry is None:
+        return _not_found(args.id, "held entry")
+    ctx.store.delete_entry(entry.id)
+    print(f"Rejected {clean(entry.id, 64)}: removed from the store.")
+    _published(ctx, "shared-context: reject held entry")
+    return 0
+
+
+def cmd_confirm(ctx: Context, args: argparse.Namespace) -> int:
+    entry = _find(ctx, args.id)
+    if entry is None:
+        return _not_found(args.id)
+    refusal = promote.confirm_refusal(entry, None if args.allow_self else ctx.author,
+                                      self_hint=" Use --allow-self if you are the only user.")
+    if refusal:
+        return _fail(refusal)
+    ctx.store.set_status(entry.id, Status.CONFIRMED)
+    print(f"Confirmed {clean(entry.id, 64)}.")
+    _published(ctx, "shared-context: confirm entry")
+    return 0
+
+
+def cmd_stale(ctx: Context, args: argparse.Namespace) -> int:
+    entry = _find(ctx, args.id)
+    if entry is None:
+        return _not_found(args.id)
+    if entry.status == Status.HELD:
+        return _fail("this entry is held; approve or reject it instead.")
+    reason = clean(args.reason, 200) or "marked stale via CLI"
+    ctx.store.set_status(entry.id, Status.STALE, reason)
+    print(f"Marked {clean(entry.id, 64)} stale: {reason}")
+    _published(ctx, "shared-context: mark entry stale")
+    return 0
+
+
+def cmd_promote(ctx: Context, args: argparse.Namespace) -> int:
+    if not promote.gh_available():
+        return _fail("the GitHub CLI (gh) was not found; install and authenticate it to promote by merged PR.")
+    count = promote.promote_entries(ctx.store)
+    print(f"Promoted {count} entries to confirmed (merged PR evidence).")
+    if count:
+        _published(ctx, f"shared-context: promote {count} entries")
+    return 0
+
+
 def cmd_reindex(ctx: Context, args: argparse.Namespace) -> int:
     ctx.store.refresh()
     count = sum(1 for _ in ctx.store.iter_entries())
@@ -340,6 +441,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_held = sub.add_parser("held", help="list held entries (id, title, reason); approve or reject them")
     p_held.set_defaults(func=_with_context(cmd_held_list))
+    held_sub = p_held.add_subparsers(dest="held_command")
+    p_ap = held_sub.add_parser("approve", help="re-scrub a held entry and release it as unverified")
+    p_ap.add_argument("id")
+    p_ap.add_argument("--force", action="store_true",
+                      help="release the redacted version even if the re-scrub still finds credentials/customer data")
+    p_ap.set_defaults(func=_with_context(cmd_held_approve))
+    p_rj = held_sub.add_parser("reject", help="delete a held entry from the store")
+    p_rj.add_argument("id")
+    p_rj.set_defaults(func=_with_context(cmd_held_reject))
+
+    p_cf = sub.add_parser("confirm", help="mark an unverified entry confirmed (not your own, unless --allow-self)")
+    p_cf.add_argument("id")
+    p_cf.add_argument("--allow-self", action="store_true",
+                      help="allow confirming an entry you authored (single-user setups)")
+    p_cf.set_defaults(func=_with_context(cmd_confirm))
+
+    p_st = sub.add_parser("stale", help="mark an entry stale")
+    p_st.add_argument("id")
+    p_st.add_argument("--reason", default="", help="why it is stale")
+    p_st.set_defaults(func=_with_context(cmd_stale))
+
+    p_pr = sub.add_parser("promote", help="confirm unverified entries whose evidence PR has merged (needs gh)")
+    p_pr.set_defaults(func=_with_context(cmd_promote))
 
     p_re = sub.add_parser("reindex", help="rebuild the local search index from the store files")
     p_re.set_defaults(func=_with_context(cmd_reindex))
