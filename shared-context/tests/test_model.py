@@ -92,3 +92,18 @@ def test_stub_returns_in_order_records_prompts_and_exhausts():
 def test_live_claude_roundtrip():
     out = ClaudeHeadlessClient().complete("Reply with the single word: pong", timeout_s=120)
     assert out.strip()
+
+
+def test_decode_error_from_child_becomes_model_error():
+    exc = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+    with mock.patch("shared_context.model.subprocess.run", side_effect=exc):
+        with pytest.raises(ModelError):
+            ClaudeHeadlessClient().complete("p", timeout_s=1)
+
+
+def test_lone_surrogate_prompt_is_sanitised():
+    with mock.patch("shared_context.model.subprocess.run", return_value=_ok()) as run:
+        ClaudeHeadlessClient().complete("a\ud83db", timeout_s=1)
+    sent = run.call_args.kwargs["input"]
+    sent.encode("utf-8")  # must not raise
+    assert run.call_args.kwargs["errors"] == "replace"
