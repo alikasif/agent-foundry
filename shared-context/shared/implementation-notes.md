@@ -76,3 +76,7 @@
 - Injection hardening: per-call delimiter `transcript_<16 hex>` regenerated if the chunk contains it; prompt states the data is not instructions. Delimiter is unguessable but the chunk is still not escaped (no need while the tag is random).
 - Parsing: first JSON object found via `raw_decode` (handles fences/prose). Items need non-empty string title, body, topic_key, else skipped. Risk `ok` is the only pass; anything else (hold, unsure, missing, unknown) becomes `hold` with a fallback `hold_reason`. `retract` is ignored unless `final=True`; non-string entries dropped.
 - Timeout for extraction is a module constant `EXTRACT_TIMEOUT_S = 120`.
+
+### Task 6 follow-up
+- Prompt is now sent on stdin (`input=prompt`, utf-8) instead of argv, so default 60000-char chunks do not hit the Windows command-line limit. `build_command(executable)` no longer takes a prompt and has no `--`. Command: `claude -p --output-format text --no-session-persistence --disable-slash-commands --tools ""`.
+- Live run (SHARED_CONTEXT_LIVE=1, prompt "Reply with the single word: pong", via stdin): exit 0, non-empty text output, test passed in ~4.6s. So `--tools ""` and stdin prompt work.

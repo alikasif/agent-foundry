@@ -25,7 +25,7 @@ def test_headless_client_sets_guard_env():
     kwargs = run.call_args.kwargs
     assert kwargs["env"]["SHARED_CONTEXT_CAPTURE"] == "1"
     assert kwargs["timeout"] == 5
-    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert kwargs["input"] == "p"
     assert kwargs["capture_output"] is True
     assert not kwargs.get("shell")
     assert isinstance(run.call_args.args[0], list)
@@ -39,11 +39,22 @@ def test_custom_guard_env_and_parent_env_preserved(monkeypatch):
     assert env["MY_GUARD"] == "1" and env["FOO_TEST"] == "bar"
 
 
-def test_build_command_uses_print_mode_and_prompt_last():
-    cmd = build_command("claude", "hello")
+def test_build_command_uses_print_mode_without_prompt():
+    cmd = build_command("claude")
     assert cmd[0] == "claude" and "-p" in cmd
-    assert cmd[-2:] == ["--", "hello"]
     assert "--no-session-persistence" in cmd
+    assert "--" not in cmd
+
+
+def test_large_prompt_goes_via_stdin_not_argv():
+    prompt = "x" * 100_000
+    with mock.patch("shared_context.model.subprocess.run", return_value=_ok()) as run:
+        ClaudeHeadlessClient().complete(prompt, timeout_s=5)
+    kwargs = run.call_args.kwargs
+    assert kwargs["input"] == prompt
+    assert "stdin" not in kwargs
+    assert kwargs["encoding"] == "utf-8"
+    assert all(len(a) < 300 for a in run.call_args.args[0])
 
 
 def test_nonzero_exit_raises_model_error():

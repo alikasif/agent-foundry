@@ -29,10 +29,11 @@ class StubModelClient:
         return self._responses.pop(0)
 
 
-def build_command(executable: str, prompt: str) -> list[str]:
+def build_command(executable: str) -> list[str]:
     """Print-mode command: no tools, no slash commands, no session persistence.
 
-    The prompt goes after `--` because `--tools` takes a variadic value list.
+    The prompt is NOT in argv (Windows limits the command line to ~32k chars);
+    `claude -p` reads it from stdin.
     """
     return [
         executable,
@@ -41,8 +42,6 @@ def build_command(executable: str, prompt: str) -> list[str]:
         "--no-session-persistence",
         "--disable-slash-commands",
         "--tools", "",
-        "--",
-        prompt,
     ]
 
 
@@ -51,11 +50,11 @@ class ClaudeHeadlessClient:
         self.guard_env = guard_env
 
     def complete(self, prompt: str, *, timeout_s: float) -> str:
-        cmd = build_command(shutil.which("claude") or "claude", prompt)
+        cmd = build_command(shutil.which("claude") or "claude")
         env = {**os.environ, self.guard_env: "1"}
         try:
             result = subprocess.run(
-                cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                cmd, env=env, input=prompt, capture_output=True,
                 text=True, encoding="utf-8", timeout=timeout_s,
             )
         except FileNotFoundError as exc:
