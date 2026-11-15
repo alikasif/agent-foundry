@@ -16,3 +16,13 @@
 - Search: token overlap (lowercased `\w+`) over title, topic_key, body, applies_to; score = overlap/len(query tokens) + 1.0 if repo in applies_to. Entries with zero overlap are never returned (repo boost cannot surface non-matches). Ties break by id.
 - `set_status` sets hold_reason only for HELD and stale_reason only for STALE, clearing the other reasons; reason is ignored for other statuses.
 - InMemoryStore deep-copies on write/read so callers cannot mutate stored state.
+
+## Task 3: scrubber and risk rules
+- Added `load_rules(path) -> ScrubRules` per controller ruling: missing file/keys -> empty lists; non-list values or bad YAML -> ValueError; invalid regex in `extra_patterns` -> ValueError naming the pattern.
+- Redaction order: private-key blocks, known token shapes (AWS, GitHub, Slack, `sk-`), Bearer / `password` / api_key|secret|token assignments (value only is replaced, key name kept), high-entropy tokens, then denylist (case-insensitive literal), then extra_patterns.
+- High-entropy rule: token of >=24 chars from `[A-Za-z0-9+/_=-]`, containing lower, upper and digit, Shannon entropy >= 4.0, and not a 40-char pure-hex string (git SHA). Plain identifiers (no digit), paths (dots/backslashes split tokens), and short hex stay unchanged. Trade-off: low-entropy or all-lowercase secrets are only caught by the keyed rules.
+- `password=` values need >=3 chars; api_key/secret/token values need >=8 chars, to avoid redacting prose like "token budget is 800".
+- Reasons: "credential", "customer_data", "custom_pattern". `extra_patterns` matches are redacted and counted but do NOT set `risky` (brief: risky only for credentials or denylisted customer terms).
+- Idempotency: value patterns skip values already starting with `[REDACTED]`.
+- Unterminated private-key block redacts to end of text (fail closed).
+- Fixtures package `tests/fixtures/` is imported as `fixtures.seeded_corpus` (pytest rootdir puts `tests/` on sys.path).
