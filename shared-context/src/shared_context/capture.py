@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Literal
 
 from .config import Config
-from .extract import MAX_EXISTING, Extracted, build_prompt, extract_learnings
+from .extract import MAX_EXISTING, Extracted, build_prompt, extract
+from .recall import HEADER
 from .model import ModelClient
 from .models import Entry, Status, new_entry_id
 from .scrub import ScrubRules, scrub
@@ -81,7 +82,7 @@ def _state_path(state_dir: Path, session_id: str) -> Path:
 
 
 def _load_state(path: Path) -> dict:
-    fresh = {"cursor": 0, "last_run": None, "calls": 0}
+    fresh = {"cursor": 0, "last_run": None, "calls": 0, "parse_failures": 0}
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -96,7 +97,10 @@ def _load_state(path: Path) -> dict:
             raise ValueError
         if last_run is not None and not isinstance(last_run, (int, float)):
             raise ValueError
-        return {"cursor": cursor, "last_run": last_run, "calls": calls}
+        failures = data.get("parse_failures", 0)  # absent in state files from earlier versions
+        if not isinstance(failures, int) or failures < 0:
+            failures = 0
+        return {"cursor": cursor, "last_run": last_run, "calls": calls, "parse_failures": failures}
     except (ValueError, TypeError, KeyError):
         log.warning("capture state file corrupt; starting fresh (transcript read stays capped)")
         return fresh
@@ -134,6 +138,31 @@ def _tool_result_text(content: object) -> str:
     return ""
 
 
+_WRAP_OPEN = "<shared_learning"
+_WRAP_CLOSE = "</shared_learning>"
+
+
+def _strip_injected(text: str) -> str:
+    """Remove recall's injected team notes (wrapper blocks and the header) so a teammate's entry
+    is never re-captured as this user's learning. Linear: one forward scan; an unclosed wrapper
+    drops the rest of the piece."""
+    if _WRAP_OPEN not in text and HEADER not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    while True:
+        j = text.find(_WRAP_OPEN, i)
+        if j == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        k = text.find(_WRAP_CLOSE, j)
+        if k == -1:
+            break
+        i = k + len(_WRAP_CLOSE)
+    return "".join(out).replace(HEADER, "")
+
+
 def _pieces(obj: object) -> list[str] | None:
     """Text pieces from one transcript line, or None when the line is malformed."""
     if not isinstance(obj, dict):
@@ -141,14 +170,14 @@ def _pieces(obj: object) -> list[str] | None:
     role = obj.get("type")
     if role not in ("user", "assistant"):
         return []  # attachments, system, api-request, snapshots, ...: not conversation
-    if obj.get("isMeta") or obj.get("isSidechain"):
-        return []
+    if obj.get("isMeta") or obj.get("isSidechain") or obj.get("isCompactSummary"):
+        return []  # compaction summaries restate earlier text that was already captured
     msg = obj.get("message")
     if not isinstance(msg, dict):
         return None
     content = msg.get("content")
     if isinstance(content, str):
-        return [f"{role}: {content}"]
+        return [f"{role}: {_strip_injected(content)}"]
     if not isinstance(content, list):
         return None
     out = []
@@ -157,7 +186,7 @@ def _pieces(obj: object) -> list[str] | None:
             continue
         kind = block.get("type")
         if kind == "text" and isinstance(block.get("text"), str):
-            out.append(f"{role}: {block['text']}")
+            out.append(f"{role}: {_strip_injected(block['text'])}")
         elif kind == "tool_use":
             try:
                 args = json.dumps(block.get("input"), ensure_ascii=False, default=str)
@@ -165,9 +194,18 @@ def _pieces(obj: object) -> list[str] | None:
                 args = ""
             out.append(f"[tool call {_short(str(block.get('name') or '?'))}: {_short(args)}]")
         elif kind == "tool_result":
-            out.append(f"[tool result: {_short(_tool_result_text(block.get('content')))}]")
+            out.append(f"[tool result: {_short(_strip_injected(_tool_result_text(block.get('content'))))}]")
         # thinking, images and unknown blocks are skipped
     return out
+
+
+def line_text_chars(raw: bytes) -> int:
+    """How many transcript-text chars one JSONL line contributes to a capture chunk (eval pacing)."""
+    try:
+        got = _pieces(json.loads(raw.decode("utf-8", errors="replace")))
+    except (ValueError, RecursionError):
+        return 0
+    return sum(len(p) + 1 for p in got or [])
 
 
 @dataclass
@@ -377,14 +415,29 @@ def _run(session_id, transcript_path, mode, store, client, rules, state_dir, cfg
         by_topic[e.topic_key] = e
 
     watched = _WatchedClient(client)
-    learnings, retract = extract_learnings(
-        chunk.text, session_entries[:MAX_EXISTING], watched, final=(mode == "final"),
-    )
-    state["calls"] += 1
-    state["last_run"] = now
-    if watched.failed:
-        _save_state(spath, state)  # cursor not advanced: the chunk is retried next run
-        return _skip("model_error")
+    while True:
+        ext = extract(chunk.text, session_entries[:MAX_EXISTING], watched, final=(mode == "final"))
+        state["calls"] += 1
+        state["last_run"] = now
+        if watched.failed:
+            _save_state(spath, state)  # cursor not advanced: the chunk is retried next run
+            return _skip("model_error")
+        if not ext.parse_failed:
+            state["parse_failures"] = 0
+            break
+        # Unparseable output is a failure, not "no learnings": retry the chunk ONCE, then move on.
+        if state["parse_failures"] < 1:
+            state["parse_failures"] += 1
+            if mode == "final" and state["calls"] < cfg.max_calls_per_session:
+                continue  # no later run will come for this session: retry now
+            _save_state(spath, state)
+            return _skip("parse_error")
+        log.warning("capture %s: model output unparseable twice; chunk skipped", mode)
+        state["parse_failures"] = 0
+        state["cursor"] = chunk.end
+        _save_state(spath, state)
+        return _skip("parse_error")
+    learnings, retract = ext.learnings, ext.retract
 
     created_at = datetime.fromtimestamp(now, UTC).isoformat()
     author = resolve_author() if learnings else "unknown"

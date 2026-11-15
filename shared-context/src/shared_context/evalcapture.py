@@ -1,8 +1,10 @@
 """Capture-quality check (design success criterion 1): `shared-context eval`.
 
-Runs the real capture pipeline (one `final` pass per transcript, scrubber included,
-in-memory store, throwaway state dir) over a directory of transcript JSONL files and
-grades the learnings against labels you wrote by hand.
+Runs the real capture pipeline (scrubber included, in-memory store, throwaway state dir)
+over a directory of transcript JSONL files and grades the learnings against labels you
+wrote by hand. Each transcript is fed in pieces like a live session: `precompact`
+passes whenever the new text reaches one pass's cap, then a `final` pass, so the whole
+transcript is graded, not only its last `max_transcript_chars`.
 
 Labels file (YAML or JSON): a mapping from transcript file name to the learnings a
 teammate would have wanted, each with an id and keywords that must ALL appear
@@ -29,7 +31,7 @@ from pathlib import Path
 
 import yaml
 
-from shared_context.capture import run_capture
+from shared_context.capture import line_text_chars, run_capture
 from shared_context.config import Config
 from shared_context.model import ModelClient
 from shared_context.models import Entry, Status
@@ -124,9 +126,7 @@ def evaluate(
             continue
         store = InMemoryStore()
         with tempfile.TemporaryDirectory(prefix="shared-context-eval-") as tmp:
-            cfg = Config(store_path=Path(tmp))
-            result = run_capture(_SAFE.sub("-", path.stem) or "eval", path, "final", store,
-                                 client_for(name), rules, Path(tmp), cfg, time.time())
+            skipped = _capture_whole(path, Path(tmp), store, client_for(name), rules)
         # held entries count too: they are produced (and need review), just not shared
         entries = [*store.iter_entries(), *store.iter_entries(Status.HELD)]
         texts = [(_text(e), e) for e in entries]
@@ -139,8 +139,39 @@ def evaluate(
             else:
                 missed.append(exp["id"])
         junk = [e for _, e in texts if e.id not in matched]
-        scores.append(TranscriptScore(name, len(expected), found, missed, entries, junk, result.skipped_reason))
+        scores.append(TranscriptScore(name, len(expected), found, missed, entries, junk, skipped))
     return EvalReport(scores)
+
+
+def _capture_whole(path: Path, tmp: Path, store: InMemoryStore, client: ModelClient,
+                   rules: ScrubRules) -> str | None:
+    """Grade the whole transcript the way production sees it: the transcript grows line by line
+    and a `precompact` pass runs whenever the new text would exceed one pass's cap
+    (`max_transcript_chars`), then a `final` pass. One pass over the whole file would only see
+    its last `max_transcript_chars`. Returns the first real skip reason, if any."""
+    cfg = Config(store_path=tmp, max_calls_per_session=1_000_000)  # the eval is not cost-capped
+    sid = _SAFE.sub("-", path.stem) or "eval"
+    work = tmp / "transcript.jsonl"
+    work.write_bytes(b"")
+    reasons: list[str | None] = []
+    pending = 0
+    with open(path, "rb") as src, open(work, "ab") as dst:
+        for raw in src:
+            if not raw.endswith(b"\n"):
+                raw += b"\n"
+            size = line_text_chars(raw)
+            if pending and pending + size > cfg.max_transcript_chars:
+                dst.flush()
+                reasons.append(run_capture(sid, work, "precompact", store, client, rules, tmp, cfg,
+                                           time.time()).skipped_reason)
+                pending = 0
+            dst.write(raw)
+            pending += size
+    final = run_capture(sid, work, "final", store, client, rules, tmp, cfg, time.time()).skipped_reason
+    problems = [r for r in [*reasons, final] if r not in (None, "nothing_new")]
+    if problems:
+        return problems[0]
+    return final if not reasons else None
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:

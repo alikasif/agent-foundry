@@ -57,12 +57,14 @@ class ClaudeHeadlessClient:
                 cmd, env=env, input=prompt.encode("utf-8", "replace").decode("utf-8"),
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s,
             )
+        # Messages carry no child output or exception text: they are logged, and claude's
+        # stderr (or an exception message) may echo prompt/transcript content.
         except FileNotFoundError as exc:
             raise ModelError("claude CLI not found on PATH") from exc
         except subprocess.TimeoutExpired as exc:
             raise ModelError(f"claude timed out after {timeout_s}s") from exc
         except (OSError, UnicodeError, ValueError) as exc:
-            raise ModelError(f"could not run claude: {exc}") from exc
+            raise ModelError(f"could not run claude: {type(exc).__name__}") from exc
         if result.returncode != 0:
-            raise ModelError(f"claude exited {result.returncode}: {(result.stderr or '').strip()[:500]}")
+            raise ModelError(f"claude exited {result.returncode}")
         return result.stdout

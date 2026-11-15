@@ -224,6 +224,98 @@ def test_throttled_run_skipped(tmp_path, state_dir):
     assert res.skipped_reason is None and len(client.prompts) == 3
 
 
+def test_incremental_pass_can_retract(tmp_path, state_dir, store):
+    """I9: retraction is offered on every pass, with body snippets of existing entries."""
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    cfg = make_cfg(tmp_path)
+    wrong = learning(title="Build is CPU-bound", topic_key="build-cpu-bound", body="More workers speed it up.")
+    client = StubModelClient([resp(wrong), resp(retract=[" build-cpu-bound ", "build-cpu-bound", ""])])
+    run(path, store, client, state_dir, cfg)
+    append(path, line("user", "Raising the worker count changed nothing at all, the build is not CPU-bound."))
+    res = run(path, store, client, state_dir, cfg, now=NOW + cfg.capture_min_interval_s + 1)
+    assert res.retracted == 1 and res.skipped_reason is None
+    assert "More workers speed it up." in client.prompts[1]  # body snippet shown
+    [e] = store.find_session_entries(SID)
+    assert e.status == Status.STALE
+
+
+def test_unparseable_output_retried_once_then_skipped(tmp_path, state_dir):
+    """I10: garbage output is not "no learnings": the chunk is retried once, then given up."""
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    cfg = make_cfg(tmp_path)
+    store = InMemoryStore()
+    client = StubModelClient(["not json", "still not json", resp(learning())])
+    res = run(path, store, client, state_dir, cfg)
+    assert res.skipped_reason == "parse_error"
+    st = read_state(state_dir)
+    assert st["cursor"] == 0 and st["parse_failures"] == 1 and st["calls"] == 1
+    res = run(path, store, client, state_dir, cfg, now=NOW + cfg.capture_min_interval_s + 1)
+    assert res.skipped_reason == "parse_error"
+    st = read_state(state_dir)
+    assert st["cursor"] > 0 and st["parse_failures"] == 0 and st["calls"] == 2  # given up, moved on
+    assert len(client.prompts) == 2 and store.find_session_entries(SID) == []
+
+
+def test_unparseable_output_then_success_resets_counter(tmp_path, state_dir):
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    cfg = make_cfg(tmp_path)
+    store = InMemoryStore()
+    client = StubModelClient(["not json", resp(learning())])
+    run(path, store, client, state_dir, cfg)
+    res = run(path, store, client, state_dir, cfg, now=NOW + cfg.capture_min_interval_s + 1)
+    assert res.created == 1 and read_state(state_dir)["parse_failures"] == 0
+    assert "Root cause: write_batch" in client.prompts[1]  # the same chunk was sent again
+
+
+def test_final_pass_retries_unparseable_output_immediately(tmp_path, state_dir):
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    store = InMemoryStore()
+    client = StubModelClient(["not json", resp(learning())])
+    res = run(path, store, client, state_dir, make_cfg(tmp_path), mode="final")
+    assert res.created == 1 and len(client.prompts) == 2
+
+
+def test_parse_retry_respects_call_cap(tmp_path, state_dir):
+    path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
+    client = StubModelClient(["not json", "not json"])
+    res = run(path, InMemoryStore(), client, state_dir, make_cfg(tmp_path, max_calls_per_session=1), mode="final")
+    assert res.skipped_reason == "parse_error" and len(client.prompts) == 1
+
+
+def test_injected_team_notes_and_compact_summaries_not_reextracted(tmp_path, state_dir):
+    """I11: recall output in the transcript must not become the current user's learning."""
+    from shared_context.recall import HEADER
+
+    path = tmp_path / "t.jsonl"
+    wrapper = ('<shared_learning id="E9" status="unverified" kind="gotcha">\nTEAMMATE-NOTE-MARKER title\n'
+               "TEAMMATE-BODY-MARKER\n</shared_learning>")
+    compact = json.dumps({"type": "user", "isCompactSummary": True,
+                          "message": {"role": "user", "content": "COMPACT-SUMMARY-MARKER of the session"}}) + "\n"
+    append(path,
+           line("user", f"{HEADER}\n\n{wrapper}\n\nWhy does the exporter crash with too many open files?"),
+           line("assistant", "Unclosed <shared_learning id=\"X\"> UNCLOSED-MARKER tail"),
+           compact,
+           line("assistant", "The writer opens a handle per batch; close it in a with-block."))
+    client = StubModelClient([resp()])
+    run(path, InMemoryStore(), client, state_dir, make_cfg(tmp_path))
+    [prompt] = client.prompts
+    for marker in ("TEAMMATE-NOTE-MARKER", "TEAMMATE-BODY-MARKER", "COMPACT-SUMMARY-MARKER", "UNCLOSED-MARKER",
+                   HEADER):
+        assert marker not in prompt
+    assert "Why does the exporter crash" in prompt and "with-block" in prompt
+
+
+@pytest.mark.parametrize("unit", ["<shared_learning ", "</shared_learning>", "<shared_learning>x</shared_learning>",
+                                  "<shared_learning a", "x" * 17])
+def test_strip_injected_is_linear(unit):
+    import time
+
+    text = unit * (200_000 // len(unit))
+    start = time.perf_counter()
+    capture._strip_injected(text)
+    assert time.perf_counter() - start < 1.0
+
+
 @pytest.mark.parametrize("last_run", ["future", "nan", "inf"])
 def test_throttle_treats_future_or_bad_last_run_as_expired(tmp_path, state_dir, last_run):
     """Clock skew: a last_run in the future (or non-finite) must not block capture forever."""
@@ -485,7 +577,8 @@ def test_final_retract_never_releases_held_entry(tmp_path, state_dir, store):
     assert [h.topic_key for h in store.list_held()] == ["export-file-handle-leak"]
 
 
-def test_incremental_ignores_retract(tmp_path, state_dir):
+def test_precompact_pass_also_retracts(tmp_path, state_dir):
+    """I9 (was: non-final passes ignored retract)."""
     path = fixture_copy(tmp_path, "bugfix_root_cause.jsonl")
     cfg = make_cfg(tmp_path)
     store = InMemoryStore()
@@ -493,8 +586,8 @@ def test_incremental_ignores_retract(tmp_path, state_dir):
     run(path, store, client, state_dir, cfg)
     append(path, line("user", "More context on the exporter."))
     res = run(path, store, client, state_dir, cfg, mode="precompact", now=NOW + 1)
-    assert res.retracted == 0
-    assert store.find_session_entries(SID)[0].status == Status.UNVERIFIED
+    assert res.retracted == 1
+    assert store.find_session_entries(SID)[0].status == Status.STALE
 
 
 def test_entry_body_capped_at_char_boundary(tmp_path, state_dir):
@@ -595,7 +688,7 @@ def test_permanently_failing_store_bounded_by_call_cap(tmp_path, state_dir):
                for i in range(4)]
     assert reasons == ["store_error", "store_error", "call_cap", "call_cap"]
     assert len(client.prompts) == 2
-    assert read_state(state_dir) == {"cursor": 0, "last_run": NOW + 1, "calls": 2}
+    assert read_state(state_dir) == {"cursor": 0, "last_run": NOW + 1, "calls": 2, "parse_failures": 0}
 
 
 def test_failed_retraction_is_store_error_and_retried(tmp_path, state_dir):
@@ -643,11 +736,13 @@ def test_logs_never_contain_transcript_or_bodies(tmp_path, state_dir, caplog):
 def test_existing_entries_passed_most_recent_first_and_capped(tmp_path, state_dir, monkeypatch):
     seen = {}
 
+    from shared_context.extract import Extraction
+
     def fake_extract(chunk, existing, client, *, final):
         seen["ids"] = [e.id for e in existing]
-        return [], []
+        return Extraction([], [])
 
-    monkeypatch.setattr(capture, "extract_learnings", fake_extract)
+    monkeypatch.setattr(capture, "extract", fake_extract)
     store = InMemoryStore()
     from shared_context.models import Entry
     for i in range(150):

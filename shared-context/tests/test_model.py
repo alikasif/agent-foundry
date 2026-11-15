@@ -58,10 +58,18 @@ def test_large_prompt_goes_via_stdin_not_argv():
 
 
 def test_nonzero_exit_raises_model_error():
-    bad = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="boom")
+    bad = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="boom STDERR-ECHO-OF-PROMPT")
     with mock.patch("shared_context.model.subprocess.run", return_value=bad):
-        with pytest.raises(ModelError, match="boom"):
+        with pytest.raises(ModelError, match="exited 2") as exc:
             ClaudeHeadlessClient().complete("p", timeout_s=1)
+    assert "STDERR-ECHO" not in str(exc.value) and "boom" not in str(exc.value)  # I12: return code only
+
+
+def test_spawn_error_message_has_type_only():
+    with mock.patch("shared_context.model.subprocess.run", side_effect=OSError("C:/secret/path detail")):
+        with pytest.raises(ModelError) as exc:
+            ClaudeHeadlessClient().complete("p", timeout_s=1)
+    assert "secret" not in str(exc.value) and "OSError" in str(exc.value)
 
 
 def test_timeout_raises_model_error():
