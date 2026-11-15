@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from shared_context import hooks, promote
+from shared_context import evalcapture, hooks, promote
 from shared_context.models import Status
 
 MCP_SERVER_NAME = "shared-context"
@@ -471,6 +471,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_use = sub.add_parser("usage", help="what was used, from the local usage log")
     p_use.add_argument("--days", type=_positive_int, default=7, help="look back this many days (default 7)")
     p_use.set_defaults(func=_with_context(cmd_usage))
+
+    p_ev = sub.add_parser("eval", help="grade capture quality on transcripts you labeled (uses the real claude)")
+    evalcapture.add_arguments(p_ev)
+    p_ev.set_defaults(func=evalcapture.run)
     return parser
 
 
