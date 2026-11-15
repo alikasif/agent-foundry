@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from store_contract import StoreContract, make_entry
 
+from shared_context.config import Config
 from shared_context.models import Status, dump_entry
 from shared_context.store.git import GitStore
 
@@ -121,3 +122,43 @@ def test_unsafe_entry_id_rejected(tmp_path):
     with pytest.raises(ValueError):
         s.write_entry(make_entry("../evil"))
     assert s.get_entry("../evil") is None
+
+
+def _dup(tmp_path):
+    """Entry E1 present in both areas, as a git merge could leave it."""
+    s = _store(tmp_path)
+    root = tmp_path / "root"
+    s.write_entry(make_entry("E1", title="payments live copy"))
+    (root / "held" / "E1.md").write_text(
+        dump_entry(make_entry("E1", title="payments held copy", status=Status.HELD, hold_reason="r")),
+        encoding="utf-8",
+    )
+    return s, root
+
+
+def test_duplicate_id_held_copy_wins_everywhere(tmp_path):
+    s, _ = _dup(tmp_path)
+    # index still lists the entries copy (no refresh yet)
+    assert s.search("payments") == []
+    assert s.get_entry("E1").status == Status.HELD
+    assert s.get_entry("E1").title == "payments held copy"
+    found = s.find_session_entries("sess-1")
+    assert [(e.id, e.status) for e in found] == [("E1", Status.HELD)]
+    s.refresh()
+    assert s.search("payments") == []
+    assert [e.id for e in s.list_held()] == ["E1"]
+
+
+def test_duplicate_id_set_status_acts_on_held_copy_and_leaves_no_duplicate(tmp_path):
+    s, root = _dup(tmp_path)
+    s.set_status("E1", Status.HELD, "still held")
+    assert not (root / "entries" / "E1.md").exists()
+    assert s.get_entry("E1").hold_reason == "still held"
+    s2, root2 = _dup(tmp_path / "b")
+    s2.set_status("E1", Status.CONFIRMED)  # explicit release acts on the held copy
+    assert not (root2 / "held" / "E1.md").exists()
+    assert s2.get_entry("E1").title == "payments held copy"
+
+
+def test_default_stale_threshold_comes_from_config(tmp_path):
+    assert GitStore(tmp_path / "r", tmp_path / "i.db").stale_days == Config(store_path=tmp_path).stale_days

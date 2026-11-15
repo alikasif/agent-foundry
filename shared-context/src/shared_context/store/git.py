@@ -18,6 +18,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from shared_context.config import Config
 from shared_context.models import Entry, Status, dump_entry, load_entry
 from shared_context.store.base import SearchHit
 
@@ -33,7 +34,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     id UNINDEXED, content, tokenize = "unicode61 tokenchars '_'"
 );
 """
-_DEFAULT_STALE_DAYS = 90
 
 
 def _tokens(text: str) -> set[str]:
@@ -59,13 +59,13 @@ class GitStore:
         index_path: Path,
         repo_roots: dict[str, Path] | None = None,
         *,
-        stale_days: int = _DEFAULT_STALE_DAYS,
+        stale_days: int | None = None,
         now: Callable[[], datetime] = _utcnow,
     ) -> None:
         self.root = Path(root)
         self.index_path = Path(index_path)
         self.repo_roots = {k: Path(v) for k, v in (repo_roots or {}).items()}
-        self.stale_days = stale_days
+        self.stale_days = Config(store_path=self.root).stale_days if stale_days is None else stale_days
         self._now = now
         (self.root / "entries").mkdir(parents=True, exist_ok=True)
         (self.root / "held").mkdir(parents=True, exist_ok=True)
@@ -79,7 +79,7 @@ class GitStore:
     def _locate(self, entry_id: str) -> Path | None:
         if not _SAFE_ID.match(entry_id):
             return None
-        for area in ("entries", "held"):
+        for area in ("held", "entries"):  # held wins, as in refresh()
             p = self._path(entry_id, area)
             if p.is_file():
                 return p
@@ -192,13 +192,15 @@ class GitStore:
         return self._view(e) if e else None
 
     def find_session_entries(self, source_session: str) -> list[Entry]:
-        out = []
-        for area in ("entries", "held"):
+        out: dict[str, Entry] = {}
+        for area in ("entries", "held"):  # held overrides a duplicate in entries/
             for path in sorted((self.root / area).glob("*.md")):
                 e = self._read(path)
-                if e and e.source_session == source_session:
-                    out.append(self._view(e))
-        return out
+                if e:
+                    out.pop(e.id, None)
+                    if e.source_session == source_session:
+                        out[e.id] = self._view(e)
+        return list(out.values())
 
     def search(
         self,
@@ -217,8 +219,8 @@ class GitStore:
         hits: list[SearchHit] = []
         for entry_id in ids:
             path = self._path(entry_id, "entries")  # held is never searchable
-            if not path.is_file():
-                continue
+            if not path.is_file() or self._path(entry_id, "held").exists():
+                continue  # a held/ sibling is authoritative
             e = self._read(path)
             if e is None or e.status == Status.HELD:
                 continue

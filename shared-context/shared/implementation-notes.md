@@ -53,3 +53,8 @@
 - `write_entry` writes the new file atomically (temp file in the same dir + `os.replace`) before deleting the copy in the other area, so a crash can leave a duplicate but never lose the entry. `refresh()` resolves a duplicate id across areas in favour of `held/` (fail closed) and warns.
 - `set_status` for an unknown id and `record_use` for an unknown id raise KeyError. Added `test_record_use_unknown_entry_raises` to the contract suite.
 - Tests inject a fixed `now` because contract fixtures use a fixed `created` date that would otherwise age past 90 days.
+
+### Task 4 fix round 1
+- Duplicate id in both `entries/` and `held/` (e.g. after a git merge): the held copy is authoritative everywhere, consistent with `refresh()`. `_locate`/`get_entry` look in `held/` first; `search` skips any id with a `held/` sibling even before `refresh()`; `find_session_entries` returns only the held copy.
+- `set_status` on such an id loads the held copy and writes the new status; `write_entry` then removes the other-area file, so no duplicate remains. Keeping HELD keeps it held (with the new reason); an explicit release to another status moves the held copy's content to `entries/` and discards the stale entries copy. A hold is never released implicitly.
+- `stale_days` defaults to `Config(store_path=...).stale_days` (single source of truth); `GitStore(stale_days=...)` still overrides it.
