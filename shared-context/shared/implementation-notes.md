@@ -58,3 +58,13 @@
 - Duplicate id in both `entries/` and `held/` (e.g. after a git merge): the held copy is authoritative everywhere, consistent with `refresh()`. `_locate`/`get_entry` look in `held/` first; `search` skips any id with a `held/` sibling even before `refresh()`; `find_session_entries` returns only the held copy.
 - `set_status` on such an id loads the held copy and writes the new status; `write_entry` then removes the other-area file, so no duplicate remains. Keeping HELD keeps it held (with the new reason); an explicit release to another status moves the held copy's content to `entries/` and discards the stale entries copy. A hold is never released implicitly.
 - `stale_days` defaults to `Config(store_path=...).stale_days` (single source of truth); `GitStore(stale_days=...)` still overrides it.
+
+## Task 5: StoreSync
+- Remote is assumed to be `origin` and the branch is the current branch; pull/push use explicit `origin <branch>` so a clone of an empty remote (no upstream tracking) still works.
+- Throttle: last pull *attempt* time is stored in `state_dir/last_pull.json` and is recorded even when the pull fails, so an unreachable remote costs at most one git timeout per interval. `force=True` bypasses it.
+- `commit_and_push` stages `entries/` and `held/` (only those that exist) with `add -A`, so deletions from moves between areas are included; commits only if the index differs. It always attempts a push, so earlier unpushed local commits go out too.
+- Push loop: up to 3 push attempts; after a rejected push it runs `pull --rebase`; if that fails (conflict or unreachable) it stops early, aborts any rebase in progress, enqueues and returns False.
+- The queue (`state_dir/queue.json`, atomic temp+replace) records `{message, queued_at}`; the commit itself stays in the local git history, so `flush_queue` just re-runs the push-with-retry and clears the queue on success. A corrupt or non-list queue is logged and treated as empty. Queue entries are not deduplicated.
+- Identity: if `user.name`/`user.email` are not both configured, every git call gets `-c user.name=shared-context -c user.email=shared-context@localhost` (no config is written). Resolved once per StoreSync instance.
+- Extra constructor kwarg `git_timeout_s` (default 30). Env: `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`, stdin is DEVNULL.
+- Added tests beyond the five named: no-change no-commit, only entries/held staged, conflict aborted and queued, corrupt queue, fallback identity, timeout never raises.
