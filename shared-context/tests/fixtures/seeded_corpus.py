@@ -42,6 +42,13 @@ SECRETS: list[tuple[str, str, str]] = [
         "-----BEGIN PGP PRIVATE KEY BLOCK-----\nNOTAREALPGPBODY\n-----END PGP PRIVATE KEY BLOCK-----",
         "NOTAREALPGPBODY",
     ),
+    ("redis_empty_user", "redis://:hunter2fakepw@cache:6379", "hunter2fakepw"),
+    ("url_raw_at", "postgres://admin:p@ss:w0rd-fake@db/app", "w0rd-fake"),
+    ("basic_short_b64", "Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+    ("long_key_name", "MY_VERY_LONG_SERVICE_NAME_FOR_THE_PAYMENTS_BACKEND_PASSWORD=fakepw12345", "fakepw12345"),
+    ("passphrase", "passphrase = 'fake horse staple'", "fake horse staple"),
+    ("pass_segment", "pass=fakeP4ss", "fakeP4ss"),
+    ("pwd_segment", "DB_PWD=fakeP4ssword", "fakeP4ssword"),
 ]
 
 DENYLIST = ["Acme Corp", "Globex"]
@@ -52,6 +59,11 @@ CUSTOMER_TEXT = [
 ]
 
 CLEAN_TEXT = [
+    "bypass=true", "compass=north", "passport=AB123456", "passthrough=enabled", "keepass=installed",
+    "pass=true", "password_policy: strict", "password_hash = bcrypt(pw)", "token_count = len(tokens)",
+    "tokenizer=sentencepiece", "secret_name=prod-db-creds", "api_key_env=OPENAI_API_KEY",
+    "password = get_password_from_vault()", "Basic configuration of the proxy",
+    "see https://example.com:8080/docs and ssh://git@host/repo.git",
     "Basic configuration of the pass-through proxy; tests passed: 43; token budget is 800.",
     "Use the retry helper in src/shared_context/store/memory.py when the store is busy.",
     "The function getUserAccountPreferencesHandler returns early on empty input.",

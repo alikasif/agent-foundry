@@ -25,11 +25,28 @@ _WHOLE = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
 ]
 
-_PASS_KW = r"(?:password|passwd|pwd|pass(?!ed\b|ing\b|es\b|age\b))"
-_SECRET_KW = r"(?:secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)"
-# Key names are bounded (<=40 chars each side of the keyword) and must start at the
-# beginning of a word run, so matching stays linear on long dash/dot-separated input.
-_KEY = r"(?<![\w.-])[\w.-]{0,40}?%s[\w.-]{0,40}[\"']?[ \t]*[:=][ \t]*"
+# Long keywords may sit anywhere in a key; the short ones (`pass`, `pwd`) must start a key
+# segment and not be followed by a letter (so `bypass`, `passport`, `passthrough` are clean).
+_PASS_KW = (
+    r"(?:[\w.-]{0,64}?(?:password|passwd|passphrase)"
+    r"|(?:[\w.-]{0,64}?[_.-])?(?:pass|pwd)(?![A-Za-z]))"
+)
+_SECRET_KW = r"[\w.-]{0,64}?(?:secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)"
+# Keys start at the beginning of a word run and are bounded, so matching stays linear on
+# long dash/dot-separated input. `suf` is the rest of the key after the keyword.
+_KEY = r"(?<![\w.-])%s(?P<suf>[\w.-]{0,40})[\"']?[ \t]*[:=][ \t]*"
+
+# Key suffixes that mark config/metadata rather than a secret value (`password_policy`).
+_BENIGN_SUFFIX = re.compile(
+    r"(?i)(?:^|[_.-])(?:policy|hash|hashed|count|counts|name|names|env|file|path|length|len"
+    r"|min|max|field|prompt|hint|rules|regex|pattern|type|header|budget|limit|ttl|expiry)(?:$|[_.-])"
+    r"|izers?$"
+)
+_BENIGN_VALUE = re.compile(
+    r"(?i)(?:true|false|null|none|nil|yes|no|on|off)"  # literals
+    r"|[A-Za-z_][\w.]{0,60}\([\w., ]{0,60}\)"  # simple call: get_password_from_vault()
+    r"|\$\{?[A-Z_][A-Z0-9_]{0,60}\}?"  # env reference: $DB_PASS, ${DB_PASS}
+)
 
 
 def _keyed(kw: str, min_len: int) -> list[re.Pattern[str]]:
@@ -40,15 +57,26 @@ def _keyed(kw: str, min_len: int) -> list[re.Pattern[str]]:
     return [re.compile(quoted), re.compile(bare)]
 
 
+def _benign(m: re.Match[str]) -> bool:
+    suf = m.groupdict().get("suf")
+    if suf is None:
+        return False
+    return bool(_BENIGN_SUFFIX.search(suf) or _BENIGN_VALUE.fullmatch(m.group("v")))
+
+
 # Patterns where only the value (group "v") is replaced, keeping the key/prefix.
 _VALUE = [
     re.compile(r"(?i)\bBearer\s+(?P<v>" + _NOT_ALREADY + r"[A-Za-z0-9._~+/=-]{16,})"),
     re.compile(
-        r"(?i)\bBasic\s+(?P<v>" + _NOT_ALREADY + r"(?=[A-Za-z0-9+/]*[0-9=+/])[A-Za-z0-9+/]{8,}={0,2})"
+        r"(?i)\bBasic\s+(?P<v>"
+        + _NOT_ALREADY
+        # digit/=/+// or an interior lower->UPPER step marks base64 rather than an English word
+        + r"(?=[A-Za-z0-9+/]{0,200}(?:[0-9=+/]|(?-i:[a-z][A-Z])))[A-Za-z0-9+/]{8,200}={0,2})"
     ),
+    # scheme://[user]:password@host ; the password may hold raw '@' (ends at the last '@' of the authority)
     re.compile(
-        r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,20}://[^\s:/@]{1,100}:"
-        r"(?P<v>" + _NOT_ALREADY + r"[^\s@/]{1,200})(?=@)"
+        r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,20}://[^\s:/@]{0,100}:"
+        r"(?P<v>" + _NOT_ALREADY + r"[^\s/]{1,200})(?=@[^\s@/]{0,255}(?:[/\s?#]|$))"
     ),
     *_keyed(_PASS_KW, 3),
     *_keyed(_SECRET_KW, 8),
@@ -150,6 +178,8 @@ def scrub(text: str, rules: ScrubRules) -> ScrubResult:
 
         def repl(m: re.Match[str]) -> str:
             nonlocal found
+            if _benign(m):
+                return m.group(0)
             found += 1
             s = m.group(0)
             a = m.start("v") - m.start()
