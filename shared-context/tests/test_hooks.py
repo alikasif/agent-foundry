@@ -535,6 +535,49 @@ def test_worker_skips_when_session_lock_held(tmp_path):
     assert (state / "locks" / f"session-{SID}.lock").exists()  # someone else's lock left alone
 
 
+@pytest.mark.parametrize("mode", ["final", "precompact"])
+def test_final_worker_waits_for_session_lock(tmp_path, mode):
+    """The end-of-session pass must not be lost because an incremental run holds the lock."""
+    state = tmp_path / "state"
+    lock = state / "locks" / f"session-{SID}.lock"
+    token = hooks.acquire_lock(lock, time.time())
+    sleeps: list[float] = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) == 3:
+            hooks.release_lock(lock, token)  # the incremental run finishes
+
+    transcript = write_transcript(tmp_path / "t.jsonl", "content")
+    client = StubModelClient([resp(learning())])
+    store = mem_store()
+    hooks.worker_main(mode, SID, str(transcript), cfg=Config(store_path=tmp_path / "s"), state_dir=state,
+                      client=client, store_factory=lambda c, s: store,
+                      sync_factory=lambda c, s, now, git_timeout_s: FakeSync(), now=lambda: NOW,
+                      sleep=fake_sleep)
+    assert len(sleeps) == 3
+    assert len(client.prompts) == 1
+
+
+def test_incremental_worker_does_not_wait_for_session_lock(tmp_path):
+    state = tmp_path / "state"
+    assert hooks.acquire_lock(state / "locks" / f"session-{SID}.lock", time.time())
+    hooks.worker_main("incremental", SID, "t", cfg=Config(store_path=tmp_path / "s"), state_dir=state,
+                      client=StubModelClient([]), store_factory=boom, sync_factory=boom, sleep=boom)
+
+
+def test_log_scrubs_other_module_messages(tmp_path):
+    import logging
+
+    state = tmp_path / "state"
+    with hooks._hook_logging(state):
+        logging.getLogger("shared_context.sync").warning(
+            "git %s exited %d: %s", "push", 128, "fatal: https://bob:S3cretPassw0rd99@example.com/r.git")
+    text = (state / "hooks.log").read_text(encoding="utf-8")
+    assert "git push exited 128" in text
+    assert "S3cretPassw0rd99" not in text
+
+
 def test_lock_contention_and_stale_recovery(tmp_path):
     lock = tmp_path / "locks" / "x.lock"
     now = time.time()

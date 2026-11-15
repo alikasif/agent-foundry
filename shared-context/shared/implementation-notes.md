@@ -151,3 +151,7 @@ Sources: ctx7 `/websites/code_claude` (pages code.claude.com/docs/en/hooks and h
 - Stale-lock takeover is unlink-then-create; two processes taking over the same stale lock at the same moment can both win (needs a crashed holder plus a tight race).
 - StoreSync logs git's own stderr verbatim at WARNING into hooks.log (paths and entry ids, never entry bodies).
 - Project-scope init writes an absolute, user-specific interpreter path into a file meant for version control.
+
+### Task 9 refinement (self-review)
+- Session lock: `incremental` workers still exit quietly when the lock is held, but `final` and `precompact` workers WAIT for it (up to `SESSION_LOCK_WAIT_S` = 180 s, above the 120 s extraction timeout). Otherwise a session that ends while the last Stop's incremental run is mid model call would lose the end-of-session pass and its retractions. Same purpose as the controller's "exit quietly" rule (serialize runs), without losing the final pass.
+- hooks.log: records from other modules (StoreSync logs git stderr verbatim, which can include remote URLs or commit subjects) are run through `scrub()` with default rules and cut to 500 chars before being written. Records from `shared_context.hooks` are our own fixed strings.

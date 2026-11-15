@@ -59,6 +59,7 @@ PULL_GIT_TIMEOUT_S = 3  # per git call in the prompt hook; keeps an unreachable 
 WORKER_GIT_TIMEOUT_S = 30
 LOCK_STALE_S = 600
 STORE_LOCK_WAIT_S = 60
+SESSION_LOCK_WAIT_S = 180  # > EXTRACT_TIMEOUT_S (120): one incremental model call plus margin
 MAX_STDIN_BYTES = 8_000_000
 # The host caps additionalContext / systemMessage at 10,000 chars; stay below it.
 MAX_CONTEXT_CHARS = 9_000
@@ -89,6 +90,23 @@ class _TypeOnlyFormatter(logging.Formatter):
         return ""
 
 
+class _ScrubOtherModules(logging.Filter):
+    """Records from other modules (e.g. StoreSync's verbatim git stderr) are
+    scrubbed and shortened: they may carry remote URLs with credentials."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == log.name:
+            return True
+        try:
+            from shared_context.scrub import ScrubRules, scrub
+
+            msg = scrub(record.getMessage(), ScrubRules()).text
+        except Exception:  # noqa: BLE001
+            msg = "(message dropped)"
+        record.msg, record.args = msg[:500], None
+        return True
+
+
 @contextlib.contextmanager
 def _hook_logging(state_dir: Path) -> Iterator[None]:
     logger = logging.getLogger("shared_context")
@@ -101,6 +119,7 @@ def _hook_logging(state_dir: Path) -> Iterator[None]:
                 os.replace(path, path.with_suffix(".log.1"))
         handler = logging.FileHandler(path, encoding="utf-8", delay=True)
         handler.setFormatter(_TypeOnlyFormatter("%(asctime)s %(process)d %(name)s %(levelname)s %(message)s"))
+        handler.addFilter(_ScrubOtherModules())
     except Exception:  # noqa: BLE001 - no log file is not a reason to fail
         handler = None
     saved = (logger.level, logger.propagate)
@@ -447,7 +466,12 @@ def worker_main(
                     and isinstance(transcript_path, str) and transcript_path):
                 return 0
             lock = state / "locks" / f"session-{_safe_name(session_id)}.lock"
-            token = acquire_lock(lock, time.time())
+            if mode == "incremental":
+                token = acquire_lock(lock, time.time())
+            else:
+                # final / precompact must not be lost to a running incremental pass:
+                # wait for it (the worker is detached, so waiting costs the host nothing).
+                token = _acquire_waiting(lock, SESSION_LOCK_WAIT_S, sleep)
             if not token:
                 log.info("worker: capture already running for this session; skipped")
                 return 0
