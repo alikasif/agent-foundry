@@ -262,3 +262,6 @@ Sources: ctx7 `/websites/code_claude` (pages code.claude.com/docs/en/hooks and h
 - A `GitStore` whose index file is corrupted while the process is running fails searches until the next `refresh()`/open (only `refresh` rebuilds).
 - `held approve` on a still-risky entry (no `--force`) still calls publish after redacting the held file; under R9 that publishes nothing (harmless no-op).
 - Not fixed by design (accepted for the PoC per the final review triage): detached worker survival on Windows (release gate), an orphaned prompt-hook git child outliving its lock, `init` editing `~/.claude.json`, `held approve` not recording the approver, cosmetic ledger minors.
+
+### Follow-up: store repo git hooks are honoured
+- An intermediate stage 4 edit had added `--no-verify` to the sync commit and push. It was removed: sync runs the store repo's own (and global) git hooks, so a team's pre-commit or pre-push secret scanner such as gitleaks still guards what shared-context commits. If such a hook rejects a commit or push, the sync fails, logs git's message and queues, as for any other git failure.

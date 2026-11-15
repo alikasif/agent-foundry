@@ -267,7 +267,7 @@ class StoreSync:
         staged = [p for p in paths if self._quiet_rc("diff", "--cached", "--quiet", "--", p) != 0]
         if not staged:
             return True, False
-        rc, _ = self._git("commit", "--quiet", "--no-verify", "-m", message, "--", *staged)
+        rc, _ = self._git("commit", "--quiet", "-m", message, "--", *staged)
         return rc == 0, rc == 0
 
     def _ahead(self) -> bool:
@@ -432,7 +432,7 @@ class StoreSync:
         if branch is None:
             return False
         for _ in range(_MAX_PUSH_ATTEMPTS):
-            rc, _ = self._git("push", "--quiet", "--no-verify", _REMOTE, branch)
+            rc, _ = self._git("push", "--quiet", _REMOTE, branch)
             if rc == 0:
                 return True
             # Rejected (or unreachable): commit anything written meanwhile, rebase, retry.
