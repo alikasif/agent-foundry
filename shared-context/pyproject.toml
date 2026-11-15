@@ -5,11 +5,13 @@ description = "Shared, scrubbed project memory for Claude Code sessions"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "mcp>=2.3.0",
     "pyyaml>=6.0.3",
 ]
 
 [project.scripts]
 shared-context = "shared_context.cli:main"
+shared-context-mcp = "shared_context.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
