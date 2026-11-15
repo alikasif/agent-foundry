@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Iterator
 
 from shared_context.models import Entry, Status
 from shared_context.store.base import SearchHit
@@ -71,6 +72,16 @@ class InMemoryStore:
 
     def list_held(self) -> list[Entry]:
         return [copy.deepcopy(e) for e in self._entries.values() if e.status == Status.HELD]
+
+    def iter_entries(self, status: Status | None = None) -> Iterator[Entry]:
+        for e in sorted(self._entries.values(), key=lambda e: e.id):
+            if status is None and e.status == Status.HELD:
+                continue
+            if status is None or e.status == status:
+                yield copy.deepcopy(e)
+
+    def delete_entry(self, entry_id: str) -> None:
+        del self._entries[entry_id]  # KeyError if unknown
 
     def refresh(self) -> None:
         return None

@@ -14,7 +14,7 @@ import os
 import re
 import sqlite3
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -266,3 +266,35 @@ class GitStore:
             if e and e.status == Status.HELD:
                 out.append(e)
         return out
+
+    def iter_entries(self, status: Status | None = None) -> Iterator[Entry]:
+        held_ids = {p.stem for p in (self.root / "held").glob("*.md")}
+        areas = ["held"] if status == Status.HELD else ["entries"]
+        for area in areas:
+            for path in sorted((self.root / area).glob("*.md")):
+                if area == "entries" and path.stem in held_ids:
+                    continue  # a held/ sibling is authoritative
+                e = self._read(path)
+                if e is None:
+                    continue
+                if area == "held" and e.status != Status.HELD:
+                    continue
+                e = self._view(e)
+                if (status is None and e.status != Status.HELD) or e.status == status:
+                    yield e
+
+    def delete_entry(self, entry_id: str) -> None:
+        if not _SAFE_ID.match(entry_id):
+            raise KeyError(entry_id)
+        removed = False
+        for area in ("entries", "held"):
+            try:
+                self._path(entry_id, area).unlink()
+                removed = True
+            except FileNotFoundError:
+                pass
+        if not removed:
+            raise KeyError(entry_id)
+        with self._db() as conn:
+            conn.execute("DELETE FROM fts WHERE id = ?", (entry_id,))
+            conn.execute("DELETE FROM docs WHERE id = ?", (entry_id,))

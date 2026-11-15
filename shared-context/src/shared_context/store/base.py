@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterator
 from typing import Protocol
 
 from shared_context.models import Entry, Status
@@ -36,5 +37,11 @@ class StorageInterface(Protocol):
     def set_status(self, entry_id: str, status: Status, reason: str | None = None) -> None: ...
 
     def list_held(self) -> list[Entry]: ...
+
+    def iter_entries(self, status: Status | None = None) -> Iterator[Entry]:
+        """Read-only enumeration. Held entries are yielded only when ``status=HELD``."""
+
+    def delete_entry(self, entry_id: str) -> None:
+        """Remove an entry from every area and the index. KeyError if unknown."""
 
     def refresh(self) -> None: ...

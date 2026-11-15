@@ -127,3 +127,31 @@ class StoreContract:
         store.write_entry(make_entry("E1"))
         store.refresh()
         assert store.get_entry("E1") is not None
+
+    def test_iter_entries_all_excludes_held(self, store):
+        store.write_entry(make_entry("E1"))
+        store.write_entry(make_entry("E2", status=Status.CONFIRMED))
+        store.write_entry(make_entry("E3", status=Status.HELD, hold_reason="x"))
+        assert {e.id for e in store.iter_entries()} == {"E1", "E2"}
+
+    def test_iter_entries_status_filter(self, store):
+        store.write_entry(make_entry("E1"))
+        store.write_entry(make_entry("E2", status=Status.CONFIRMED))
+        store.write_entry(make_entry("E3", status=Status.HELD, hold_reason="x"))
+        assert [e.id for e in store.iter_entries(Status.UNVERIFIED)] == ["E1"]
+        assert [e.id for e in store.iter_entries(Status.HELD)] == ["E3"]
+
+    def test_delete_entry_removes_everywhere(self, store):
+        store.write_entry(make_entry("E1", status=Status.HELD, hold_reason="x"))
+        store.write_entry(make_entry("E2", title="payments backoff"))
+        store.delete_entry("E1")
+        store.delete_entry("E2")
+        assert store.get_entry("E1") is None
+        assert store.get_entry("E2") is None
+        assert store.list_held() == []
+        assert store.search("payments retry") == []
+        assert list(store.iter_entries()) == []
+
+    def test_delete_entry_unknown_raises(self, store):
+        with pytest.raises(KeyError):
+            store.delete_entry("nope")
