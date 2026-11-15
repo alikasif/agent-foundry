@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+import pytest
 
 from shared_context.config import Config, load_config
 
@@ -23,3 +26,29 @@ def test_state_dir_default_and_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("SHARED_CONTEXT_STATE", str(tmp_path / "st"))
     assert resolve_state_dir() == tmp_path / "st"
     assert index_path(tmp_path / "st") == tmp_path / "st" / "index" / "index.db"
+
+
+def _cfg_file(tmp_path, text):
+    p = tmp_path / "config.yaml"
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_store_path_tilde_expanded_in_file_and_env(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("SHARED_CONTEXT_STORE", raising=False)
+    cfg = load_config(_cfg_file(tmp_path, "store_path: ~/team-store\n"))
+    assert cfg.store_path == Path(os.path.expanduser("~/team-store"))
+    assert "~" not in str(cfg.store_path)
+    monkeypatch.setenv("SHARED_CONTEXT_STORE", "~/env-store")
+    assert "~" not in str(load_config(_cfg_file(tmp_path, "")).store_path)
+
+
+@pytest.mark.parametrize("text", ['top_k: "3"\n', "top_k: true\n", "token_cap: 1.5\n", "store_path: 5\n",
+                                  "pull_min_interval_s: null\n"])
+def test_wrong_typed_values_rejected(monkeypatch, tmp_path, text):
+    monkeypatch.delenv("SHARED_CONTEXT_STORE", raising=False)
+    with pytest.raises(ValueError):
+        load_config(_cfg_file(tmp_path, text))

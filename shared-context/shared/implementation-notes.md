@@ -205,3 +205,12 @@ Sources: ctx7 `/websites/code_claude` (pages code.claude.com/docs/en/hooks and h
 - `extra_patterns` matches now set `risky` (the entry is held), like credentials and denylist terms. The earlier test asserting the opposite was flipped.
 - Removed the dead first `_entropy`/`_looks_secret` definitions (shadowed duplicates).
 - The strict xfail for bare `key=<64 hex>` is now a normal passing test.
+
+### Stage 2: entry and store robustness (I1 + minors)
+- `load_entry` type-checks: `title`, `author`, `topic_key`, `source_session` must be strings; `applies_to`/`evidence` lists of strings (null means empty); `kind`/`status` scalars of a valid enum; `hold_reason`/`stale_reason` string or null; `id`/`created` scalars (stringified, as before, since YAML may parse them as numbers/dates). Anything else raises ValueError whose message names the field, never the value.
+- `GitStore._read` catches `Exception` per file and logs the file NAME and the exception TYPE only (the old log included the YAML error message, which quotes entry text: part of I12).
+- `refresh()` catches `sqlite3.DatabaseError`, deletes the index file (plus `-wal`/`-shm`/`-journal`) and rebuilds it. Only `refresh()` does this (it runs in `__init__`); a store whose index is corrupted while it is open will fail its next search until the next open/refresh. Accepted.
+- Fail closed for `held/`: the HELD view is forced centrally in `_read` for any file under `held/`, so `get_entry`, `find_session_entries`, `list_held`, `iter_entries` and capture's "was held" check all agree (missing `hold_reason` becomes "found in held/").
+- Windows: `os.replace`/`os.unlink` in the store retry `PermissionError` up to 5 times with 50/100/150/200 ms sleeps (about 0.5 s worst case), then re-raise.
+- `load_config`: integer keys must be real ints (bools and quoted numbers rejected with ValueError naming the key); `store_path` must be a string; `~` is expanded in `store_path` from the file and from `SHARED_CONTEXT_STORE`. Decision: wrong types raise rather than being coerced, so the problem is visible (the CLI still reports it as "not configured" and hooks log `ValueError`; a clearer CLI message was not added to keep scope).
+- Hooks expand `~` in the payload's `transcript_path` before spawning the worker.

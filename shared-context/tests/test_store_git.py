@@ -162,3 +162,99 @@ def test_duplicate_id_set_status_acts_on_held_copy_and_leaves_no_duplicate(tmp_p
 
 def test_default_stale_threshold_comes_from_config(tmp_path):
     assert GitStore(tmp_path / "r", tmp_path / "i.db").stale_days == Config(store_path=tmp_path).stale_days
+
+
+# ---- final review I1: one bad file or a junk index must never disable the store ----
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("title: Retry policy for payments", "title: 2024"),
+        ("title: Retry policy for payments", "title: null"),
+        ("applies_to: []", "applies_to:\n- 1"),
+        ("kind: decision", "kind:\n- decision"),
+    ],
+)
+def test_wrong_typed_entry_skipped_store_still_opens(tmp_path, caplog, old, new):
+    root = tmp_path / "root"
+    (root / "entries").mkdir(parents=True)
+    (root / "entries" / "E1.md").write_text(dump_entry(make_entry("E1")), encoding="utf-8")
+    bad = dump_entry(make_entry("E2", body="SECRETBODYMARK payments")).replace(old, new, 1)
+    assert new in bad
+    (root / "entries" / "E2.md").write_text(bad, encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        s = _store(tmp_path)
+    assert [h.entry.id for h in s.search("payments retry")] == ["E1"]
+    assert s.get_entry("E2") is None
+    assert [e.id for e in s.iter_entries()] == ["E1"]
+    assert s.find_session_entries("sess-1")[0].id == "E1"
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "E2.md" in text and "SECRETBODYMARK" not in text and "2024" not in text
+
+
+def test_yaml_error_log_has_no_entry_text(tmp_path, caplog):
+    s = _store(tmp_path)
+    (tmp_path / "root" / "entries" / "E9.md").write_text(
+        "---\ntitle: [unclosed LEAKYTITLE\n---\nbody", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        s.refresh()
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "E9.md" in text and "LEAKYTITLE" not in text
+
+
+def test_junk_index_db_is_rebuilt(tmp_path):
+    s = _store(tmp_path)
+    s.write_entry(make_entry("E1"))
+    db = tmp_path / "idx" / "index.db"
+    db.write_bytes(b"this is not a sqlite database at all" * 100)
+    s2 = _store(tmp_path)
+    assert [h.entry.id for h in s2.search("payments retry")] == ["E1"]
+
+
+def test_file_under_held_is_always_held_view(tmp_path):
+    s = _store(tmp_path)
+    root = tmp_path / "root"
+    (root / "held" / "E1.md").write_text(dump_entry(make_entry("E1", status=Status.UNVERIFIED)),
+                                         encoding="utf-8")
+    s.refresh()
+    e = s.get_entry("E1")
+    assert e.status == Status.HELD and e.hold_reason
+    assert [x.id for x in s.list_held()] == ["E1"]
+    assert [(x.id, x.status) for x in s.find_session_entries("sess-1")] == [("E1", Status.HELD)]
+    assert s.search("payments retry") == []
+    assert list(s.iter_entries()) == []
+
+
+def test_atomic_write_retries_transient_permission_error(tmp_path, monkeypatch):
+    import shared_context.store.git as gitmod
+
+    s = _store(tmp_path)
+    real = gitmod.os.replace
+    fails = {"n": 2}
+
+    def flaky(a, b):
+        if fails["n"]:
+            fails["n"] -= 1
+            raise PermissionError(13, "sharing violation")
+        return real(a, b)
+
+    monkeypatch.setattr(gitmod.os, "replace", flaky)
+    monkeypatch.setattr(gitmod, "_RETRY_SLEEP_S", 0.0, raising=False)
+    s.write_entry(make_entry("E1"))
+    assert fails["n"] == 0
+    assert s.get_entry("E1") is not None
+
+
+def test_atomic_write_gives_up_after_bounded_retries(tmp_path, monkeypatch):
+    import shared_context.store.git as gitmod
+
+    s = _store(tmp_path)
+
+    def always(a, b):
+        raise PermissionError(13, "sharing violation")
+
+    monkeypatch.setattr(gitmod.os, "replace", always)
+    monkeypatch.setattr(gitmod, "_RETRY_SLEEP_S", 0.0, raising=False)
+    with pytest.raises(PermissionError):
+        s.write_entry(make_entry("E1"))
+    assert [p.name for p in (tmp_path / "root").rglob("*.tmp")] == []

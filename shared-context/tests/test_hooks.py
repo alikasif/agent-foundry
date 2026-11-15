@@ -461,6 +461,16 @@ def test_after_turn_spawns_background_not_inline(tmp_path, event, mode):
     assert cmd[1:] == ["-m", "shared_context.hooks", "worker", mode, SID, str(tmp_path / "t.jsonl")]
 
 
+def test_background_event_expands_tilde_in_transcript_path(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    payload = {**turn_payload(tmp_path), "transcript_path": "~/proj/t.jsonl"}
+    _rc, _out, spawned = run_main("after-turn", payload, tmp_path)
+    assert spawned[0][-1] == os.path.expanduser("~/proj/t.jsonl")
+    assert "~" not in spawned[0][-1]
+
+
 def test_background_event_does_not_open_store_or_model(tmp_path):
     out = io.StringIO()
     spawned: list = []

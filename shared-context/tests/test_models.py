@@ -53,3 +53,27 @@ def test_enum_values():
 def test_load_entry_wraps_yaml_errors_as_valueerror(front):
     with pytest.raises(ValueError):
         load_entry(f"---\n{front}---\nbody")
+
+
+# I1: a hand-edited entry with wrong field types must be rejected as ValueError, not crash later.
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("title: Use anyio for async tests", "title: 2024"),
+        ("title: Use anyio for async tests", "title: null"),
+        ("author: alice", "author: [a, b]"),
+        ("topic_key: testing-async", "topic_key: 7"),
+        ("source_session: sess-1", "source_session: {a: 1}"),
+        ("- src/a.py", "- 1"),
+        ("- commit abc123", "- null"),
+        ("kind: gotcha", "kind: [gotcha]"),
+        ("status: unverified", "status: {x: 1}"),
+        ("stale_reason: gone", "stale_reason: 5"),
+        ("applies_to:\n- src/a.py\n- tests/", "applies_to: just-a-string"),
+    ],
+)
+def test_load_entry_rejects_wrong_types(old, new):
+    text = dump_entry(make_entry())
+    assert old in text
+    with pytest.raises(ValueError):
+        load_entry(text.replace(old, new, 1))

@@ -112,12 +112,37 @@ def load_entry(text: str) -> Entry:
     if not isinstance(meta, dict):
         raise ValueError("frontmatter must be a mapping")
     try:
-        meta["kind"] = Kind(meta["kind"])
-        meta["status"] = Status(meta["status"])
-        meta["applies_to"] = list(meta.get("applies_to") or [])
-        meta["evidence"] = list(meta.get("evidence") or [])
-        for key in ("id", "created"):
-            meta[key] = str(meta[key])
+        meta["kind"] = Kind(_scalar(meta["kind"], "kind"))
+        meta["status"] = Status(_scalar(meta["status"], "status"))
+        meta["applies_to"] = _str_list(meta.get("applies_to"), "applies_to")
+        meta["evidence"] = _str_list(meta.get("evidence"), "evidence")
+        for key in ("id", "created"):  # YAML may read ids/timestamps as numbers or dates
+            meta[key] = str(_scalar(meta[key], key))
+        for key in _STR_FIELDS:
+            if not isinstance(meta[key], str):
+                raise ValueError(f"field {key} must be a string")
+        for key in _OPT_STR_FIELDS:
+            if meta.get(key) is not None and not isinstance(meta[key], str):
+                raise ValueError(f"field {key} must be a string or null")
         return Entry(body=body, **{k: meta[k] for k in meta if k in _META_FIELDS})
     except (KeyError, TypeError) as exc:
-        raise ValueError(f"invalid entry frontmatter: {exc!r}") from exc
+        # The message names the field only (never its value): callers may log it.
+        raise ValueError(f"invalid entry frontmatter: {type(exc).__name__} {exc.args[0] if exc.args else ''}"[:120]) from exc
+
+
+_STR_FIELDS = ("title", "author", "topic_key", "source_session")
+_OPT_STR_FIELDS = ("hold_reason", "stale_reason")
+
+
+def _scalar(value: object, name: str) -> object:
+    if isinstance(value, (list, dict)) or value is None:
+        raise ValueError(f"field {name} must be a scalar")
+    return value
+
+
+def _str_list(value: object, name: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError(f"field {name} must be a list of strings")
+    return list(value)

@@ -434,7 +434,7 @@ def _background(event: str, payload: object, state_dir: Path,
     if not (isinstance(sid, str) and sid and isinstance(transcript, str) and transcript):
         log.info("%s hook: session_id or transcript_path missing", event)
         return
-    cmd = worker_command(EVENT_MODES[event], sid, transcript)
+    cmd = worker_command(EVENT_MODES[event], sid, os.path.expanduser(transcript))
     if spawner is None:
         state_dir.mkdir(parents=True, exist_ok=True)
         spawn_detached(cmd, cwd=state_dir)

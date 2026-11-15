@@ -55,8 +55,21 @@ def load_config(path: Path | None = None) -> Config:
     unknown = set(data) - known
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
-    data["store_path"] = Path(data.get("store_path") or DEFAULT_HOME / "store")
+    for f in fields(Config):
+        if f.name in data and f.type in ("int", int):
+            value = data[f.name]
+            # bool is an int subclass; a quoted "3" would silently break comparisons later.
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"config key {f.name} must be a whole number")
+    store = data.get("store_path")
+    if store is not None and not isinstance(store, str):
+        raise ValueError("config key store_path must be a path string")
+    data["store_path"] = _expand(store) if store else DEFAULT_HOME / "store"
     env = os.environ.get(ENV_STORE)
     if env:
-        data["store_path"] = Path(env)
+        data["store_path"] = _expand(env)
     return Config(**data)
+
+
+def _expand(path: str) -> Path:
+    return Path(os.path.expanduser(path))

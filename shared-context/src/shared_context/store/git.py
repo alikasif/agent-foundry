@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,6 +53,23 @@ def _area(status: Status) -> str:
     return "held" if status == Status.HELD else "entries"
 
 
+_RETRY_ATTEMPTS = 5
+_RETRY_SLEEP_S = 0.05
+
+
+def _retry_fs(fn: Callable[..., object], *args: object) -> object:
+    """Windows: a scanner, indexer or git briefly holding a file makes replace/unlink fail
+    with PermissionError. Retry a few times (bounded, well under a second), then re-raise."""
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return fn(*args)
+        except PermissionError:
+            if attempt == _RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(_RETRY_SLEEP_S * (attempt + 1))
+    return None  # pragma: no cover
+
+
 class GitStore:
     def __init__(
         self,
@@ -86,14 +104,20 @@ class GitStore:
         return None
 
     def _read(self, path: Path) -> Entry | None:
+        """The entry in `path`, or None. Never raises; logs the file NAME and exception TYPE only
+        (a YAML error message would quote entry text)."""
         try:
             e = load_entry(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError) as exc:
-            log.warning("skipping malformed entry file %s: %s", path, exc)
+        except Exception as exc:  # noqa: BLE001 - one bad file must never disable the store
+            log.warning("skipping malformed entry file %s (%s)", path.name, type(exc).__name__)
             return None
         if e.id != path.stem:
-            log.warning("skipping %s: frontmatter id %r does not match filename", path, e.id)
+            log.warning("skipping %s: frontmatter id does not match the file name", path.name)
             return None
+        if path.parent.name == "held" and e.status != Status.HELD:
+            # Fail closed: whatever its frontmatter says, a file under held/ is held.
+            e = dataclasses.replace(e, status=Status.HELD,
+                                    hold_reason=e.hold_reason or "found in held/", stale_reason=None)
         return e
 
     @staticmethod
@@ -102,7 +126,7 @@ class GitStore:
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(text.encode("utf-8"))
-            os.replace(tmp, path)
+            _retry_fs(os.replace, tmp, path)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
@@ -141,6 +165,17 @@ class GitStore:
                     if area == "entries":
                         continue  # fail closed: the held copy wins
                 found[e.id] = e
+        try:
+            self._rebuild(found)
+        except sqlite3.DatabaseError as exc:
+            # A corrupt or junk index file: it is only a cache, so delete and rebuild it.
+            log.warning("search index unusable (%s); rebuilding it", type(exc).__name__)
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                with contextlib.suppress(FileNotFoundError):
+                    _retry_fs(os.unlink, Path(str(self.index_path) + suffix))
+            self._rebuild(found)
+
+    def _rebuild(self, found: dict[str, Entry]) -> None:
         with self._db() as conn:
             conn.execute("DELETE FROM fts")
             conn.execute("DELETE FROM docs")
@@ -182,7 +217,7 @@ class GitStore:
         # write the new file first so a crash never loses the entry
         self._atomic_write(self._path(entry.id, area), dump_entry(entry))
         with contextlib.suppress(FileNotFoundError):
-            self._path(entry.id, other).unlink()
+            _retry_fs(os.unlink, self._path(entry.id, other))
         with self._db() as conn:
             self._index_put(conn, entry)
 
@@ -289,7 +324,7 @@ class GitStore:
         removed = False
         for area in ("entries", "held"):
             try:
-                self._path(entry_id, area).unlink()
+                _retry_fs(os.unlink, self._path(entry_id, area))
                 removed = True
             except FileNotFoundError:
                 pass
