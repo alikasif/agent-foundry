@@ -1,4 +1,10 @@
-"""`shared-context` command line. Task 9 adds `init`; Task 11 adds the rest."""
+"""`shared-context` command line: `init` (Task 9) and the review/maintenance commands (Task 11).
+
+Exit codes: 0 success, 1 user error (not found, refused, store not configured,
+unexpected failure), 2 usage errors (argparse). Ordinary failures print one short
+plain line (with the exception TYPE only) and never a traceback. Anything derived
+from an entry is stripped of control characters and length-bounded before printing.
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,12 +13,17 @@ import difflib
 import json
 import os
 import sys
+import unicodedata
 import uuid
-from datetime import datetime
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from shared_context import hooks
+from shared_context import hooks, promote
+from shared_context.models import Status
 
 MCP_SERVER_NAME = "shared-context"
 MCP_COMMAND = "shared-context-mcp"  # Task 10 console script
@@ -173,6 +184,149 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------ review commands
+NOT_CONFIGURED = ("shared-context: the store is not configured (no git clone at the configured "
+                  "path); set SHARED_CONTEXT_STORE or clone the store repo first.")
+MAX_TITLE = 80
+MAX_REASON = 160
+
+
+@dataclass
+class Context:
+    """Everything a store command needs; tests build one around an in-memory store."""
+
+    store: Any
+    cfg: Any
+    state_dir: Path
+    usage_path: Path
+    publish: Callable[[str], bool]
+    author: Callable[[], str]
+    now: Callable[[], datetime]
+
+
+def clean(text: object, limit: int = MAX_TITLE) -> str:
+    """One line, no control/format characters (terminal escapes), at most `limit` chars."""
+    out = " ".join(str(text).split())
+    out = "".join(ch for ch in out if unicodedata.category(ch)[0] != "C")
+    out = " ".join(out.split())
+    return out if len(out) <= limit else out[: max(0, limit - 3)] + "..."
+
+
+def _open_context() -> Context:
+    """Open the configured GitStore; raises hooks.StoreNotReady when there is no clone."""
+    import time
+
+    from shared_context.capture import resolve_author
+    from shared_context.config import resolve_state_dir
+
+    cfg = hooks._load_cfg(None)
+    state = resolve_state_dir()
+    store = hooks._default_store(cfg, state)
+
+    def publish(message: str) -> bool:
+        try:
+            return bool(hooks._default_sync(cfg, state, time.time, 30).commit_and_push(message))
+        except Exception:  # noqa: BLE001 - the local change is already made
+            return False
+
+    return Context(store=store, cfg=cfg, state_dir=state, usage_path=Path(store.index_path).parent / "usage.jsonl",
+                   publish=publish, author=resolve_author, now=lambda: datetime.now(UTC))
+
+
+def _published(ctx: Context, message: str) -> None:
+    if not ctx.publish(message):
+        print("note: the change is saved locally but could not be pushed yet; it will go out with the next sync.")
+
+
+def _with_context(fn: Callable[[Context, argparse.Namespace], int]) -> Callable[[argparse.Namespace], int]:
+    def run(args: argparse.Namespace) -> int:
+        try:
+            ctx = _open_context()
+        except Exception:  # noqa: BLE001 - not a clone, bad config, git missing, ...
+            print(NOT_CONFIGURED, file=sys.stderr)
+            return 1
+        try:
+            return fn(ctx, args)
+        except Exception as exc:  # noqa: BLE001 - no tracebacks for ordinary errors
+            print(f"shared-context: error: {type(exc).__name__}", file=sys.stderr)
+            return 1
+
+    return run
+
+
+def _fail(message: str) -> int:
+    print(f"shared-context: {message}", file=sys.stderr)
+    return 1
+
+
+def cmd_held_list(ctx: Context, args: argparse.Namespace) -> int:
+    entries = ctx.store.list_held()
+    if not entries:
+        print("No held entries.")
+        return 0
+    for e in entries:
+        print(f"{clean(e.id, 64)}  {clean(e.title)}  [{clean(e.hold_reason or 'no reason recorded', MAX_REASON)}]")
+    return 0
+
+
+def cmd_reindex(ctx: Context, args: argparse.Namespace) -> int:
+    ctx.store.refresh()
+    count = sum(1 for _ in ctx.store.iter_entries())
+    print(f"Reindexed {count} entries.")
+    return 0
+
+
+def _read_usage(path: Path, cutoff: datetime) -> Counter:
+    counts: Counter = Counter()
+    try:
+        f = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return counts
+    with f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+                entry_id, kind = rec["entry_id"], rec["kind"]
+                ts = datetime.fromisoformat(rec["ts"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not isinstance(entry_id, str) or not isinstance(kind, str):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts >= cutoff:
+                counts[(entry_id, kind)] += 1
+    return counts
+
+
+def cmd_usage(ctx: Context, args: argparse.Namespace) -> int:
+    counts = _read_usage(ctx.usage_path, ctx.now() - timedelta(days=args.days))
+    if not counts:
+        print(f"No usage recorded in the last {args.days} days.")
+        return 0
+    per_entry: dict[str, Counter] = {}
+    for (entry_id, kind), n in counts.items():
+        per_entry.setdefault(entry_id, Counter())[kind] += n
+    print(f"Usage in the last {args.days} days:")
+    ordered = sorted(per_entry.items(), key=lambda kv: (-sum(kv[1].values()), kv[0]))
+    for entry_id, kinds in ordered[:200]:
+        entry = ctx.store.get_entry(entry_id)
+        title = clean(entry.title) if entry else "(entry not found)"
+        detail = " ".join(f"{clean(k, 32)}={n}" for k, n in sorted(kinds.items()))
+        print(f"{clean(entry_id, 64)}  {title}  {detail}")
+    return 0
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {clean(text, 20)}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="shared-context")
     sub = parser.add_subparsers(dest="command")
@@ -183,6 +337,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--project-dir", type=Path, help="project root for --scope project (default: cwd)")
     p_init.add_argument("--dry-run", action="store_true", help="print the changes, write nothing")
     p_init.set_defaults(func=cmd_init)
+
+    p_held = sub.add_parser("held", help="list held entries (id, title, reason); approve or reject them")
+    p_held.set_defaults(func=_with_context(cmd_held_list))
+
+    p_re = sub.add_parser("reindex", help="rebuild the local search index from the store files")
+    p_re.set_defaults(func=_with_context(cmd_reindex))
+
+    p_use = sub.add_parser("usage", help="what was used, from the local usage log")
+    p_use.add_argument("--days", type=_positive_int, default=7, help="look back this many days (default 7)")
+    p_use.set_defaults(func=_with_context(cmd_usage))
     return parser
 
 
@@ -192,4 +356,13 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "func", None) is None:
         parser.print_help()
         return 0
-    return args.func(args)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # titles may hold characters the console cannot encode
+        except (AttributeError, ValueError, OSError):
+            pass
+    try:
+        return args.func(args)
+    except Exception as exc:  # noqa: BLE001 - never a traceback for ordinary errors
+        print(f"shared-context: error: {type(exc).__name__}", file=sys.stderr)
+        return 1
