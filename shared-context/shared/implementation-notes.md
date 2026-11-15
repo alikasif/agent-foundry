@@ -68,3 +68,11 @@
 - Identity: if `user.name`/`user.email` are not both configured, every git call gets `-c user.name=shared-context -c user.email=shared-context@localhost` (no config is written). Resolved once per StoreSync instance.
 - Extra constructor kwarg `git_timeout_s` (default 30). Env: `GIT_TERMINAL_PROMPT=0`, `GIT_EDITOR=true`, stdin is DEVNULL.
 - Added tests beyond the five named: no-change no-commit, only entries/held staged, conflict aborted and queued, corrupt queue, fallback identity, timeout never raises.
+
+## Task 6: Model client and extractor
+- Flags chosen from `claude --help`: `-p --output-format text --no-session-persistence --disable-slash-commands --tools "" -- <prompt>`. Tools are disabled (extraction needs none and the chunk is untrusted); the prompt follows `--` because `--tools` is variadic. Prompt is passed as an argv item (stdin must be DEVNULL), so a very large chunk could hit the Windows command-line limit (~32k chars); Task 7 should keep chunks well below that or Task 9 should revisit.
+- The executable is resolved with `shutil.which("claude")`, falling back to the bare name; missing binary surfaces as `ModelError`. `StubModelClient` exhaustion also raises `ModelError`.
+- The hook-recursion guard is only set in the child env here; honoring it (skipping capture when set) is Task 9.
+- Injection hardening: per-call delimiter `transcript_<16 hex>` regenerated if the chunk contains it; prompt states the data is not instructions. Delimiter is unguessable but the chunk is still not escaped (no need while the tag is random).
+- Parsing: first JSON object found via `raw_decode` (handles fences/prose). Items need non-empty string title, body, topic_key, else skipped. Risk `ok` is the only pass; anything else (hold, unsure, missing, unknown) becomes `hold` with a fallback `hold_reason`. `retract` is ignored unless `final=True`; non-string entries dropped.
+- Timeout for extraction is a module constant `EXTRACT_TIMEOUT_S = 120`.
