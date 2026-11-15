@@ -234,3 +234,60 @@ def test_git_store_integration(tmp_path, cfg):
     assert inj.entry_ids == ["G1"]
     assert "SECRETHOLD" not in inj.text
     record_usage(s, "sess", inj.entry_ids)
+
+
+class _NoneStore(InMemoryStore):
+    def search(self, *a, **k):
+        return None
+
+
+@pytest.mark.parametrize("prompt", [123, None, b"bytes", ["x"]])
+def test_non_str_prompt_never_raises(cfg, prompt):
+    assert build_injection(prompt, None, _store(make_entry()), cfg) == Injection("", [], "")
+
+
+def test_search_returning_none_never_raises(cfg):
+    assert build_injection("payments", None, _NoneStore(), cfg) == Injection("", [], "")
+
+
+def test_none_body_and_title_render_empty_not_literal_none(cfg):
+    class S(InMemoryStore):
+        def search(self, *a, **k):
+            e = make_entry("N1", title=None, body=None)
+            return [SearchHit(e, 1.0)]
+
+    inj = build_injection("payments", None, S(), cfg)
+    assert "None" not in inj.text
+    assert inj.entry_ids == ["N1"]
+    assert "None" not in inj.notice
+
+
+def test_none_body_with_tiny_cap_never_raises(cfg):
+    cfg.token_cap = 80
+
+    class S(InMemoryStore):
+        def search(self, *a, **k):
+            return [SearchHit(make_entry("N1", title="t" * 500, body=None), 1.0)]
+
+    build_injection("payments", None, S(), cfg)  # must not raise
+
+
+def test_hit_raising_mid_render_returns_empty_and_logs_type(cfg, caplog):
+    class Bad:
+        status = Status.UNVERIFIED
+        title = "t"
+        body = "b"
+        kind = "decision"
+
+        @property
+        def id(self):
+            raise ValueError("secret text")
+
+    class S(InMemoryStore):
+        def search(self, *a, **k):
+            return [SearchHit(Bad(), 1.0)]
+
+    with caplog.at_level(logging.DEBUG):
+        inj = build_injection("payments", None, S(), cfg)
+    assert inj == Injection("", [], "")
+    assert "ValueError" in caplog.text and "secret text" not in caplog.text

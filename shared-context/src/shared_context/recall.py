@@ -56,14 +56,14 @@ def _strip_controls(text: str, keep_newlines: bool = False) -> str:
 
 
 def _one_line(text: str, limit: int) -> str:
-    line = _WS.sub(" ", _strip_controls(str(text))).strip()
+    line = _WS.sub(" ", _strip_controls("" if text is None else str(text))).strip()
     if len(line) > limit:
         line = line[: limit - 3].rstrip() + "..."
     return line
 
 
 def _clean_body(text: str, limit: int) -> str:
-    body = _strip_controls(str(text).replace("\r\n", "\n"), keep_newlines=True).strip()
+    body = _strip_controls(("" if text is None else str(text)).replace("\r\n", "\n"), keep_newlines=True).strip()
     if len(body) > limit:
         body = body[:limit].rstrip() + "..."
     return body
@@ -85,7 +85,7 @@ def wrap_entry(entry: Entry, max_body: int = MAX_BODY_CHARS) -> str:
 
 
 def _query(prompt: str) -> str:
-    return _WS.sub(" ", _strip_controls(prompt or "")).strip()[:MAX_QUERY_CHARS].strip()
+    return _WS.sub(" ", _strip_controls(prompt if isinstance(prompt, str) else "")).strip()[:MAX_QUERY_CHARS].strip()
 
 
 def _fit(entry: Entry, room: int) -> str | None:
@@ -111,15 +111,20 @@ def _notice(entries: list[Entry]) -> str:
 
 
 def build_injection(prompt: str, repo: str | None, store: StorageInterface, cfg: Config) -> Injection:
+    """Never raises: any failure yields the empty Injection (exception type logged only)."""
+    try:
+        return _build_injection(prompt, repo, store, cfg)
+    except Exception as exc:
+        log.warning("recall failed: %s", type(exc).__name__)
+        return Injection(text="", entry_ids=[], notice="")
+
+
+def _build_injection(prompt: str, repo: str | None, store: StorageInterface, cfg: Config) -> Injection:
     empty = Injection(text="", entry_ids=[], notice="")
     query = _query(prompt)
     if not query:
         return empty
-    try:
-        hits = store.search(query, repo=repo, limit=cfg.top_k)
-    except Exception as exc:  # recall must never break a prompt
-        log.warning("recall search failed: %s", type(exc).__name__)
-        return empty
+    hits = store.search(query, repo=repo, limit=cfg.top_k)
 
     budget = cfg.token_cap * CHARS_PER_TOKEN
     text = HEADER
