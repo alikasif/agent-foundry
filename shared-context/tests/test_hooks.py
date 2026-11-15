@@ -630,6 +630,12 @@ def test_publish_store_with_real_git_pushes(tmp_path, world):
     assert remote_files(world["remote"]) == ["entries/E1.md"]
 
 
+def test_default_store_gets_repo_roots_from_config(tmp_path, world):
+    cfg = Config(store_path=world["alex"], repo_roots={"api": tmp_path})
+    store = hooks._default_store(cfg, tmp_path / "state")
+    assert store.repo_roots == {"api": tmp_path}
+
+
 def test_gitstore_writes_local_exclude_for_held(tmp_path, world):
     GitStore(world["alex"], index_path(tmp_path / "state"))
     assert "/held/" in (world["alex"] / ".git" / "info" / "exclude").read_text(encoding="utf-8")

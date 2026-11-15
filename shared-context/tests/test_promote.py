@@ -120,7 +120,7 @@ def test_promote_confirms_merged_pr_entries(monkeypatch):
     store.write_entry(_pr_entry("E4", ["repo:api@abc:x.py"]))
     FakeGh(monkeypatch, out=lambda argv: json.dumps(
         {"state": "MERGED" if argv[3] in ("1", "2") else "OPEN", "mergedAt": None}))
-    assert promote.promote_entries(store) == 2
+    assert promote.promote_entries(store, owners=["acme"]) == 2
     assert store.get_entry("E1").status == Status.CONFIRMED
     assert store.get_entry("E2").status == Status.CONFIRMED
     assert store.get_entry("E3").status == Status.UNVERIFIED
@@ -131,7 +131,7 @@ def test_promote_skips_when_gh_unavailable(monkeypatch):
     store = InMemoryStore()
     store.write_entry(_pr_entry("E1", ["pr:acme/api#1"]))
     FakeGh(monkeypatch, which=None)
-    assert promote.promote_entries(store) == 0
+    assert promote.promote_entries(store, owners=["acme"]) == 0
     assert store.get_entry("E1").status == Status.UNVERIFIED
 
 
@@ -141,7 +141,7 @@ def test_promote_never_touches_held_or_stale_or_confirmed(monkeypatch):
     store.write_entry(_pr_entry("S", ["pr:acme/api#1"], status=Status.STALE, stale_reason="r"))
     store.write_entry(_pr_entry("C", ["pr:acme/api#1"], status=Status.CONFIRMED))
     gh = FakeGh(monkeypatch)
-    assert promote.promote_entries(store) == 0
+    assert promote.promote_entries(store, owners=["acme"]) == 0
     assert gh.calls == []
     assert store.get_entry("H").status == Status.HELD
     assert store.get_entry("S").status == Status.STALE
@@ -152,14 +152,14 @@ def test_promote_caches_per_link_and_survives_errors(monkeypatch):
     store.write_entry(_pr_entry("E1", ["pr:acme/api#1"]))
     store.write_entry(_pr_entry("E2", ["pr:acme/api#1"]))
     gh = FakeGh(monkeypatch)
-    assert promote.promote_entries(store) == 2
+    assert promote.promote_entries(store, owners=["acme"]) == 2
     assert len(gh.calls) == 1
 
     class Broken(InMemoryStore):
         def iter_entries(self, status=None):
             raise OSError("x")
 
-    assert promote.promote_entries(Broken()) == 0
+    assert promote.promote_entries(Broken(), owners=["acme"]) == 0
 
 
 def test_promote_set_status_failure_not_counted(monkeypatch):
@@ -170,4 +170,50 @@ def test_promote_set_status_failure_not_counted(monkeypatch):
     store = Flaky()
     store.write_entry(_pr_entry("E1", ["pr:acme/api#1"]))
     FakeGh(monkeypatch)
+    assert promote.promote_entries(store, owners=["acme"]) == 0
+
+
+# ---- final review I7: promotion only for allow-listed owners ----
+
+def test_promote_nothing_without_owner_allow_list(monkeypatch, tmp_path):
+    store = InMemoryStore()
+    store.write_entry(_pr_entry("E1", ["pr:acme/api#1"]))
+    store.write_entry(_pr_entry("E2", ["pr:api#1"]))
+    gh = FakeGh(monkeypatch)
     assert promote.promote_entries(store) == 0
+    assert promote.promote_entries(store, owners=[], repo_roots={"api": tmp_path}) == 0
+    assert gh.calls == []
+    assert store.get_entry("E1").status == Status.UNVERIFIED
+
+
+def test_promote_ignores_links_from_unlisted_owners(monkeypatch):
+    """Evidence text comes from a model reading a transcript; injected `pr:attacker/x#1` must not promote."""
+    store = InMemoryStore()
+    store.write_entry(_pr_entry("E1", ["pr:attacker/x#1"]))
+    store.write_entry(_pr_entry("E2", ["pr:attacker/x#1", "pr:ACME/api#2"]))
+    gh = FakeGh(monkeypatch)
+    assert promote.promote_entries(store, owners=["acme"]) == 1
+    assert store.get_entry("E1").status == Status.UNVERIFIED
+    assert store.get_entry("E2").status == Status.CONFIRMED
+    assert all("attacker/x" not in " ".join(argv) for argv, *_ in gh.calls)
+
+
+def test_promote_owner_match_is_exact_and_case_insensitive(monkeypatch):
+    store = InMemoryStore()
+    store.write_entry(_pr_entry("E1", ["pr:acme-evil/api#1"]))
+    store.write_entry(_pr_entry("E2", ["pr:Acme/api#2"]))
+    FakeGh(monkeypatch)
+    assert promote.promote_entries(store, owners=[" acme "]) == 1
+    assert store.get_entry("E1").status == Status.UNVERIFIED
+    assert store.get_entry("E2").status == Status.CONFIRMED
+
+
+def test_promote_bare_link_needs_repo_roots(monkeypatch, tmp_path):
+    store = InMemoryStore()
+    store.write_entry(_pr_entry("E1", ["pr:api#7"]))
+    store.write_entry(_pr_entry("E2", ["pr:other#7"]))
+    gh = FakeGh(monkeypatch)
+    assert promote.promote_entries(store, owners=["acme"], repo_roots={"api": tmp_path}) == 1
+    assert store.get_entry("E1").status == Status.CONFIRMED
+    assert store.get_entry("E2").status == Status.UNVERIFIED
+    assert len(gh.calls) == 1 and Path(gh.calls[0][1]) == tmp_path

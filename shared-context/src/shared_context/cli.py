@@ -360,9 +360,15 @@ def cmd_stale(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def cmd_promote(ctx: Context, args: argparse.Namespace) -> int:
+    owners = list(getattr(ctx.cfg, "promote_owners", []) or [])
+    if not owners:
+        print("Nothing promoted: set promote_owners (the GitHub owners whose merged PRs may confirm "
+              "entries) in ~/.shared-context/config.yaml.")
+        return 0
     if not promote.gh_available():
         return _fail("the GitHub CLI (gh) was not found; install and authenticate it to promote by merged PR.")
-    count = promote.promote_entries(ctx.store)
+    count = promote.promote_entries(ctx.store, owners=owners,
+                                    repo_roots=dict(getattr(ctx.cfg, "repo_roots", {}) or {}))
     print(f"Promoted {count} entries to confirmed (merged PR evidence).")
     if count:
         _published(ctx, f"shared-context: promote {count} entries")

@@ -225,7 +225,7 @@ def _default_store(cfg: Config, state_dir: Path):
     from shared_context.store.git import GitStore
 
     _require_clone(cfg)
-    return GitStore(cfg.store_path, index_path(state_dir), stale_days=cfg.stale_days)
+    return GitStore(cfg.store_path, index_path(state_dir), cfg.repo_roots, stale_days=cfg.stale_days)
 
 
 def _default_sync(cfg: Config, state_dir: Path, now: Callable[[], float], git_timeout_s: float):

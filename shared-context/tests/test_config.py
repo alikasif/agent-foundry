@@ -52,3 +52,24 @@ def test_wrong_typed_values_rejected(monkeypatch, tmp_path, text):
     monkeypatch.delenv("SHARED_CONTEXT_STORE", raising=False)
     with pytest.raises(ValueError):
         load_config(_cfg_file(tmp_path, text))
+
+
+def test_promote_owners_and_repo_roots_loaded(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("SHARED_CONTEXT_STORE", raising=False)
+    cfg = load_config(_cfg_file(tmp_path, "promote_owners: [acme, Contoso]\n"
+                                          "repo_roots:\n  api: ~/src/api\n  web: C:/src/web\n"))
+    assert cfg.promote_owners == ["acme", "Contoso"]
+    assert cfg.repo_roots == {"api": Path(os.path.expanduser("~/src/api")), "web": Path("C:/src/web")}
+    defaults = Config(store_path=Path("x"))
+    assert defaults.promote_owners == [] and defaults.repo_roots == {}
+
+
+@pytest.mark.parametrize("text", ["promote_owners: acme\n", "promote_owners: [1]\n", "repo_roots: [a]\n",
+                                  "repo_roots: {api: 5}\n", "promote_owners: ['']\n"])
+def test_promote_owners_and_repo_roots_type_checked(monkeypatch, tmp_path, text):
+    monkeypatch.delenv("SHARED_CONTEXT_STORE", raising=False)
+    with pytest.raises(ValueError):
+        load_config(_cfg_file(tmp_path, text))

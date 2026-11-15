@@ -258,3 +258,13 @@ def test_atomic_write_gives_up_after_bounded_retries(tmp_path, monkeypatch):
     with pytest.raises(PermissionError):
         s.write_entry(make_entry("E1"))
     assert [p.name for p in (tmp_path / "root").rglob("*.tmp")] == []
+
+
+@pytest.mark.parametrize("path", ["../outside.py", "a/../../outside.py", "/etc/passwd", "C:/Windows/x.py",
+                                  "\\\\server\\share\\x.py", "..\\outside.py"])
+def test_evidence_path_traversal_is_not_probed(tmp_path, path):
+    repo = tmp_path / "x"
+    repo.mkdir()
+    s = _store(tmp_path, repo_roots={"x": repo})
+    s.write_entry(make_entry("E1", evidence=[f"repo:x@sha:{path}"]))
+    assert s.get_entry("E1").status == Status.UNVERIFIED  # invalid path: no existence check at all

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -37,6 +37,12 @@ class Config:
     body_soft_cap: int = 2048
     max_calls_per_session: int = 20
     max_transcript_chars: int = 60000
+    # `promote` confirms only `pr:<owner>/<repo>#N` links whose owner is listed here
+    # (case-insensitive); empty = promote nothing.
+    promote_owners: list[str] = field(default_factory=list)
+    # repo name -> local checkout: resolves bare `pr:<repo>#N` links and lets the store
+    # mark entries stale when a linked `repo:<name>@<sha>:<path>` file is gone.
+    repo_roots: dict[str, Path] = field(default_factory=dict)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -61,6 +67,17 @@ def load_config(path: Path | None = None) -> Config:
             # bool is an int subclass; a quoted "3" would silently break comparisons later.
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"config key {f.name} must be a whole number")
+    owners = data.get("promote_owners")
+    if owners is not None:
+        if not isinstance(owners, list) or not all(isinstance(o, str) and o.strip() for o in owners):
+            raise ValueError("config key promote_owners must be a list of non-empty strings")
+        data["promote_owners"] = [o.strip() for o in owners]
+    roots = data.get("repo_roots")
+    if roots is not None:
+        if not isinstance(roots, dict) or not all(
+                isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip() for k, v in roots.items()):
+            raise ValueError("config key repo_roots must map repo names to path strings")
+        data["repo_roots"] = {k.strip(): _expand(v) for k, v in roots.items()}
     store = data.get("store_path")
     if store is not None and not isinstance(store, str):
         raise ValueError("config key store_path must be a path string")

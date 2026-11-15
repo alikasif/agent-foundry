@@ -47,6 +47,14 @@ def _area(status: Status) -> str:
     return "held" if status == Status.HELD else "entries"
 
 
+def _safe_rel_path(path: str) -> bool:
+    """Evidence paths come from entry text: only plain relative paths inside the repo are checked
+    (no absolute, drive, UNC or `..` paths), so an entry cannot probe arbitrary files."""
+    if not path or path.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", path):
+        return False
+    return ".." not in re.split(r"[\\/]", path)
+
+
 _RETRY_ATTEMPTS = 5
 _RETRY_SLEEP_S = 0.05
 
@@ -201,7 +209,7 @@ class GitStore:
             pass
         for ev in e.evidence:
             m = _REPO_EVIDENCE.match(ev)
-            if m and m.group(1) in self.repo_roots:
+            if m and m.group(1) in self.repo_roots and _safe_rel_path(m.group(3)):
                 if not (self.repo_roots[m.group(1)] / m.group(3)).exists():
                     return f"linked path missing: {m.group(3)}"
         return None

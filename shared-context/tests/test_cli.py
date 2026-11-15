@@ -25,7 +25,7 @@ class Env:
         self.capsys = capsys
         self.ctx = cli.Context(
             store=store,
-            cfg=Config(store_path=tmp_path / "store"),
+            cfg=Config(store_path=tmp_path / "store", promote_owners=["acme"]),
             state_dir=self.state,
             usage_path=self.usage,
             publish=lambda msg: self.published.append(msg) or True,
@@ -392,7 +392,7 @@ def test_stale_refuses_held_and_unknown(env):
 # ------------------------------------------------------------------ promote
 def test_promote_command_prints_count(env, monkeypatch):
     monkeypatch.setattr(promote, "gh_available", lambda: True)
-    monkeypatch.setattr(promote, "promote_entries", lambda store: 2)
+    monkeypatch.setattr(promote, "promote_entries", lambda store, **kw: 2)
     rc, out, _ = env.run("promote")
     assert rc == 0 and "2" in out
     assert len(env.published) == 1
@@ -400,7 +400,7 @@ def test_promote_command_prints_count(env, monkeypatch):
 
 def test_promote_command_zero_does_not_publish(env, monkeypatch):
     monkeypatch.setattr(promote, "gh_available", lambda: True)
-    monkeypatch.setattr(promote, "promote_entries", lambda store: 0)
+    monkeypatch.setattr(promote, "promote_entries", lambda store, **kw: 0)
     rc, out, _ = env.run("promote")
     assert rc == 0 and "0" in out and env.published == []
 
@@ -408,7 +408,7 @@ def test_promote_command_zero_does_not_publish(env, monkeypatch):
 def test_promote_command_gh_unavailable(env, monkeypatch):
     monkeypatch.setattr(promote, "gh_available", lambda: False)
     called = []
-    monkeypatch.setattr(promote, "promote_entries", lambda store: called.append(1) or 0)
+    monkeypatch.setattr(promote, "promote_entries", lambda store, **kw: called.append(1) or 0)
     rc, out, err = env.run("promote")
     assert rc == 1 and "gh" in err and called == []
 
@@ -421,6 +421,29 @@ def test_promote_end_to_end_with_patched_gh(env, monkeypatch):
     rc, out, _ = env.run("promote")
     assert rc == 0 and "1" in out
     assert env.store.get_entry("E1").status == Status.CONFIRMED
+
+
+def test_promote_without_owner_allow_list_does_nothing(env, monkeypatch):
+    import dataclasses
+
+    env.ctx.cfg = dataclasses.replace(env.ctx.cfg, promote_owners=[])
+    env.store.write_entry(fresh("E1", evidence=["pr:acme/api#4"]))
+    monkeypatch.setattr(promote, "gh_available", lambda: True)
+    monkeypatch.setattr(promote, "run_command", lambda *a: pytest.fail("gh must not run"))
+    rc, out, _ = env.run("promote")
+    assert rc == 0 and "promote_owners" in out
+    assert env.store.get_entry("E1").status == Status.UNVERIFIED and env.published == []
+
+
+def test_promote_passes_owners_and_repo_roots(env, monkeypatch, tmp_path):
+    import dataclasses
+
+    env.ctx.cfg = dataclasses.replace(env.ctx.cfg, repo_roots={"api": tmp_path})
+    seen = {}
+    monkeypatch.setattr(promote, "gh_available", lambda: True)
+    monkeypatch.setattr(promote, "promote_entries", lambda store, **kw: seen.update(kw) or 0)
+    env.run("promote")
+    assert seen == {"owners": ["acme"], "repo_roots": {"api": tmp_path}}
 
 
 def test_publish_failure_is_a_note_not_an_error(env):

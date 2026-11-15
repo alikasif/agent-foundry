@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from shared_context.models import Status
@@ -100,19 +100,38 @@ def pr_merged(link: str, repo_roots: Mapping[str, Path] | None = None) -> bool |
         return None
 
 
-def promote_entries(store) -> int:
-    """Confirm UNVERIFIED entries with at least one merged ``pr:`` evidence link.
+def _allowed(link: str, owners: set[str], roots: Mapping[str, Path] | None) -> bool:
+    """Evidence strings are written by a model reading a transcript, so injected text can name
+    any PR. Only `pr:<owner>/<repo>#N` with an allow-listed owner, or a bare `pr:<repo>#N`
+    whose repo is a configured local checkout, may promote."""
+    m = _LINK.fullmatch(link)
+    if m is None:
+        return False
+    if m.group("owner"):
+        return m.group("owner").casefold() in owners
+    return bool(roots) and m.group("repo") in roots
 
+
+def promote_entries(store, *, owners: Iterable[str] = (),
+                    repo_roots: Mapping[str, Path] | None = None) -> int:
+    """Confirm UNVERIFIED entries with at least one merged, allowed ``pr:`` evidence link.
+
+    `owners` is the allow-list (``Config.promote_owners``); empty means promote nothing.
     Held, stale and confirmed entries are never touched. Returns how many were
     confirmed; never raises.
     """
     try:
-        roots = getattr(store, "repo_roots", None) or None
+        allowed_owners = {o.strip().casefold() for o in owners if isinstance(o, str) and o.strip()}
+        if not allowed_owners:
+            log.info("promote: promote_owners is empty; nothing is promoted")
+            return 0
+        roots = repo_roots if repo_roots is not None else (getattr(store, "repo_roots", None) or None)
         cache: dict[str, bool | None] = {}
         count = 0
         for entry in list(store.iter_entries(Status.UNVERIFIED)):
             try:
-                links = [e for e in entry.evidence if isinstance(e, str) and e.startswith("pr:")]
+                links = [e for e in entry.evidence if isinstance(e, str) and e.startswith("pr:")
+                         and _allowed(e, allowed_owners, roots)]
                 merged = False
                 for link in links:
                     if link not in cache:
