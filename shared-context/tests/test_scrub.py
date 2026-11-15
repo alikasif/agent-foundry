@@ -83,3 +83,49 @@ def test_load_rules_invalid_regex(tmp_path: Path) -> None:
     path.write_text("extra_patterns:\n  - '(unclosed'\n", encoding="utf-8")
     with pytest.raises(ValueError, match=r"\(unclosed"):
         load_rules(path)
+
+
+@pytest.mark.parametrize("term", ["act", "RED", "ed"])
+def test_denylist_cannot_rewrite_markers(term: str) -> None:
+    rules = ScrubRules(denylist=[term], extra_patterns=[])
+    first = scrub("password=hunter2fakepw and more", rules)
+    assert "[REDACTED]" in first.text
+    second = scrub(first.text, rules)
+    assert second.redactions == 0
+    assert second.text == first.text
+
+
+@pytest.mark.parametrize("pattern", [r"\w+", r"[A-Z]+", r"RED"])
+def test_extra_patterns_cannot_rewrite_markers(pattern: str) -> None:
+    rules = ScrubRules(denylist=[], extra_patterns=[pattern])
+    first = scrub("password=hunter2fakepw", rules)
+    assert first.text.count("[REDACTED]") >= 1
+    assert "[RED[" not in first.text
+    assert scrub(first.text, rules).text == first.text
+
+
+def test_empty_matching_pattern_is_inert_in_scrub() -> None:
+    result = scrub("abc", ScrubRules(denylist=[], extra_patterns=["x*"]))
+    assert result.text == "abc"
+    assert result.redactions == 0
+
+
+@pytest.mark.parametrize("pattern", ["", "x*", "(?:a|)"])
+def test_load_rules_rejects_empty_matching_pattern(tmp_path: Path, pattern: str) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(f"extra_patterns:\n  - '{pattern}'\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="empty"):
+        load_rules(path)
+
+
+@pytest.mark.parametrize(
+    "unit",
+    ["a-", "a.", "password ", "token=", 'pass="', "x", "aA1", "://", "Basic ", "0"],
+)
+def test_scrub_is_linear_on_large_input(unit: str) -> None:
+    import time
+
+    text = unit * (100_000 // len(unit))
+    start = time.perf_counter()
+    scrub(text, RULES)
+    assert time.perf_counter() - start < 2.0

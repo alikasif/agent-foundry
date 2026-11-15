@@ -26,3 +26,10 @@
 - Idempotency: value patterns skip values already starting with `[REDACTED]`.
 - Unterminated private-key block redacts to end of text (fail closed).
 - Fixtures package `tests/fixtures/` is imported as `fixtures.seeded_corpus` (pytest rootdir puts `tests/` on sys.path).
+
+### Task 3 fix round 1 (review findings)
+- Keyed-assignment rules rewritten: key names are bounded (<=40 chars either side of the keyword, starting at a word-run boundary) so matching is linear; keywords now allow suffixes (`SECRET_KEY`, `PASSWORD_PROD`, `DB_PASS`); `pass` added (not `passed/passing/passes/passage`). Quoted values redact up to the closing quote; bare values run to whitespace (commas and semicolons included).
+- New rules: `scheme://user:PASS@host`, `Basic <b64>` (must contain digit, `=`, `+` or `/` so prose like "Basic configuration" is untouched), PGP `PRIVATE KEY BLOCK`.
+- Hex: >=48 hex chars always redacted; 32-47 or exactly 40 hex redacted when a key/token/secret/password/auth word is within 30 chars before. 2-class tokens (e.g. lowercase+digit base36) redacted when >=32 chars, entropy >=4.2, no `/` or `_`.
+- Denylist/extra patterns apply only outside existing `[REDACTED]` markers; empty matches are ignored; `load_rules` rejects patterns that match the empty string.
+- Known residual risks (not covered): hex of 32-47 chars (incl. 40) with no nearby keyword; all-lowercase-letter or digits-only secrets; mixed tokens under 24 chars (or 2-class under 32) with no keyword; secrets containing `/` or `_` with only 2 character classes; secrets in prose without a `key=value` shape (e.g. "the password is hunter2"); passwords containing spaces when unquoted; multi-line quoted values; lookahead/lookbehind user patterns that match empty only in context are ignored per-match rather than rejected.
