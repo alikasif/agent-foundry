@@ -451,3 +451,57 @@ def test_publish_failure_is_a_note_not_an_error(env):
     env.store.write_entry(fresh("E1", author="alice"))
     rc, out, _ = env.run("confirm", "E1")
     assert rc == 0 and "saved locally" in out
+
+
+# ---- real git: CLI publishes through hooks.publish_store (final review minor + ruling R9) ----
+
+@pytest.fixture
+def git_env(tmp_path, monkeypatch, capsys):
+    from sim_support import git, isolate, make_remote
+
+    from shared_context import hooks
+
+    isolate(monkeypatch, tmp_path)
+    remote = make_remote(tmp_path)
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", str(remote), str(clone))
+    git(clone, "config", "user.name", "Me")
+    git(clone, "config", "user.email", "me@example.com")
+    store = GitStore(clone, tmp_path / "state" / "index" / "index.db", now=lambda: NOW)
+    env = Env(store, tmp_path, monkeypatch, capsys)
+    cfg = Config(store_path=clone)
+    env.ctx.cfg = cfg
+    env.ctx.publish = lambda msg: hooks.publish_store(cfg, env.state, msg, wait_s=5)
+    env.remote, env.clone, env.git = remote, clone, git
+    return env
+
+
+def _remote_tree(env) -> list[str]:
+    return env.git(env.remote, "ls-tree", "-r", "--name-only", "main").splitlines()
+
+
+def test_real_git_held_approve_pushes_released_entry(git_env):
+    git_env.store.write_entry(held("H1", title="Clean title", body="plain body"))
+    rc, out, _ = git_env.run("held", "approve", "H1")
+    assert rc == 0 and "saved locally" not in out
+    assert "entries/H1.md" in _remote_tree(git_env)
+    assert not any(p.startswith("held/") for p in _remote_tree(git_env))
+    assert git_env.git(git_env.clone, "status", "--porcelain") == ""
+
+
+def test_real_git_held_reject_never_touches_the_remote(git_env):
+    before = git_env.git(git_env.remote, "rev-parse", "main")
+    git_env.store.write_entry(held("H2", body="HELDBODYMARKER"))
+    rc, out, _ = git_env.run("held", "reject", "H2")
+    assert rc == 0 and not (git_env.clone / "held" / "H2.md").exists()
+    assert git_env.git(git_env.remote, "rev-parse", "main") == before  # held was local only (R9)
+    assert "HELDBODYMARKER" not in git_env.git(git_env.remote, "log", "--all", "-p")
+
+
+def test_real_git_stale_publishes_change(git_env):
+    git_env.store.write_entry(fresh("E1", author="alice"))
+    assert git_env.ctx.publish("seed") is True
+    rc, _, _ = git_env.run("stale", "E1", "--reason", "superseded")
+    assert rc == 0
+    text = git_env.git(git_env.remote, "show", "main:entries/E1.md")
+    assert "status: stale" in text and "superseded" in text

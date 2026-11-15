@@ -30,6 +30,10 @@ def gh_available() -> bool:
     return bool(shutil.which("gh"))
 
 
+def _same_person(a: object, b: object) -> bool:
+    return str(a).strip().casefold() == str(b).strip().casefold()
+
+
 def confirm_refusal(entry, author: Callable[[], str] | None, *, self_hint: str = "") -> str | None:
     """Why `entry` may not be confirmed, or None when it may. Shared by the MCP tool and the CLI.
 
@@ -40,7 +44,7 @@ def confirm_refusal(entry, author: Callable[[], str] | None, *, self_hint: str =
         return "Not confirmed: this learning is held; approve it first."
     if entry.status in (Status.CONFIRMED, Status.STALE):
         return f"Not confirmed: this learning is already {entry.status.value}."
-    if author is not None and entry.author == author():
+    if author is not None and _same_person(entry.author, author()):
         return "Refused: you are the author of this learning; a teammate must confirm it." + self_hint
     return None
 

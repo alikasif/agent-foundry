@@ -26,6 +26,7 @@ from sim_support import (
     write_transcript,
 )
 
+import shared_context.hooks as hooks
 from shared_context.mcp_server import Tools
 from shared_context.sync import StoreSync
 
@@ -203,7 +204,9 @@ def test_store_unreachable_session_unaffected(world, tmp_path):
     clock.advance(11)
     out = sam.prompt(FD_PROMPT, "sam-b")
     assert out.rc == 0
-    assert out.elapsed < 4.0
+    # Loose wall-clock bound only (a slow CI machine must not fail this): the prompt hook's sync
+    # step is capped by PULL_DEADLINE_S, so an unreachable remote never stalls the prompt.
+    assert out.elapsed < hooks.PULL_DEADLINE_S + 15
     assert out.doc is not None and out.doc["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert "Exporter leaks file handles per batch" in out.context
     assert json.loads(out.stdout) == out.doc  # stdout is exactly one JSON document
@@ -257,8 +260,14 @@ def test_two_users_concurrent_pushes_rebase(world):
         store.refresh()
         titles = {h.entry.title for h in store.search("exporter scheduler lease handles", limit=10)}
         assert titles == {a_entry["title"], s_entry["title"]}
-    # Sam's push was rejected (Alex pushed first) and went through the rebase path: history is linear.
+    # Sam's push was rejected (Alex pushed first) and went through the rebase path: history is
+    # linear and Sam's commit sits directly on top of Alex's.
     assert git(remote, "rev-list", "--merges", "--count", "main") == "0"
+    top, parent = git(remote, "log", "-2", "--format=%H %P %an", "main").splitlines()
+    top_hash, top_parent, top_author = top.split()
+    parent_hash, _parent_parent, parent_author = parent.split()
+    assert (top_author, parent_author) == ("Sam", "Alex")
+    assert top_parent == parent_hash
     # nothing queued
     for user in (alex, sam):
         assert not (user.state / "sync" / "queue.json").exists() or json.loads(

@@ -75,8 +75,9 @@ def _load(path: Path) -> tuple[dict, str | None]:
 def merge_hooks(settings: dict) -> dict:
     """Return a copy of `settings` with our hooks present exactly once per event.
 
-    Other keys, other events and other handlers are left untouched. An outdated
-    handler of ours (e.g. an old interpreter path) is replaced in place.
+    Other keys, other events and other handlers are left untouched. Our handler
+    lives in its own matcher-less group: an outdated handler of ours there is
+    replaced in place, and one found inside a user's (matcher) group is moved out.
     """
     out = copy.deepcopy(settings)
     hooks_obj = out.setdefault("hooks", {})
@@ -94,21 +95,20 @@ def merge_hooks(settings: dict) -> dict:
         kept_groups = []
         for group in groups:
             handlers = group.get("hooks", [])
-            new_handlers = []
-            for h in handlers:
-                if hooks.is_own_handler(h):
-                    if not placed:
-                        new_handlers.append(wanted)
-                        placed = True
-                    continue  # drop duplicates of ours
-                new_handlers.append(h)
-            if handlers and not new_handlers:
-                continue  # group held only our (duplicate) handlers
-            if new_handlers != handlers:
-                group = {**group, "hooks": new_handlers}
+            rest = [h for h in handlers if not hooks.is_own_handler(h)]
+            has_own = len(rest) != len(handlers)
+            if has_own and not rest and not group.get("matcher") and not placed:
+                # our own matcher-less group: update it in place (keeps init idempotent)
+                kept_groups.append({**group, "hooks": [wanted]})
+                placed = True
+                continue
+            if has_own and not rest:
+                continue  # a duplicate of ours, or ours under a matcher: dropped
+            if has_own:
+                group = {**group, "hooks": rest}  # a user's group: take ours out of it
             kept_groups.append(group)
         if not placed:
-            kept_groups.append({"hooks": [wanted]})
+            kept_groups.append({"hooks": [wanted]})  # our handler always sits in its OWN group
         hooks_obj[host_event] = kept_groups
     return out
 

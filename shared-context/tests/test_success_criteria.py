@@ -241,6 +241,8 @@ def scan(sources: dict[str, bytes], fragments: list[str]) -> list[tuple[str, str
 
 
 PLANT = "PLANTED-LEAK-FRAGMENT-9f3a"
+TOPIC_SECRET = "AKIAFAKETOPIC1234567"  # AWS key shape, fake
+HOLD_SECRET = "sk-fakeHoldReasonValue1234567890"  # API key shape, fake
 
 
 @pytest.mark.parametrize("kind", ["store file", "state file", "hooks.log", "sqlite index", "remote commit"])
@@ -292,6 +294,10 @@ def test_seeded_secrets_and_injection_neutralised(world, tmp_path):
     # secrets in the other fields too
     items.append(learning("seed-fields", f"Token {syn.FAKE_GH_TOKEN} leaked", "Body without any secret.",
                           applies_to=["svc password=hunter2-fake-pw"], evidence=[f"log: {syn.FAKE_GH_TOKEN}"]))
+    # secrets in topic_key and in the model's hold_reason as well (final review minor)
+    items.append(learning(f"deploy-{TOPIC_SECRET}-rotation", "Deploy key rotation", "Rotate the deploy key monthly."))
+    items.append(learning("hold-reason-secret", "Vault access note", "Vault access goes through the broker.",
+                          risk="hold", hold_reason=f"mentions token {HOLD_SECRET} from the logs"))
     for topic, title, body in INJECTIONS:
         items.append(learning(topic, title, body))
         turns.append(("user", body))
@@ -322,7 +328,7 @@ def test_seeded_secrets_and_injection_neutralised(world, tmp_path):
     # (`db_pass` alone is a key NAME that stays visible by design; its secret form is `${db_pass}`)
     fragments = ["${db_pass}" if f == "db_pass" else f for _l, _t, f in SECRETS] + [
         t for _x, t in CUSTOMER_TEXT] + [
-        syn.FAKE_GH_TOKEN, "hunter2-fake-pw"]
+        syn.FAKE_GH_TOKEN, "hunter2-fake-pw", TOPIC_SECRET, HOLD_SECRET]
     sources = collect_sources(alex, sam, remote)
     # the scan is not vacuous: every source is non-empty and holds a known benign marker
     # (held entries such as "Seed aws_key" stay on Alex's machine (ruling R9), so Sam's tree and
@@ -342,6 +348,12 @@ def test_seeded_secrets_and_injection_neutralised(world, tmp_path):
     assert leaks == []
     # credential-bearing entries were held, not shared
     assert len(alex.entry_files("held")) >= 10
+    # the topic_key and hold_reason secrets were really captured (redacted), so the scan above covers them
+    alex_tree = sources["Alex store tree"]
+    assert b"deploy-[REDACTED]-rotation" in alex_tree
+    assert b"mentions token [REDACTED] from the logs" in alex_tree
+    # index and capture state files were scanned and are non-trivial
+    assert sources["Alex sqlite index"] and sources["Alex state files"]
 
 
 def test_bare_hex_assignment_is_redacted():

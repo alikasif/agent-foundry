@@ -217,3 +217,10 @@ def test_promote_bare_link_needs_repo_roots(monkeypatch, tmp_path):
     assert store.get_entry("E1").status == Status.CONFIRMED
     assert store.get_entry("E2").status == Status.UNVERIFIED
     assert len(gh.calls) == 1 and Path(gh.calls[0][1]) == tmp_path
+
+
+@pytest.mark.parametrize(("entry_author", "me"), [("Alex", "alex"), (" alex ", "Alex"), ("ALEX", " alex\n")])
+def test_confirm_refusal_author_match_ignores_case_and_space(entry_author, me):
+    entry = make_entry("E1", author=entry_author)
+    assert promote.confirm_refusal(entry, lambda: me).startswith("Refused")
+    assert promote.confirm_refusal(entry, lambda: "sam") is None

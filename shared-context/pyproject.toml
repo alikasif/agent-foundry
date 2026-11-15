@@ -5,7 +5,7 @@ description = "Shared, scrubbed project memory for Claude Code sessions"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=2.3.0",
+    "mcp>=2.3,<3",
     "pyyaml>=6.0.3",
 ]
 

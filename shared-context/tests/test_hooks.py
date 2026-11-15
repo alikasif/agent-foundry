@@ -916,6 +916,27 @@ def test_init_replaces_outdated_own_hook(tmp_path):
     assert len(cmds) == 1 and "C:/old" not in cmds[0]
 
 
+def test_init_moves_own_handler_out_of_user_matcher_group(tmp_path):
+    """Our handler gets its OWN matcher-less group; a user's matcher group is left as theirs."""
+    s, m = seed(tmp_path)
+    data = read_json(s)
+    ours = {"type": "command", "command": "C:/old/python.exe -m shared_context.hooks pre-compact"}
+    data["hooks"]["PreCompact"] = [{"matcher": "manual", "hooks": [
+        {"type": "command", "command": "user-compact.sh"}, ours]}]
+    data["hooks"]["Stop"] = [{"hooks": [{"type": "command", "command": "python other_stop.py"},
+                                        {"type": "command", "command": "py -m shared_context.hooks after-turn"}]}]
+    s.write_text(json.dumps(data), encoding="utf-8")
+    assert init(tmp_path) == 0
+    out = read_json(s)["hooks"]
+    assert out["PreCompact"][0] == {"matcher": "manual", "hooks": [{"type": "command", "command": "user-compact.sh"}]}
+    for event in ("PreCompact", "Stop"):
+        own = [g for g in out[event] if any("shared_context.hooks" in json.dumps(h) for h in g["hooks"])]
+        assert len(own) == 1 and "matcher" not in own[0] and len(own[0]["hooks"]) == 1
+    assert out["Stop"][0]["hooks"] == [{"type": "command", "command": "python other_stop.py"}]
+    first = s.read_text(encoding="utf-8")
+    assert init(tmp_path) == 0 and s.read_text(encoding="utf-8") == first  # idempotent
+
+
 def test_init_dry_run_writes_nothing(tmp_path, capsys):
     s, m = seed(tmp_path)
     before = sorted(p.name for p in s.parent.iterdir())

@@ -8,6 +8,7 @@ Nothing here spawns a worker process, calls `claude` or `gh`, or uses the networ
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -103,7 +104,7 @@ def write_transcript(path: Path, turns: list[tuple[str, str]], *, append: bool =
     for i, (role, text) in enumerate(turns):
         message = {"role": role, "content": text if role == "user" else [{"type": "text", "text": text}]}
         lines.append(json.dumps({"type": role, "isSidechain": False, "sessionId": "synthetic",
-                                 "uuid": f"t{i}-{abs(hash(text)) % 10**6}", "message": message}))
+                                 "uuid": f"t{i}-{hashlib.sha256(text.encode()).hexdigest()[:12]}", "message": message}))
     with path.open("a" if append else "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines) + "\n")
 
