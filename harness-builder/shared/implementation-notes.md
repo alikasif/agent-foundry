@@ -178,3 +178,30 @@
     4. `Observation.final`, when the content is empty.
 - **Tests.** No test files were added, because T018 owns the strategy tests. A scratchpad script checked parsing, rendering, the registry errors, a third strategy (`echo`) plugged in through `register_strategy`, a lazy-string registration, and that `codeact_agent` and `agents` stay out of `sys.modules`.
 - **Unrelated failures at the time of the check, left alone:** `ruff check .` failed on PEP 695 syntax in `budget/ledger.py:212` (T003, in progress), and pyrefly warned about `permissions/approvers.py:49`.
+
+### T010
+- **Registry API.**
+  - `register_strategy(name, factory, *, replace=False)`.
+  - `get_strategy(name, options=None) -> Strategy`.
+  - `strategy_names() -> list[str]`. This was added so that T014 and the CLI can list or validate names.
+  - A factory is a callable that takes the strategy options as **keyword arguments**, or a lazy `"module:attr"` string.
+  - `codeact` is registered as `"harness_builder.strategies.codeact.strategy:CodeActStrategy"`. **For T029:** the class must have that name, and its constructor keyword arguments are the spec's `strategy.options`.
+  - Lazy refs are imported on every `get_strategy`. The result is not cached, and `sys.modules` makes repeated imports cheap.
+- **Errors.**
+  - `get_strategy` raises `ConfigError` in three cases: an unknown name (the message lists the registered names), a lazy ref that fails to import or resolve, and options that the factory signature rejects. The options check uses `inspect.signature(...).bind`, so a `TypeError` raised inside a factory is not masked.
+  - `register_strategy` raises `ValueError` for a programming error: a lazy string without `:`, or re-registering a name with a different factory when `replace` is not set. Registering the identical factory again is a no-op, which keeps test re-imports safe.
+  - Until T029 lands, `get_strategy("codeact")` raises `ConfigError` ("no attribute CodeActStrategy").
+- **ReActStrategy decisions not in designs.md 7.1.**
+  - The constructor takes no options. `name="react"` and `required_tools=frozenset()` are class attributes.
+  - `system_prompt(base, tools)` appends a short `REACT_GUIDANCE` paragraph to `base`. Tools are not listed in the prompt, because they are sent as native declarations.
+  - `build_request` moves the **leading** system-role messages, joined with a blank line, into `LLMRequest.system`. It passes the rest of the messages verbatim and leaves `purpose="step"`. **For T005/T011:** LLM clients should take the system prompt from `req.system`. A system message later in the history, such as a summary, stays in `messages`.
+  - "Malformed" (`parse_error`, type `format`) covers three cases: an empty response (blank text and no calls), a call whose name is blank, and duplicate call ids. An unknown tool name is *not* a format error; the registry reports it as `unknown_tool`. A call with an empty id gets the deterministic id `call_<index>`, which is safe for replay.
+  - When `parse_error` is set, the assistant message carries only the text and **no tool_calls**. This keeps the history valid for providers that require every tool call to have a tool response. The loop (T011) feeds the error back.
+  - Text that comes with tool calls is kept as the assistant message content. It is not treated as the final answer.
+  - `render_observations` produces one `tool` message per outcome, with `tool_call_id=call.id`. The content is chosen in this order:
+    1. an error, rendered as `{"error": {"type", "message", "hint"}}` (the hint may be null);
+    2. dict content, rendered as JSON (`sort_keys`, `ensure_ascii=False`, so the output is deterministic);
+    3. string content, as is;
+    4. `Observation.final`, when the content is empty.
+- **Tests.** No test files were added, because T018 owns the strategy tests. A scratchpad script checked parsing, rendering, the registry errors, a third strategy (`echo`) plugged in through `register_strategy`, a lazy-string registration, and that `codeact_agent` and `agents` stay out of `sys.modules`.
+- **Unrelated failures at the time of the check, left alone:** `ruff check .` failed on PEP 695 syntax in `budget/ledger.py:212` (T003, in progress), and pyrefly warned about `permissions/approvers.py:49`.
