@@ -179,29 +179,41 @@
 - **Tests.** No test files were added, because T018 owns the strategy tests. A scratchpad script checked parsing, rendering, the registry errors, a third strategy (`echo`) plugged in through `register_strategy`, a lazy-string registration, and that `codeact_agent` and `agents` stay out of `sys.modules`.
 - **Unrelated failures at the time of the check, left alone:** `ruff check .` failed on PEP 695 syntax in `budget/ledger.py:212` (T003, in progress), and pyrefly warned about `permissions/approvers.py:49`.
 
-### T010
-- **Registry API.**
-  - `register_strategy(name, factory, *, replace=False)`.
-  - `get_strategy(name, options=None) -> Strategy`.
-  - `strategy_names() -> list[str]`. This was added so that T014 and the CLI can list or validate names.
-  - A factory is a callable that takes the strategy options as **keyword arguments**, or a lazy `"module:attr"` string.
-  - `codeact` is registered as `"harness_builder.strategies.codeact.strategy:CodeActStrategy"`. **For T029:** the class must have that name, and its constructor keyword arguments are the spec's `strategy.options`.
-  - Lazy refs are imported on every `get_strategy`. The result is not cached, and `sys.modules` makes repeated imports cheap.
-- **Errors.**
-  - `get_strategy` raises `ConfigError` in three cases: an unknown name (the message lists the registered names), a lazy ref that fails to import or resolve, and options that the factory signature rejects. The options check uses `inspect.signature(...).bind`, so a `TypeError` raised inside a factory is not masked.
-  - `register_strategy` raises `ValueError` for a programming error: a lazy string without `:`, or re-registering a name with a different factory when `replace` is not set. Registering the identical factory again is a no-op, which keeps test re-imports safe.
-  - Until T029 lands, `get_strategy("codeact")` raises `ConfigError` ("no attribute CodeActStrategy").
-- **ReActStrategy decisions not in designs.md 7.1.**
-  - The constructor takes no options. `name="react"` and `required_tools=frozenset()` are class attributes.
-  - `system_prompt(base, tools)` appends a short `REACT_GUIDANCE` paragraph to `base`. Tools are not listed in the prompt, because they are sent as native declarations.
-  - `build_request` moves the **leading** system-role messages, joined with a blank line, into `LLMRequest.system`. It passes the rest of the messages verbatim and leaves `purpose="step"`. **For T005/T011:** LLM clients should take the system prompt from `req.system`. A system message later in the history, such as a summary, stays in `messages`.
-  - "Malformed" (`parse_error`, type `format`) covers three cases: an empty response (blank text and no calls), a call whose name is blank, and duplicate call ids. An unknown tool name is *not* a format error; the registry reports it as `unknown_tool`. A call with an empty id gets the deterministic id `call_<index>`, which is safe for replay.
-  - When `parse_error` is set, the assistant message carries only the text and **no tool_calls**. This keeps the history valid for providers that require every tool call to have a tool response. The loop (T011) feeds the error back.
-  - Text that comes with tool calls is kept as the assistant message content. It is not treated as the final answer.
-  - `render_observations` produces one `tool` message per outcome, with `tool_call_id=call.id`. The content is chosen in this order:
-    1. an error, rendered as `{"error": {"type", "message", "hint"}}` (the hint may be null);
-    2. dict content, rendered as JSON (`sort_keys`, `ensure_ascii=False`, so the output is deterministic);
-    3. string content, as is;
-    4. `Observation.final`, when the content is empty.
-- **Tests.** No test files were added, because T018 owns the strategy tests. A scratchpad script checked parsing, rendering, the registry errors, a third strategy (`echo`) plugged in through `register_strategy`, a lazy-string registration, and that `codeact_agent` and `agents` stay out of `sys.modules`.
-- **Unrelated failures at the time of the check, left alone:** `ruff check .` failed on PEP 695 syntax in `budget/ledger.py:212` (T003, in progress), and pyrefly warned about `permissions/approvers.py:49`.
+### T005
+- **Rule shape (deviation from the task's field order).** `Rule` is a frozen `pydantic.dataclasses.dataclass` with fields `(tool, decision, args=None, rule_id=None)`, so the designs.md builder example `Rule("run_code", "allow")` works positionally. `decision` is still validated as `PermissionValue` (a bad value raises `ValidationError`, a `ValueError`). The task text listed the order (tool, args, decision, rule_id). T014 can build rules with `Rule(**rule_dict)`.
+- **rule_id.** A rule without an explicit `rule_id` is reported as `rules[<index>]`, which is deterministic so traces compare equal (no uuids). When no rule matches, `decide` returns `PermissionDecision(decision=default, rule_id=None, reason="no rule matched ...; default <x>")`.
+- **Default.** `RulePermissionPolicy(rules, default="deny")`. `default` is a parameter because the spec has `permissions.default: deny|ask|allow`. Deny-unlisted is ASSUMED (OQ-22).
+- **Globs.** Matching uses `fnmatch.fnmatchcase`, not `fnmatch.fnmatch`, because the latter lowercases on Windows. If a rule's `args` names an arg the call does not have, the rule does not match. Non-string arg values are matched against `json.dumps(value, sort_keys=True)`.
+- **Globs are not path confinement.** `*` crosses `/` and `..`, so `staging/*` matches `staging/../x`. The generator's staging confinement (designs.md, the draft stage) still needs the separate path guard.
+- **NarrowedPolicy(parent, child).** Both arguments are typed as the `PermissionPolicy` protocol, so narrowing nests. Strictness ranks deny > ask > allow (`STRICTNESS`). On a tie the parent's decision (and rule_id) is returned, so the result is never looser than the parent.
+- **For T012.** A child policy built with the default `deny` turns every call into deny once narrowed. A profile with no permissions narrowing should either skip `NarrowedPolicy` or build the child side with `RulePermissionPolicy(child_rules, default="allow")`.
+- **For T011.**
+  - `decide()` receives a raw `ToolCall`, but validation runs first. The loop can pass `vcall.call.model_copy(update={"args": vcall.args})`, so that arg globs match normalized args.
+  - A `modify` from a `pre_tool` hook happens after the permission check. Decide whether to re-run `decide` on the modified args; designs.md only re-validates.
+- **Approvers.**
+  - `CliApprover(console=None, stream=None)` calls `rich.prompt.Confirm.ask` with `default=False` inside `anyio.to_thread.run_sync`, because it blocks. The prompt shows the tool name, the JSON args, rule_id and reason, built as a `rich.text.Text`, so markup in the args is not interpreted. `EOFError`/`KeyboardInterrupt` mean no, and an empty line takes the default (no).
+  - `AutoDenyApprover` always returns False.
+  - `StaticApprover(answer)` returns `answer` and keeps a `requests` list for T017 assertions.
+  - **Addition:** `default_approver()` returns `CliApprover` when stdin is a TTY and `AutoDenyApprover` otherwise, for the T011 builder.
+- **Package init.** `permissions/__init__.py` stays docstring-only; it is not in output_files.
+- **Tests.** No test file was added, because T017 owns `tests/unit/test_permissions.py`. A scratchpad script checked:
+  - unlisted calls are denied;
+  - the first match wins;
+  - arg-glob match, miss and missing arg;
+  - case sensitivity;
+  - an invalid decision is rejected;
+  - all 3x3 parent/child combinations give `rank >= parent` and `== max`;
+  - nested narrowing;
+  - all three approvers, using a `StringIO` stream for `CliApprover`.
+
+### T006
+- **ModelPrice is a structural Protocol in `budget/ledger.py`.** No `ModelPrice` existed when T006 ran (T003 is parallel), and the ledger may not import `llm.pricing`. `ledger.ModelPrice` needs read-only `input_cost_per_token: float` and `output_cost_per_token: float`, named after the `litellm.model_cost` keys. T003's price type must expose these two attributes (dataclass/pydantic fields are fine), or the builder (T011) must adapt it. `ledger.PriceLookup = Callable[[str], ModelPrice | None]`; `PriceTable.price` fits it directly if the field names match.
+- **Constructor.** `BudgetLedger(max_steps=10, max_input_tokens=None, max_output_tokens=None, max_cost_usd=None, price_lookup=None, *, parent=None)`. `price_lookup` is optional (None = no table; only provider-reported cost is used). Added `BudgetLedger.from_limits(limits, price_lookup)` and a `limits` property for the builder/spec path. `parent` is internal; use `child()`.
+- **Cost resolution order.** 1) price from lookup -> `in*in_rate + out*out_rate`; 2) else `usage.cost_usd` if the provider reported it; 3) else unknown. Unknown cost with `max_cost_usd` set returns a `budget` stop ("cost unknown ...") - runtime fail-closed backstop to U10's build-time ConfigError. `snapshot().usage.cost_usd` stays None until some cost is known.
+- **Step semantics.** `check_before_step` increments first, stops when `steps > max_steps` (exactly `max_steps` steps run; the (max_steps+1)th check stops). It also stops if a token/cost limit here or in any ancestor is already exhausted (in case the loop ignored a `record_llm` stop).
+- **Token/cost semantics.** `record_llm` increments `llm_calls`, charges this ledger and every ancestor, and stops when a total reaches its limit (`>=`, the next call would overrun). Ancestor exhaustion is reported with detail prefixed `parent `.
+- **Child derivation.** `fraction` must be in (0, 1], else `ValueError`. Each limited dimension gets `floor(fraction * remaining)` of the parent (cost without floor); unlimited stays unlimited. Steps get at least 1 while the parent has any left, 0 if none. Explicit `limits` can only tighten (per-field min; note `BudgetLimits.max_steps` defaults to 10, so passing `limits` always caps child steps at 10 unless set).
+- **Child steps are not charged to the parent** (the spawn is one parent step; the child's derived `max_steps` bounds it). Tokens, cost and `llm_calls` propagate up the whole chain.
+- **StopInfo.step_index** is 0-based (`steps - 1`). The loop may overwrite it with its own index via `model_copy`.
+- `child()` is typed to return `BudgetLedger` (covariant with the protocol's `Budget`).
+- **Tests.** T017 owns `tests/unit/test_budget.py`, so no test file was added. Verified with a scratchpad script: each of the 4 limit kinds stops with `budget`, child->parent and grandchild->root propagation, parent exhaustion seen by the child, unknown price (with/without cap, with provider cost), fraction validation, and `b: Budget = BudgetLedger(...)` checked by pyrefly (with a negative control).
