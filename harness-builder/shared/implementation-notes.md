@@ -280,3 +280,64 @@
   - a `Path` param and a nested-model param keep their types;
   - a list return is JSON-encoded;
   - duplicate and untyped tools raise `ConfigError`.
+
+### T008
+- **Policies record their own trace events and charge the ledger.** Every `apply` records a `ContextEvent(policy, tokens_before, tokens_after, refs_created)` through `ctx.recorder`. `SummarizePolicy` charges its call with `ctx.ledger.record_llm(usage, model.name)` and records an `LlmCallEvent(purpose="summarize")`. That event's `cost_usd` is the ledger's cost delta, and `latency_ms` is volatile. **For T011:** the loop must not record `context` events or charge summarize usage again. It must call `start_step` before `context.apply`, because events go to the open step. The policy ignores the `StopInfo` that `record_llm` returns, so the next `check_before_step` or step `record_llm` has to stop the run.
+- **Request fingerprint.** `context.summarize.request_fingerprint(req)` is sha256 of `json.dumps(stable_dump(req), sort_keys=True, separators=(",", ":"))`. If T009 or T011 adds a central fingerprint helper, both should use the same definition, or the summarize helper should be switched to it.
+- **Token counter.** Each policy takes `counter: TokenCounter | None = None`, typed by the protocol. It does not import `llm.tokens.HeuristicCounter`, because of the cross-layer concrete-import rule and because T003 runs in parallel. Without a counter, `truncate.count_tokens` uses ceil(chars/4) over contents plus `json.dumps(tool_call.args)`. **The builder (T011) and the spec loader (T014) should inject the harness counter**, so that the policies and the loop agree on counts.
+- **Pinned messages.** The pinned part is the leading `system` messages plus the first following `user` message (the task). These are never dropped. If they alone exceed `max_tokens`, they are returned over the limit, which is the only case where the limit is not met.
+- **Tool pairing.** A kept tail never starts with a `tool` message, so no tool result is kept without its assistant `tool_calls` message. Dropping always happens at message granularity. No message content is cut by truncate.
+- **Summarize details.**
+  - It does nothing while the whole history fits `max_tokens` (no LLM call).
+  - Above the limit, messages older than the last `keep_last` (at a valid boundary) are folded into a running summary. Each fold is one LLM call, and only the messages not folded before are sent, with the previous summary.
+  - State is kept per `ctx.run_id`. It resets if the history is shorter than the folded count.
+  - The summary is a `user` message headed `[Summary of earlier conversation]`, placed after the pinned messages. Mid-conversation `system` messages are poorly supported by providers.
+  - If the result is still over the limit, the oldest tail messages are dropped. Those are lost rather than folded (tradeoff: no second LLM call in the same step).
+  - The constructor is `SummarizePolicy(llm, model, max_tokens, keep_last=6, counter=None)`. `model` is the summarizer `ModelConfig`. Bound the summary length with `model.max_output_tokens`.
+  - An empty summary response keeps the previous summary.
+- **By-reference.**
+  - Only `role == "tool"` messages with `ref is None` and `len(content) > ref_threshold_chars` (default 4000) are replaced. The replacement is a `model_copy` with `ref=<handle>` and a stub: header, length, deref hint and the first `preview_chars` (default 500) chars.
+  - After replacement, the policy truncates to `max_tokens` like truncate. The constructor is `ByReferencePolicy(store, max_tokens, keep_last=12, ref_threshold_chars=4000, preview_chars=500, counter=None)`.
+  - **For T029 (CodeAct):** observations rendered as `user` messages are not parked. Render them as `tool` messages, or extend the role check.
+- **ReferenceStore.**
+  - Handles are content-addressed: `ref://` plus the first 16 hex chars of sha256. They are deterministic, so traces and replay stay stable, and the same content is stored once. `refs_created` lists only handles that were new to the store.
+  - `ReferenceStore(run_dir=None)` keeps entries in memory, and also in `<run_dir>/refs/<id>.txt` (UTF-8) when `run_dir` is set. `get` falls back to disk.
+  - Ids are validated against `[0-9a-f]{16}` before any disk access, which prevents path traversal. Unknown or malformed handles raise `KeyError`.
+  - The builder decides what `run_dir` is, since designs.md does not define it. Do not use the executor workdir that is mounted into the sandbox.
+- **DerefTool.**
+  - It is a plain class that satisfies `ToolDefinition`: `name="deref"`, `args_model=DerefArgs(ref, start>=0, length 1..16000, default 4000)`, `timeout_s=None`, `nondeterministic=False`, empty `risk`. Its body is `fn(ref, start, length) -> str`, which returns the raw slice, empty past the end, so round-trips concatenate exactly.
+  - **Assumption about T004:** the registry calls `tool.fn(**validated_args)`. If T004's concrete `Tool` model is required instead, the builder can wrap it with `Tool(name=t.name, ..., fn=t.fn)`.
+  - The constructor takes a `ReferenceReader` protocol, defined in deref.py, rather than importing `context.store.ReferenceStore`, so that the tools layer does not import the context layer's concrete class.
+- **Verification.** No test files were added, because T017 owns `test_context_policies.py`. A scratchpad script with a fake ctx, ledger, recorder and LLM checked the following:
+  - every policy stays under its limit, and the input list is unchanged;
+  - summarize sends `purpose=summarize`, sends only unfolded messages plus the previous summary, and charges usage;
+  - by-reference plus deref round-trips the content intact, including through a fresh store reading from disk;
+  - re-applying the policy creates no new refs;
+  - traversal and unknown handles are rejected.
+- **Unrelated failures seen.** `ruff format --check` flags `src/harness_builder/llm/tokens.py` (T003, in progress), and pyrefly reports one error in `src/harness_builder/trace/redact.py:103` (T009, in progress). My files are clean.
+
+### T025
+- **DockerCli contract.** It has one method: `run(args, *, timeout_s, cap_bytes=None, stdin=None) -> CliResult`. `args` exclude the `docker` binary, for example `["start", "-a", name]`, and `FakeDockerCli.calls` records them the same way. `CliResult` (a frozen pydantic model) has `exit_code`, `stdout`, `stderr` (decoded as UTF-8 with replacement), `stdout_dropped` and `stderr_dropped`, plus the properties `ok` and `truncated`. A non-zero exit is returned, not raised.
+- **Timeout semantics.** The call raises `TimeoutError`, from `anyio.fail_after`, and the CLI process is killed with a 2 s shielded `aclose`. This does not stop the container, because `start -a` only detaches. On timeout, T027 must catch `TimeoutError` and run `docker kill <name>`, then `rm -f` in `finally`.
+- **Output cap.** The cap lives in the CLI layer, not the executor. With `cap_bytes`, each stream keeps that many bytes and drains and counts the rest. The decoded text then ends with `TRUNCATION_MARKER` (`\n[... truncated N bytes ...]`). T027 passes `cap_bytes=SandboxConfig.output_cap_bytes` to `start -a` and maps `CliResult.truncated` to `ExecResult.truncated`. It must not add the marker a second time. A UTF-8 character split at the cap decodes to U+FFFD.
+- A missing binary (`OSError` on spawn) raises `DockerUnavailableError` from `run`.
+- **FakeDockerCli.** `script(prefix, *responses)` sets the responses for a command prefix. The longest matching prefix wins, responses are consumed in order and the last one repeats, and unscripted calls get `default` (exit 0, empty). `FakeResponse` has `exit_code`, `stdout`, `stderr` (bytes), `delay_s`, `hang` (sleeps until the call's timeout) and `error` (raised). Helpers: `FakeResponse.flood(n)` and `FakeResponse.inspect(exit_code, oom_killed)`. The second one emits the **default** `docker inspect` JSON list, `[{"State": {"Status", "ExitCode", "OOMKilled"}}]`. If T027 uses `--format`, it should script its own stdout. The fake applies `cap_bytes` and the marker exactly as the real CLI does.
+- **paths.py.**
+  - `bind_mount(src, dst, readonly=False)` returns `["--mount", "type=bind,src=<native>,dst=<posix>[,readonly]"]`. `mount_args(workdir, ro_mounts)` mounts the workdir read-write at `/work` and the `ro_mounts` read-only.
+  - A concrete `Path` is `resolve()`d, so symlinks to the socket are caught. Pure paths, used in cross-platform tests, must already be absolute.
+  - All errors are `ConfigError`, because `errors.py` is frozen and there is no dedicated mount error.
+  - **Rejected:** any path named `docker.sock` or `docker_engine`, any Windows `\.\pipe\...` path, and any POSIX path that *contains* `/var/run/docker.sock` or `/run/docker.sock` (`/`, `/var`, `/run`, `/var/run`). These checks apply to both src and dst. Relative paths and paths containing `,`, `"` or newlines are also rejected; the mount syntax is CSV, and these were rejected rather than quoted.
+  - **Finding:** on Windows, `pathlib.Path(r"\.\pipe\foo")` collapses to `\pipe\foo`, which is not absolute, and resolves to `<drive>:\pipe\foo`. A concrete `Path` therefore cannot carry a named-pipe path. The output then refers to an ordinary directory, not the pipe. `docker_engine` is still caught by name, and `PureWindowsPath` inputs keep the `\.\pipe\` prefix and are rejected.
+  - `--user` selection (POSIX uid:gid vs 10001) was **not** added. It is left to T027.
+- **preflight.py.**
+  - **Deviation:** step 1 is `docker --version`, not `docker version`. `docker version` also contacts the daemon and exits non-zero when it is down, which would blur the "CLI missing" and "daemon down" cases.
+  - Steps 2 and 3 are `docker info --format {{.ServerVersion}}` and `docker image inspect --format {{.Id}} <tag>`.
+  - Each step has its own cap (cli 2 s, daemon 4 s, image 2 s). All steps share one deadline of `total_timeout_s=5.0`, and each step's timeout is `min(cap, remaining)`.
+  - `doctor()` never raises. It returns `DoctorReport(image, build_command, checks=[DoctorCheck(name cli|daemon|image, status ok|fail|skipped, detail)])` with `.ok` and `.failure`. Checks after the first failure are `skipped`.
+  - `preflight()` raises `DockerUnavailableError(failure.detail)`. The detail says what to do: install Docker, start Docker Desktop or `systemctl start docker`, or, for a missing image, the exact `docker build -t <tag> -f <dir>/Dockerfile <dir>` command.
+  - `sandbox_build_command(tag)` rewrites the tag in `image_build.build_command()` so that a custom tag still gets a correct command. `format_command` uses `list2cmdline` on Windows and `shlex.join` elsewhere.
+  - `image=None` means `image_build.image_tag()`. **Callers** (T027, T030) resolve `SandboxConfig.image`, then `Settings.docker_image`, then the default, and pass the result.
+- **clean(cli, timeout_s=30).** It runs `docker ps -a -q --filter label=harness-builder=1` and then `docker rm -f <ids...>`, and returns the removed ids. A failure or timeout raises `DockerUnavailableError`, so T030 can map it to exit code 3. `CONTAINER_LABEL = "harness-builder=1"` is exported for T027.
+- **Tests.** I added `tests/unit/test_docker_cli.py` (20 tests, about 1.5 s, Docker-free), because T031 owns `test_docker_paths.py` and `test_preflight.py`. `SubprocessDockerCli` is tested with `sys.executable` standing in as the binary: a 1 MB flood is capped and drained, stdin and exit codes are checked, and a timeout kill completes in under 5 s. A missing binary makes `preflight` fail in under 5 s. Docker was not used; Docker Desktop is stopped on this machine.
+- No dependency was missing, and none was added.
+- **Unrelated failures in the shared tree at commit time.** `uv run pyrefly check` reports 1 error, in `trace/redact.py:103` (another task). `ruff format --check` flags `llm/tokens.py` (another task). My files are clean.
