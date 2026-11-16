@@ -386,3 +386,39 @@
   - that traces differing only in run_id, call ids and latency give no divergence;
   - that a changed final gives a divergence at step 1, `final`;
   - usage totals including the child, and the guard after `finish`.
+
+### T003
+- **ModelPrice lives in `llm/pricing.py`.** It is a frozen pydantic model with `input_cost_per_token` and `output_cost_per_token` (USD per token, the same names as litellm), plus `cost(input_tokens, output_tokens)`. It satisfies T006's structural `budget.ledger.ModelPrice` protocol, so the ledger never imports llm. `PriceTable(...).price` can be passed directly as the ledger's `PriceLookup`. The reviewer may move `ModelPrice` into `llm/types.py`.
+- **Price layering.** "package yaml -> user overrides -> litellm" is read as layering: overrides win over `pricing.yaml`, and litellm is consulted only when neither knows the model. A literal first-hit order would make overrides pointless. Overrides are passed as `PriceTable(overrides=...)`. `load_prices(path)` reads a user YAML in the same shape. `fallback=None` turns off the litellm lookup, and `package=` replaces the yaml (for tests).
+- **Deviation: the litellm fallback reads the bundled `litellm/model_prices_and_context_window_backup.json` from disk and never imports litellm.** `import litellm` fetches the remote cost map, which needs the network and makes U10 differ between online and offline runs. The file is found with `importlib.util.find_spec` (no import) and cached. The result is deterministic and offline. Consequence: litellm 1.109.1's bundled map has **no `openrouter/` keys**, so keys are normalized heuristically by `candidate_keys`: as given, without and with the `openrouter/` prefix, without the provider segment, and each of those with dots replaced by dashes (`anthropic/claude-sonnet-4.5` -> `claude-sonnet-4-5`).
+- **`pricing.yaml` values are ASSUMED.** It holds 10 OpenRouter ids, with per-token prices copied from litellm 1.109.1's bundled map (provider list prices) on 2026-11-16. OpenRouter's prices may differ.
+- **HeuristicCounter** counts `ceil(chars / 4)` per message. The chars are the content plus the tool-call name and `json.dumps(args, sort_keys=True)`. Role and tool schemas are not counted. `count_text(text)` is extra, for strings that are not a Message (such as `req.system`). `LiteLlmCounter(model)` imports litellm inside `count()`. No default test should call it, because the import goes to the network.
+- **FakeLLMClient.**
+  - It fills heuristic usage only when the scripted `usage == Usage()`, so explicitly scripted usage (budget-cap tests) is kept. `llm_calls` is always forced to 1, and `cost_usd` stays as scripted (the ledger prices it).
+  - Input tokens count `req.messages` plus `req.system`. Output tokens count the text plus the tool calls.
+  - When a list script runs out it raises `FakeScriptExhaustedError(HarnessError)`, defined in fake.py. The loop must not treat it as transient.
+  - Callable scripts must be sync, per the signature. Requests are kept in `.requests`.
+- **AdkLiteLlmClient.**
+  - The constructor is `AdkLiteLlmClient(settings: Settings | None = None)`, which fits T015's `LLM_FACTORY: Callable[[Settings], LLMClient]`.
+  - A missing key gives the exact `ConfigError("OPENROUTER_API_KEY not set; copy .env.example to .env")`. A missing model gives a parallel message, `HARNESS_MODEL not set; ...` (the spec gives one message for both).
+  - `LiteLlm` is built lazily on the first `complete`, so building the client imports neither ADK nor litellm.
+  - Model choice: `req.model.name` wins for each call, and `HARNESS_MODEL` is used only when the name is empty. Both get exactly one `openrouter/` prefix. `LlmRequest.model` is always set, because ADK reads it in preference to `LiteLlm.model`.
+- **Request mapping.**
+  - `req.system` and any `system`-role history messages are joined with a blank line into `system_instruction`. genai Content has no system role.
+  - All tools go into a single `types.Tool`, because ADK reads only `config.tools[0]`. Each schema is passed verbatim as `parameters_json_schema` and not converted to genai `Schema`, so `$defs` and `anyOf` survive.
+  - Assistant messages become `model` Content with text and `function_call` parts.
+  - A `tool` message becomes user Content with a `function_response`. Its name is looked up from the earlier assistant call with the same id. `response` must be a dict (genai rejects a str), so a JSON-object content is passed as-is and anything else is wrapped as `{"content": <str>}`. The model therefore sees `{"content": "..."}` for plain-text results.
+- **Response mapping.**
+  - Uses the last non-partial `LlmResponse`. Text parts are joined, skipping `thought` parts.
+  - A `function_call` becomes a `ToolCall`. A missing id gets `call_<part index>`.
+  - `usage_metadata` prompt/candidates counts become `Usage(llm_calls=1, cost_usd=None)`. `finish_reason` is the lowercased enum name, and `model` is `model_version`.
+  - An in-band `error_code` with no content raises `LLMCallError(HarnessError)`, defined in adk_litellm.py. litellm/provider exceptions propagate unchanged for the loop's retry logic.
+- **Verification.** It was done in a scratchpad script, because T016 owns the test files. The script checked:
+  - in a fresh subprocess, that importing fake, tokens, pricing and adk_litellm (and running a `PriceTable().price` lookup) loads no `google.adk`, `google.genai` or `litellm`;
+  - fake usage, explicit usage, exhaustion and callable scripts;
+  - override precedence, None for an unknown model (with and without the fallback), and the bundled fallback;
+  - both ConfigErrors;
+  - `to_adk_request`, by running it through ADK's own `_get_completion_inputs`. The output had the system message, assistant tool_calls, the tool message, the verbatim schema with `$defs`, and `max_completion_tokens`;
+  - `from_adk_response`.
+
+  No live OpenRouter call was made.

@@ -1,0 +1,35 @@
+# Package price table for PriceTable (llm/pricing.py).
+# Units: USD per token (same keys and units as litellm.model_cost).
+# Keys: OpenRouter model ids as used in HARNESS_MODEL (no "openrouter/" prefix).
+# Values are ASSUMED: copied from litellm 1.109.1's bundled cost map (provider
+# list prices) on 2026-11-16; OpenRouter may differ. User overrides win.
+anthropic/claude-sonnet-4.5:
+  input_cost_per_token: 3.0e-06
+  output_cost_per_token: 1.5e-05
+anthropic/claude-haiku-4.5:
+  input_cost_per_token: 1.0e-06
+  output_cost_per_token: 5.0e-06
+openai/gpt-4o:
+  input_cost_per_token: 2.5e-06
+  output_cost_per_token: 1.0e-05
+openai/gpt-4o-mini:
+  input_cost_per_token: 1.5e-07
+  output_cost_per_token: 6.0e-07
+openai/gpt-4.1-mini:
+  input_cost_per_token: 4.0e-07
+  output_cost_per_token: 1.6e-06
+openai/gpt-5:
+  input_cost_per_token: 1.25e-06
+  output_cost_per_token: 1.0e-05
+openai/gpt-5-mini:
+  input_cost_per_token: 2.5e-07
+  output_cost_per_token: 2.0e-06
+google/gemini-2.5-flash:
+  input_cost_per_token: 3.0e-07
+  output_cost_per_token: 2.5e-06
+google/gemini-2.5-pro:
+  input_cost_per_token: 1.25e-06
+  output_cost_per_token: 1.0e-05
+deepseek/deepseek-chat:
+  input_cost_per_token: 2.8e-07
+  output_cost_per_token: 4.2e-07
