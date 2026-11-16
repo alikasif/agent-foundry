@@ -217,3 +217,27 @@
 - **StopInfo.step_index** is 0-based (`steps - 1`). The loop may overwrite it with its own index via `model_copy`.
 - `child()` is typed to return `BudgetLedger` (covariant with the protocol's `Budget`).
 - **Tests.** T017 owns `tests/unit/test_budget.py`, so no test file was added. Verified with a scratchpad script: each of the 4 limit kinds stops with `budget`, child->parent and grandchild->root propagation, parent exhaustion seen by the child, unknown price (with/without cap, with provider cost), fraction validation, and `b: Budget = BudgetLedger(...)` checked by pyrefly (with a negative control).
+
+### T007
+- **Trace sink.** `HookManager(trace=None)`: each hook call emits one `HookTraceEvent` to `ctx.recorder.record` by default. The optional `trace` callback is an override for tests. The manager holds no per-run state, so one instance can be shared by parent and child runs and child events still reach the child recorder.
+- **Hook names are deterministic.** The name is the explicit `name`, else `f"{__module__}.{__qualname__}"` of the callable, else of its type (callable instances, `functools.partial`). It is never `repr()`, because `HookTraceEvent.hook` is not volatile and a memory address would break trace equality (T013/T014).
+- **`None` returns.** For `pre_tool` and `on_stop`, a `None` return means allow. For `post_tool` it means the observation is unchanged. This lets logging hooks return nothing.
+- **pre_tool combination.**
+  - Hooks run in order and `modify` replaces the call args that later hooks see. The combined result is `modify` with the final args (reasons joined by `; `) if any hook modified, else `allow`.
+  - The first `block` or `stop` short-circuits: later hooks do not run and are not traced.
+  - A `block` or `stop` without a reason gets a default reason that names the hook, so the model always sees a reason (FR-010).
+- **Fail-closed contract violations (pre_tool).** A raising hook, a `modify` with `args=None`, and a return that is not a `HookOutcome` all become `block`. The reason is `pre_tool hook '<name>' failed: <ExcType>: <msg>`, and the trace event has `error` set.
+- **For T011.** `HookOutcome` has no error type, so the loop must map `block` to `ErrorObservation(type="hook_blocked", message=outcome.reason)`. The loop must also re-validate `modify` args (designs.md 5) and enforce the on_stop veto cap of 3. The manager does not count vetoes.
+- **post_tool.** Hooks chain over the observation. A raising hook or a return that is not an `Observation` is ignored and traced with `error` and outcome `allow`. Outcome is `modify` when the returned observation differs from the input, else `allow`.
+- **on_stop.** Both `stop` and `block` veto, and are normalized to `HookOutcome(action="stop", reason=...)`. The first veto short-circuits, which is a deviation from "all hooks run". Errors and invalid returns are ignored and traced. **For T051:** register `PromotionHook` with a high priority value (it runs last), so it never promotes a result that a later hook vetoes.
+- **Isolation scope.** Only `Exception` is caught. anyio cancellation and `KeyboardInterrupt` (`BaseException`) still propagate, as they must. Sync hooks run inline on the event loop. Async hooks and callables returning awaitables are awaited.
+- **Small additions.** `register` raises `ValueError` for an unknown event, because spec-loaded strings bypass the Literal. Hooks with tied priority keep registration order (stable sort). Dispatch iterates over a snapshot of the hook list. `HookManager.names(event)` (not in the protocol) returns the execution order, for tests and debugging. `HOOK_EVENTS` is exported.
+- **Tests.** No test file was added, because T017 owns `tests/unit/test_hooks.py`. I verified with a scratchpad `anyio.run` script covering:
+  - ordering across priorities and ties;
+  - sync, async and callable-instance hooks;
+  - modify chaining;
+  - block/stop short-circuit;
+  - fail-closed on an exception, on `modify` without args and on a bad return;
+  - post_tool/on_stop errors ignored;
+  - trace event outcomes;
+  - protocol conformance (`m: protocols.HookManager = HookManager()` passes pyrefly).
