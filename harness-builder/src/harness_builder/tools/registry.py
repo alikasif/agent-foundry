@@ -17,7 +17,13 @@ from typing import Any, overload
 
 import anyio
 import anyio.to_thread
-from pydantic import BaseModel, ConfigDict, ValidationError, create_model
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    PydanticUserError,
+    ValidationError,
+    create_model,
+)
 from pydantic_core import to_jsonable_python
 
 from harness_builder.core import protocols
@@ -105,8 +111,13 @@ def tool(
 
 
 def derive_args_model(fn: Callable[..., Any], tool_name: str) -> type[BaseModel]:
-    """Return a pydantic model (extra args forbidden) from ``fn``'s signature."""
-    hints = _type_hints(fn, tool_name)
+    """Return a pydantic model (extra args forbidden) from ``fn``'s signature.
+
+    Only the annotations of model parameters are resolved (string annotations
+    against ``fn``'s module), so the return and ``ctx`` annotations may name
+    ``TYPE_CHECKING``-only types.
+    """
+    hints = inspect.get_annotations(fn)
     fields: dict[str, Any] = {}
     for param in inspect.signature(fn).parameters.values():
         if param.name == CTX_PARAM:
@@ -123,14 +134,17 @@ def derive_args_model(fn: Callable[..., Any], tool_name: str) -> type[BaseModel]
         default = ... if param.default is param.empty else param.default
         fields[param.name] = (hints[param.name], default)
     model_name = "".join(part.title() for part in tool_name.split("_")) + "Args"
-    return create_model(model_name, __config__=ConfigDict(extra="forbid"), **fields)
-
-
-def _type_hints(fn: Callable[..., Any], tool_name: str) -> dict[str, Any]:
     try:
-        return inspect.get_annotations(fn, eval_str=True)
-    except NameError as exc:
+        model = create_model(
+            model_name,
+            __config__=ConfigDict(extra="forbid"),
+            __module__=fn.__module__,
+            **fields,
+        )
+        model.model_rebuild(raise_errors=True)
+    except (NameError, AttributeError, SyntaxError, PydanticUserError) as exc:
         raise ConfigError(f"tool {tool_name!r}: unresolvable type hint: {exc}") from exc
+    return model
 
 
 class ToolRegistry:
