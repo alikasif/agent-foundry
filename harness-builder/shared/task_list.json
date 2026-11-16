@@ -1,0 +1,1837 @@
+[
+  {
+    "id": "T001",
+    "title": "[M1] Scaffold harness-builder package, deps, test config and feature branch",
+    "description": "Create local branch feat/harness-builder from the current branch (never commit to main; do not touch the unrelated modified file .claude/skills/token-budget/scripts/budget_state.json; stage only harness-builder/ paths). In D:\\GitHub\\agent-foundry\\harness-builder\\ create pyproject.toml (name harness-builder, version 0.1.0, requires-python >=3.11, hatchling build backend, wheel packages=['src/harness_builder'], script `harness = \"harness_builder.cli.main:main\"`). Add ALL dependencies now with uv so no later task edits pyproject/uv.lock: runtime `uv add 'google-adk>=1.0.0,<2.0.0' 'litellm>=1.50' 'pydantic>=2.0' 'click>=8.0' 'rich>=13.0' 'python-dotenv>=1.0' 'pyyaml>=6.0' 'anyio>=4' 'ruff>=0.15' 'pyrefly>=1.0'`; path deps `uv add --editable ../skillful_agent ../codeact_agent` resulting in [tool.uv.sources] skillful-agent = { path = \"../skillful_agent\", editable = true } and codeact-agent = { path = \"../codeact_agent\", editable = true }; dev group `uv add --dev 'pytest>=8' 'anyio>=4' pytest-timeout`. Config: [tool.ruff] line-length 88, lint select E,F,I,N,W,UP, extend-exclude harnesses/, .harness/, .agents/, tests/generator/fixtures/broken_*/; [tool.pyrefly] project-includes src and tests with the same excludes; [tool.pytest.ini_options] testpaths=tests, markers `docker: needs a running Docker daemon` and `live: needs a real LLM (HARNESS_LIVE=1)`, timeout 120. Create the full src layout from designs.md 2.1 with empty __init__.py / module stubs containing only a module docstring: core/, llm/, strategies/, strategies/codeact/, tools/, tools/builtin/, context/, permissions/, budget/, hooks/, trace/, executor/, executor/image/, safety/, spec/, evals/, generator/, generator/templates/, skills/, cli/; executor/image/ is a package (__init__.py) holding Dockerfile and hb_entry.py, and the image tag helper lives in executor/image_build.py (never create executor/image.py, it would collide) (cli/main.py with a click group `main` that prints help). Tests tree: tests/unit, tests/conformance, tests/integration, tests/docker, tests/generator/fixtures, tests/skills/fixtures, each with __init__.py where needed. tests/conftest.py: anyio_backend fixture returning 'asyncio'; pytest_collection_modifyitems that skips `live` tests unless HARNESS_LIVE=1 and skips `docker` tests with reason 'Docker not available: <err>' when `docker info` fails or exceeds 5 s (probe once per session). Add tests/unit/test_package_import.py asserting `import harness_builder` works and does not import google.adk, agents or skillful_agent (check sys.modules). Add .gitignore (.venv/, .harness/, .agents/skills-pending/, __pycache__/, .env), .env.example stub (OPENROUTER_API_KEY=, HARNESS_MODEL=, HARNESS_TRACE_DIR=, HARNESS_SKILLS_ROOT=, HARNESS_DOCKER_IMAGE=), README.md stub, docs/ dir, harnesses/.gitkeep, shared/reviews/ dir, and shared/learnings.md if missing. Run `uv sync` and `uv run pytest`. Append a `### T001` section to shared/implementation-notes.md (resolved versions of google-adk, litellm, openai-agents). Commit locally; no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-060",
+      "FR-061"
+    ],
+    "assigned_to": "project_structure",
+    "status": "in_progress",
+    "blocked_by": [],
+    "output_files": [
+      "harness-builder/pyproject.toml",
+      "harness-builder/uv.lock",
+      "harness-builder/.gitignore",
+      "harness-builder/.env.example",
+      "harness-builder/README.md",
+      "harness-builder/src/harness_builder/**",
+      "harness-builder/tests/conftest.py",
+      "harness-builder/tests/unit/test_package_import.py",
+      "harness-builder/docs/",
+      "harness-builder/harnesses/.gitkeep",
+      "harness-builder/shared/reviews/",
+      "harness-builder/shared/learnings.md",
+      "harness-builder/shared/implementation-notes.md"
+    ],
+    "acceptance_criteria": [
+      "Branch feat/harness-builder exists and holds the scaffold commit; main untouched",
+      "pyproject.toml lists both siblings as editable path sources and all runtime/dev deps; `uv sync` succeeds",
+      "`uv run pytest` passes (>=1 test collected) with Docker stopped",
+      "docker/live markers registered; a dummy docker-marked test skips with reason when Docker is absent",
+      "`uv run ruff check .` and `uv run pyrefly check` pass on the stubs",
+      "`uv run harness --help` prints the click group help"
+    ]
+  },
+  {
+    "id": "T002",
+    "title": "[M1] Foundation: errors, config, core types, protocols, leaf models (frozen)",
+    "description": "Implement the leaf contracts that every layer depends on; after this task they are FROZEN (changes only via implementation-notes + reviewer). Files: src/harness_builder/errors.py (HarnessError, ConfigError, DockerUnavailableError, SpecError, ReplayDivergence(step_index, kind, expected, actual)); config.py (Settings via pydantic + python-dotenv: OPENROUTER_API_KEY, HARNESS_MODEL, HARNESS_TRACE_DIR default ./.harness/traces, HARNESS_SKILLS_ROOT, HARNESS_DOCKER_IMAGE; no validation of key at import); core/types.py (Message, ToolCall, Observation, ErrorObservation with the 9 type literals of designs.md 3.2, StepDecision, StopReason, StopInfo, Usage, ToolOutcome, ToolResult, PermissionDecision, HookOutcome, ModelConfig); llm/types.py (LLMRequest, LLMResponse, ToolSchema); executor/models.py (ExecRequest, ExecResult, SandboxConfig with ASSUMED defaults 30 s / 64 KiB / 512 MiB / 1 CPU / 128 pids / network False / state_mode 'stateless'); trace/models.py (Trace schema_version=1, TraceStep, TraceEvent discriminated union on `kind`: llm_call, decision, permission, hook, tool_call, tool_result, context, budget, subagent; volatile-field marking); core/protocols.py with ALL layer Protocols of designs.md section 3 (LLMClient, Strategy, ToolRegistry, ContextPolicy, PermissionPolicy, Approver, Budget, HookManager, Executor, TraceSink, Retriever, TokenCounter, ToolRunner injection point used by replay). Leaf modules import only stdlib and pydantic. Re-export public names in src/harness_builder/__init__.py lazily (no heavy imports). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T002` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-001",
+      "FR-002",
+      "FR-005",
+      "FR-006",
+      "FR-012",
+      "FR-015",
+      "FR-045"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T001"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/__init__.py",
+      "harness-builder/src/harness_builder/errors.py",
+      "harness-builder/src/harness_builder/config.py",
+      "harness-builder/src/harness_builder/core/types.py",
+      "harness-builder/src/harness_builder/core/protocols.py",
+      "harness-builder/src/harness_builder/llm/types.py",
+      "harness-builder/src/harness_builder/executor/models.py",
+      "harness-builder/src/harness_builder/trace/models.py"
+    ],
+    "acceptance_criteria": [
+      "All models are pydantic v2 and JSON round-trip (model_validate(model_dump()))",
+      "Leaf modules import only stdlib/pydantic (verifiable by AST)",
+      "Strategy protocol matches designs.md 3.1 (name, required_tools, system_prompt, build_request, parse, render_observations)",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T002` entry for this task"
+    ]
+  },
+  {
+    "id": "T003",
+    "title": "[M1] LLM layer: FakeLLMClient, token counters, PriceTable, AdkLiteLlmClient",
+    "description": "Implement src/harness_builder/llm/fake.py (FakeLLMClient(script: list[LLMResponse] | Callable[[LLMRequest], LLMResponse]) recording requests; usage from HeuristicCounter; raises clear error when script exhausted), llm/tokens.py (HeuristicCounter chars/4 deterministic; LiteLlmCounter lazy), llm/pricing.py + llm/pricing.yaml (PriceTable: package yaml -> user overrides -> litellm.model_cost fallback; `price(model) -> ModelPrice | None`), and llm/adk_litellm.py (AdkLiteLlmClient per designs.md section 6: lazy import of google.adk inside the module functions; convert LLMRequest -> LlmRequest with GenerateContentConfig(system_instruction, tools function_declarations, temperature, max_output_tokens); call LiteLlm(model='openrouter/<HARNESS_MODEL>', api_key).generate_content_async(req, stream=False), aggregate; map parts to text/tool_calls and usage_metadata to Usage; ConfigError('OPENROUTER_API_KEY not set; copy .env.example to .env') at construction when key/model missing; retry x2 on transient errors is done by the loop, not here). Use ctx7 to check current google-adk LiteLlm/LlmRequest APIs before coding. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T003` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-015",
+      "FR-009"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/llm/fake.py",
+      "harness-builder/src/harness_builder/llm/tokens.py",
+      "harness-builder/src/harness_builder/llm/pricing.py",
+      "harness-builder/src/harness_builder/llm/pricing.yaml",
+      "harness-builder/src/harness_builder/llm/adk_litellm.py"
+    ],
+    "acceptance_criteria": [
+      "Importing llm.fake/llm.tokens/llm.pricing does not import google.adk",
+      "AdkLiteLlmClient without key raises ConfigError before any network call",
+      "PriceTable returns None for unknown models (used by U10 build-time check)",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T003` entry for this task"
+    ]
+  },
+  {
+    "id": "T004",
+    "title": "[M1] Tool registry with typed tools and errors-as-observations",
+    "description": "Implement src/harness_builder/tools/registry.py: frozen Tool model (name, description, args_model, fn, timeout_s, nondeterministic, risk set), @tool decorator deriving a pydantic args model from a typed signature (or accepting an explicit args_model), ToolRegistry.register/schemas(visible)/validate(call) -> ValidatedCall | ErrorObservation (unknown_tool, validation with field locations and a hint)/ async invoke(vcall, ctx) -> Observation (sync fn via anyio.to_thread, async awaited, anyio.fail_after(timeout_s) -> timeout ErrorObservation, exception -> tool_exception ErrorObservation; ToolResult.final propagates to Observation.final). Invalid args must never reach the tool body. JSON schema generation from args_model for ToolSchema. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T004` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-005",
+      "FR-006"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/tools/registry.py",
+      "harness-builder/src/harness_builder/tools/__init__.py"
+    ],
+    "acceptance_criteria": [
+      "validate() rejects unknown tools and invalid args with structured ErrorObservation; tool body not called",
+      "Tool exceptions and timeouts produce ErrorObservation, never propagate",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T004` entry for this task"
+    ]
+  },
+  {
+    "id": "T005",
+    "title": "[M1] Permissions: rule policy, narrowed policy, approvers",
+    "description": "Implement src/harness_builder/permissions/policy.py (Rule(tool glob, args: dict[name, glob] | None, decision allow|deny|ask, rule_id); RulePermissionPolicy with first-match semantics and default deny-unlisted (ASSUMED OQ-22); NarrowedPolicy(parent, child) strictest-wins deny > ask > allow) and permissions/approvers.py (CliApprover using rich Confirm, AutoDenyApprover for non-interactive, StaticApprover(bool) for tests; Approver.approve is async). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T005` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-008"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/permissions/policy.py",
+      "harness-builder/src/harness_builder/permissions/approvers.py"
+    ],
+    "acceptance_criteria": [
+      "Unlisted tool -> deny by default",
+      "NarrowedPolicy never loosens the parent",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T005` entry for this task"
+    ]
+  },
+  {
+    "id": "T006",
+    "title": "[M1] Budget ledger: steps, tokens, cost, child sub-ledgers",
+    "description": "Implement src/harness_builder/budget/ledger.py BudgetLedger(max_steps=10 ASSUMED, max_input_tokens, max_output_tokens, max_cost_usd, price_lookup: Callable[[str], ModelPrice | None]) with check_before_step() -> StopInfo | None, record_llm(usage, model) -> StopInfo | None, child(fraction, limits) -> sub-ledger whose charges propagate to the parent, snapshot(). Stop reason 'budget'. Do not import llm.pricing concretely (inject the lookup). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T006` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-009"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/budget/ledger.py"
+    ],
+    "acceptance_criteria": [
+      "Each limit kind (steps, input tokens, output tokens, cost) stops with 'budget'",
+      "Child charges count against the parent",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T006` entry for this task"
+    ]
+  },
+  {
+    "id": "T007",
+    "title": "[M1] Hook manager: ordered, isolated, veto-capable",
+    "description": "Implement src/harness_builder/hooks/manager.py HookManager: register(event in pre_tool|post_tool|on_stop, fn, priority=0); deterministic order (priority asc, then registration); pre_tool outcomes allow|modify|block|stop; on_stop may veto with a message; every call wrapped and reported to a trace callback; pre_tool exception fails CLOSED -> block with hook_blocked (U9 ASSUMED); post_tool/on_stop exceptions ignored and traced. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T007` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-010"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/hooks/manager.py"
+    ],
+    "acceptance_criteria": [
+      "Hook exceptions never propagate",
+      "Ordering is deterministic",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T007` entry for this task"
+    ]
+  },
+  {
+    "id": "T008",
+    "title": "[M1] Context policies: truncate, summarize, by-reference",
+    "description": "Implement src/harness_builder/context/truncate.py (TruncatePolicy(max_tokens, keep_last): keep system + task + last N within max_tokens via TokenCounter), context/summarize.py (SummarizePolicy folding older turns into a running summary via an injected LLMClient call with purpose=summarize; usage reported to the caller for budget and trace), context/store.py (ReferenceStore in memory + <run_dir>/refs/), context/by_reference.py (ByReferencePolicy: observations > ref_threshold_chars replaced by ref://<id> + preview) and tools/builtin/deref.py (DerefTool deref(ref, start, length) reading from ReferenceStore). Policies operate on a working copy; canonical history untouched. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T008` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-007"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/context/truncate.py",
+      "harness-builder/src/harness_builder/context/summarize.py",
+      "harness-builder/src/harness_builder/context/store.py",
+      "harness-builder/src/harness_builder/context/by_reference.py",
+      "harness-builder/src/harness_builder/tools/builtin/deref.py"
+    ],
+    "acceptance_criteria": [
+      "Each policy keeps prompt under configured token limit",
+      "by-reference + deref round-trips content intact",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T008` entry for this task"
+    ]
+  },
+  {
+    "id": "T009",
+    "title": "[M1] Trace recorder, redaction, trace diff",
+    "description": "Implement src/harness_builder/trace/recorder.py (TraceRecorder implementing TraceSink: in-memory events per step, finish(stop) -> Trace, write JSON to HARNESS_TRACE_DIR (.harness/traces/<run_id>.json, U12 ASSUMED), config_hash = sha256 of canonical config JSON, nested child traces via subagent events), trace/redact.py (Redactor: configured secrets + env vars matching *KEY*|*TOKEN*|*SECRET*|*PASSWORD* -> [REDACTED:<NAME>] at record time), trace/diff.py (diff_traces(a, b) -> TraceDiff with first divergence by step index comparing tool names, normalized args, final text, response hash; deltas for steps, tokens, cost, tool usage counts, stop reason; volatile fields ignored; rich and JSON renderers). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T009` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-012",
+      "FR-014"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/trace/recorder.py",
+      "harness-builder/src/harness_builder/trace/redact.py",
+      "harness-builder/src/harness_builder/trace/diff.py"
+    ],
+    "acceptance_criteria": [
+      "Trace written as JSON round-trips through the Trace model",
+      "OPENROUTER_API_KEY value never appears in a written trace",
+      "diff of identical traces reports no divergence",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T009` entry for this task"
+    ]
+  },
+  {
+    "id": "T010",
+    "title": "[M1] Strategy registry and ReActStrategy",
+    "description": "Implement src/harness_builder/strategies/registry.py (name -> factory; register_strategy(); get_strategy(name, options); 'react' registered eagerly, 'codeact' registered via lazy factory string so codeact_agent is never imported until used) and src/harness_builder/strategies/react.py per designs.md 7.1 (native function declarations; tool calls -> calls; text without calls -> final; malformed -> parse_error format; render_observations -> tool-role messages, errors as {\"error\": {type, message, hint}}). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T010` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-002",
+      "FR-003"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/strategies/registry.py",
+      "harness-builder/src/harness_builder/strategies/react.py"
+    ],
+    "acceptance_criteria": [
+      "get_strategy('react') works without importing codeact_agent",
+      "A third strategy can be registered without modifying registry internals",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T010` entry for this task"
+    ]
+  },
+  {
+    "id": "T011",
+    "title": "[M1] StepLoop, RunContext and HarnessBuilder (composition root)",
+    "description": "Implement src/harness_builder/core/loop.py (StepLoop per designs.md section 5: budget check -> context.apply -> strategy.build_request -> llm.complete with 2 retries on transient errors -> budget.record_llm -> strategy.parse -> per call sequential validate -> permission (ask -> approver) -> pre_tool hooks (modify re-validated) -> invoke via injectable ToolRunner (default: registry.invoke; replay injects its own) -> post_tool -> observations; final/Observation.final -> on_stop hooks with veto cap 3; stop reasons done|budget|veto|error; every decision traced), core/run_context.py (RunContext: run_id, depth, ledger, recorder, workdir handle, messages; RunResult(answer, stop, usage, trace_path)), core/builder.py (HarnessBuilder fluent API of designs.md 11.1 minus executor/subagents wiring added later: name, model, strategy, tools, context, permissions, budget, hook, llm override for fakes, trace dir; build() validates config, enforces strategy.required_tools, raises ConfigError for unknown model price when max_cost_usd set (U10 ASSUMED); auto-registers deref when by_reference is used; Harness.run(task) async). builder.py is the only module importing concrete layer classes. This task OWNS core/builder.py first; later editors are chained (T012, T014, T028). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T011` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-001",
+      "FR-006",
+      "FR-016"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T003",
+      "T004",
+      "T005",
+      "T006",
+      "T007",
+      "T008",
+      "T009",
+      "T010"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/core/loop.py",
+      "harness-builder/src/harness_builder/core/run_context.py",
+      "harness-builder/src/harness_builder/core/builder.py"
+    ],
+    "acceptance_criteria": [
+      "A ReAct harness with FakeLLMClient runs end to end with stop reasons done, budget, veto, error reachable",
+      "Errors (validation, unknown tool, exception, timeout, permission denied, hook block) become observations and the run continues",
+      "ToolRunner is injectable without editing loop.py",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T011` entry for this task"
+    ]
+  },
+  {
+    "id": "T012",
+    "title": "[M1] Sub-agents: spawn_agent tool, narrowed permissions, child budget",
+    "description": "Implement src/harness_builder/tools/builtin/spawn.py (SpawnAgentTool(task, profile): depth check ctx.depth+1 <= max_depth default 2 ASSUMED else depth_exceeded ErrorObservation; builds the child through HarnessBuilder with NarrowedPolicy(parent, child) and parent_budget.child(fraction); sequential (OQ-24 ASSUMED); child trace embedded as a subagent event) and extend core/builder.py with .subagents(max_depth, profiles). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T012` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-011"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T011"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/tools/builtin/spawn.py",
+      "harness-builder/src/harness_builder/core/builder.py"
+    ],
+    "acceptance_criteria": [
+      "Exceeding depth returns depth_exceeded observation",
+      "Child cost is charged to the parent ledger; child trace nested in parent",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T012` entry for this task"
+    ]
+  },
+  {
+    "id": "T013",
+    "title": "[M1] Offline replay of traces",
+    "description": "Implement src/harness_builder/trace/replay.py: ReplayLLMClient (returns recorded llm_call responses in order; compares sha256 request fingerprint of the normalized, redacted request with volatile fields removed), ReplayToolRunner (returns recorded observations by call order; never executes tools or Docker), replay(trace, harness_factory) -> ReplayReport(matched | divergence(step_index, kind request|decision|tool_call|stop, expected, actual)). Uses the loop's ToolRunner injection point; does not edit loop.py. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T013` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-013"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T011"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/trace/replay.py"
+    ],
+    "acceptance_criteria": [
+      "Replaying a recorded fake-LLM run reports matched",
+      "A perturbed run reports the divergent step index",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T013` entry for this task"
+    ]
+  },
+  {
+    "id": "T014",
+    "title": "[M1] Minimal HarnessSpec v1 (M1 layers) and spec loader",
+    "description": "Implement src/harness_builder/spec/models.py (HarnessSpec schema_version Literal[1] with M1 fields only: name, description, model, strategy{name, options}, prompts{system str | {file}}, tools as BuiltinToolRef list, context, permissions{default, rules}, budget, hooks as BuiltinHookRef, subagents{max_depth, profiles}; unknown schema_version -> SpecError listing expected versions), spec/io.py (YAML/JSON read/write with located errors like `harness.yaml: tools[2].builtin: ...`), spec/loader.py (spec -> HarnessBuilder; HarnessBuilder.from_spec(dir_or_file) in core/builder.py; spec_snapshot stored in trace). Fields are extended in T040 (M3); version stays 1. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T014` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-016",
+      "FR-030"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T012"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/spec/models.py",
+      "harness-builder/src/harness_builder/spec/io.py",
+      "harness-builder/src/harness_builder/spec/loader.py",
+      "harness-builder/src/harness_builder/core/builder.py"
+    ],
+    "acceptance_criteria": [
+      "A harness built from code and from an equivalent spec file produce equal traces (excluding volatile fields) and equal config_hash",
+      "Invalid specs raise SpecError with located paths",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T014` entry for this task"
+    ]
+  },
+  {
+    "id": "T015",
+    "title": "[M1] CLI M1: run, replay, diff, trace show",
+    "description": "Implement src/harness_builder/cli/main.py click group `harness` with `run <dir|spec> \"<task>\" [--strategy] [--trace PATH]`, `replay <trace.json>` (needs spec_snapshot), `diff <a.json> <b.json> [--json]`, `trace show <trace.json>` (rich). Exit codes: 0 ok, 1 run failed, 2 usage/config error, 3 Docker unavailable. Lazy imports so `harness --help` stays fast. This task OWNS cli/main.py first; later editors are chained (T030, T043, T053). Fake-LLM injection for CLI tests: define a module-level `LLM_FACTORY: Callable[[Settings], LLMClient]` in cli/main.py (default builds AdkLiteLlmClient) that tests monkeypatch, plus a hidden `--fake-llm PATH` option (JSON list of scripted LLMResponses) for subprocess-style tests. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T015` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-013",
+      "FR-014",
+      "FR-016"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T013",
+      "T014"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/cli/main.py"
+    ],
+    "acceptance_criteria": [
+      "`harness diff a.json b.json` prints first divergence and deltas",
+      "cli.main.LLM_FACTORY and hidden --fake-llm option exist and are used by run",
+      "`harness --help` does not import google.adk or codeact_agent",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T015` entry for this task"
+    ]
+  },
+  {
+    "id": "T016",
+    "title": "[M1] Tests: foundation models, import rules, LLM layer, tool registry",
+    "description": "Write tests/unit/test_models_roundtrip.py (all leaf models round-trip), tests/unit/test_import_rules.py (AST walk over src/: leaf modules import only stdlib/pydantic; no layer imports another layer's concrete class; only core/builder.py and spec/loader.py are composition roots; codeact_agent only in strategies/codeact/_compat.py, skillful_agent only in skills/_compat.py, both imported lazily inside functions), tests/unit/test_llm_fake.py, test_tokens_pricing.py, test_adk_client_config.py (missing key -> ConfigError, no network) plus a live-marked test calling OpenRouter, and tests/unit/test_tool_registry.py (decorator schema, invalid args never reach body, unknown tool, exception, timeout -> ErrorObservation). Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T016` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-005",
+      "FR-006",
+      "FR-015",
+      "FR-012"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T002",
+      "T003",
+      "T004"
+    ],
+    "output_files": [
+      "harness-builder/tests/unit/test_models_roundtrip.py",
+      "harness-builder/tests/unit/test_import_rules.py",
+      "harness-builder/tests/unit/test_llm_fake.py",
+      "harness-builder/tests/unit/test_tokens_pricing.py",
+      "harness-builder/tests/unit/test_adk_client_config.py",
+      "harness-builder/tests/unit/test_tool_registry.py"
+    ],
+    "acceptance_criteria": [
+      "Each FR-006 error class has a test",
+      "Import-rule test passes on current src",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T017",
+    "title": "[M1] Tests: permissions, budget, hooks, context policies",
+    "description": "Write tests/unit/test_permissions.py (allow/deny/ask, arg-pattern rules, default deny-unlisted, NarrowedPolicy strictest-wins), test_budget.py (steps, input, output, cost limits; child propagation), test_hooks.py (ordering, veto, modify, fail-closed pre_tool, ignored post_tool/on_stop failures), test_context_policies.py (each policy under limit; by-reference + deref round-trip; summarize uses the fake LLM and reports usage). Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T017` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-007",
+      "FR-008",
+      "FR-009",
+      "FR-010"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T005",
+      "T006",
+      "T007",
+      "T008"
+    ],
+    "output_files": [
+      "harness-builder/tests/unit/test_permissions.py",
+      "harness-builder/tests/unit/test_budget.py",
+      "harness-builder/tests/unit/test_hooks.py",
+      "harness-builder/tests/unit/test_context_policies.py"
+    ],
+    "acceptance_criteria": [
+      "Every limit kind and every permission decision has a test",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T018",
+    "title": "[M1] Tests: trace recorder, redaction, diff, ReAct unit",
+    "description": "Write tests/unit/test_trace_recorder.py (round-trip, nested subagent events, config_hash stability), test_redact.py (secret values and *KEY* env vars redacted), test_trace_diff.py (identical -> none; changed tool args -> first divergence index; deltas), test_react_strategy.py (build_request schemas, parse calls/final/garbage, render_observations error shape). Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T018` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-003",
+      "FR-012",
+      "FR-014"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T009",
+      "T010"
+    ],
+    "output_files": [
+      "harness-builder/tests/unit/test_trace_recorder.py",
+      "harness-builder/tests/unit/test_redact.py",
+      "harness-builder/tests/unit/test_trace_diff.py",
+      "harness-builder/tests/unit/test_react_strategy.py"
+    ],
+    "acceptance_criteria": [
+      "Redaction test proves the key value never appears in the JSON",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T019",
+    "title": "[M1] Strategy conformance suite (react, echo) and loop integration tests",
+    "description": "Create tests/conformance/ per designs.md 7.4: EchoStrategy test double (tests/conformance/echo.py, registered via register_strategy, proving a third strategy plugs in without loop changes), per-strategy encode(intent) adapters (CallTool, Finish, Garbage), STRATEGY_FACTORIES parametrization designed so 'codeact' can be added in T033, and the 8 shared cases. Integration tests in tests/integration/: loop stop reasons; sub-agent depth limit, budget propagation and nested trace; record-then-replay matches exactly and perturbed fake reports divergence index; code-built vs spec-built equal traces and config_hash; per-step framework overhead median < 50 ms over 100 steps with a fake LLM and no-op tool (generous margin, documented). Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T019` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-001",
+      "FR-002",
+      "FR-003",
+      "FR-011",
+      "FR-013",
+      "FR-016"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T011",
+      "T012",
+      "T013",
+      "T014"
+    ],
+    "output_files": [
+      "harness-builder/tests/conformance/",
+      "harness-builder/tests/integration/"
+    ],
+    "acceptance_criteria": [
+      "Conformance passes for react and echo",
+      "PRD AC 3 and AC 4 covered by passing tests (except CLI diff, see T020)",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T020",
+    "title": "[M1] CLI M1 tests via click CliRunner",
+    "description": "Write tests/integration/test_cli_m1.py: `harness run` on a spec dir with an injected fake LLM (env or fixture hook), `harness diff a.json b.json` text and --json output verified, `harness replay`, `harness trace show`, exit codes 0/1/2. Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T020` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-014",
+      "FR-013"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T015"
+    ],
+    "output_files": [
+      "harness-builder/tests/integration/test_cli_m1.py"
+    ],
+    "acceptance_criteria": [
+      "`harness diff` output asserted in tests (FR-014 acceptance)",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T021",
+    "title": "[M1] Review M1 layer implementations (T002-T010)",
+    "description": "Review T002-T010 against designs.md sections 2-6: protocol fidelity, leaf-module purity, error-as-observation coverage, budget/cost correctness, hook isolation, redaction, lazy ADK import, async correctness, typing and docstrings. Write findings to shared/reviews/T021_review.md with severity (blocker/major/minor). Set review_feedback on the reviewed task(s) for blockers. Do not modify source code.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-001",
+      "FR-002",
+      "FR-003",
+      "FR-005",
+      "FR-006",
+      "FR-007",
+      "FR-008",
+      "FR-009",
+      "FR-010",
+      "FR-012",
+      "FR-014",
+      "FR-015"
+    ],
+    "assigned_to": "backend_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T002",
+      "T003",
+      "T004",
+      "T005",
+      "T006",
+      "T007",
+      "T008",
+      "T009",
+      "T010"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T021_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file written with verdict per task"
+    ]
+  },
+  {
+    "id": "T022",
+    "title": "[M1] Review loop, builder, sub-agents, replay, spec, CLI (T011-T015)",
+    "description": "Review T011-T015: loop control flow vs designs.md section 5, termination guarantees, replay determinism, spec path confinement, builder as sole composition root, CLI exit codes. Write findings to shared/reviews/T022_review.md with severity (blocker/major/minor). Set review_feedback on the reviewed task(s) for blockers. Do not modify source code.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-001",
+      "FR-011",
+      "FR-013",
+      "FR-014",
+      "FR-016"
+    ],
+    "assigned_to": "backend_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T011",
+      "T012",
+      "T013",
+      "T014",
+      "T015"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T022_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file written with verdict per task"
+    ]
+  },
+  {
+    "id": "T023",
+    "title": "[M1] Docs M1: layer reference, writing tools/strategies/hooks, traces",
+    "description": "Write docs/layers.md (each layer, protocol, default impl, test double), docs/extending.md (writing a tool, a strategy, a hook, a context policy), docs/traces.md (trace schema v1, redaction, replay, diff, CLI), and update README.md with install (uv sync), config (.env), quickstart with ReAct and fake LLM. Commit locally; no push.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-060"
+    ],
+    "assigned_to": "documentation",
+    "status": "not_started",
+    "blocked_by": [
+      "T015"
+    ],
+    "output_files": [
+      "harness-builder/docs/layers.md",
+      "harness-builder/docs/extending.md",
+      "harness-builder/docs/traces.md",
+      "harness-builder/README.md"
+    ],
+    "acceptance_criteria": [
+      "Code samples match the implemented API names",
+      "Docs mark ASSUMED defaults as such"
+    ]
+  },
+  {
+    "id": "T024",
+    "title": "[M1] M1 exit gate: architecture review of framework core",
+    "description": "Review all M1 output: layering and dependency rules (designs.md 2.2), protocol stability for M2 overlap and M3 (spec extensibility), conformance coverage, PRD M1 exit criteria AC 2 (ReAct + Echo), AC 3, AC 4. Confirm core/protocols.py and leaf models are fit to freeze; list any required changes as follow-up items. Write findings to shared/reviews/T024_arch_review.md. Do not modify source code.",
+    "milestone": "M1",
+    "fr_refs": [
+      "FR-001",
+      "FR-002",
+      "FR-016",
+      "FR-061"
+    ],
+    "assigned_to": "architecture_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T016",
+      "T017",
+      "T018",
+      "T019",
+      "T020",
+      "T021",
+      "T022",
+      "T023"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T024_arch_review.md"
+    ],
+    "acceptance_criteria": [
+      "Explicit go/no-go for M3 interface stability recorded"
+    ]
+  },
+  {
+    "id": "T025",
+    "title": "[M2] Docker CLI abstraction, host path translation, preflight/doctor/clean",
+    "description": "Implement src/harness_builder/executor/docker_cli.py (DockerCli protocol; SubprocessDockerCli via anyio.run_process with per-call timeouts and incremental stream reading; FakeDockerCli recording argv and scripting outputs, floods, OOM inspect, hangs), executor/paths.py (host path -> `--mount type=bind,src=...,dst=...[,readonly]` for Windows drive letters and POSIX; rejects any docker socket path /var/run/docker.sock or //./pipe/docker_engine), executor/preflight.py (preflight(): docker version -> docker info -> docker image inspect <tag>; total <= 5 s; DockerUnavailableError with actionable message incl. exact `docker build` command; doctor() report; clean() removing containers labelled harness-builder=1). Can start as soon as T002 is done (M1/M2 overlap allowed by the PRD). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T025` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-043",
+      "FR-044"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/executor/docker_cli.py",
+      "harness-builder/src/harness_builder/executor/paths.py",
+      "harness-builder/src/harness_builder/executor/preflight.py"
+    ],
+    "acceptance_criteria": [
+      "With docker absent, preflight raises DockerUnavailableError within 5 s",
+      "Mount builder refuses docker socket paths",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T025` entry for this task"
+    ]
+  },
+  {
+    "id": "T026",
+    "title": "[M2] Sandbox image: Dockerfile, hb_entry run mode, FINAL channel, image tag",
+    "description": "Create src/harness_builder/executor/image/Dockerfile (python:3.11-slim pinned by digest, non-root uid 10001, curated packages pydantic + pyyaml (OQ-6 ASSUMED), copies hb_entry.py to /opt/hb/ and an `hb-final` bash helper onto PATH), executor/image/hb_entry.py (`run <lang> <file>`: exec Python with injected FINAL(answer) writing /work/.hb/final.json and raising a private BaseException caught -> exit 0; bash via `bash <file>`; keep the module importable on host for unit tests; leave clear extension points for `schema` and `call` modes added in T039) and executor/image_build.py (image_tag() = harness-builder-sandbox:<content hash of image dir>; build_command()). Ensure package data includes the image dir in the wheel via hatch config only if needed (record in notes). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T026` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-040",
+      "FR-045"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T001"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/executor/image/Dockerfile",
+      "harness-builder/src/harness_builder/executor/image/hb_entry.py",
+      "harness-builder/src/harness_builder/executor/image_build.py"
+    ],
+    "acceptance_criteria": [
+      "image_tag() changes when Dockerfile or hb_entry.py changes",
+      "hb_entry FINAL path unit-testable on host without Docker",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T026` entry for this task"
+    ]
+  },
+  {
+    "id": "T027",
+    "title": "[M2] DockerExecutor (create/start/inspect/rm lifecycle) and FakeExecutor",
+    "description": "Implement src/harness_builder/executor/docker.py DockerExecutor per designs.md 8.1-8.2 using the DockerCli protocol: stage code to <workdir>/.hb/code.<ext>; `docker create` with name hb-<run>-<n>, labels, --network none unless req.network, --memory/--memory-swap 512m, --cpus 1, --pids-limit 128, --read-only, --tmpfs /tmp, --cap-drop ALL, --security-opt no-new-privileges, --user, bind mount of the per-harness-run workdir at /work plus readonly ro_mounts, env allowlist only (PYTHONUNBUFFERED, HOME=/tmp, req.env; never os.environ or --env-file); `docker start -a` under anyio.fail_after(timeout) with per-stream cap 64 KiB and marker `\\n[... truncated N bytes ...]` while draining; docker kill on timeout; docker inspect for ExitCode/OOMKilled; final.json -> final_set/final_value; `docker rm -f` in finally (U8 ASSUMED; U1 stateless ASSUMED). Also src/harness_builder/executor/fake.py FakeExecutor(scripted ExecResults) for strategy tests. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T027` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-040",
+      "FR-041",
+      "FR-042",
+      "FR-043",
+      "FR-045"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T025",
+      "T026"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/executor/docker.py",
+      "harness-builder/src/harness_builder/executor/fake.py"
+    ],
+    "acceptance_criteria": [
+      "FakeDockerCli tests can assert the exact argv including no env leak",
+      "rm -f always issued, also on timeout and exceptions",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T027` entry for this task"
+    ]
+  },
+  {
+    "id": "T028",
+    "title": "[M2] run_code tool and builder executor/preflight wiring",
+    "description": "Implement src/harness_builder/tools/builtin/run_code.py (RunCodeTool: args language python|bash, code; risk code_exec; per-harness-run workdir from RunContext; returns Observation with exec=ExecResult and final when final_set) and extend core/builder.py with .executor(executor) and preflight in build() when any tool needs the Executor (DockerUnavailableError fails fast, nothing executed); workdir created per run and removed at run end. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T028` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-044",
+      "FR-045"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T027",
+      "T014"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/tools/builtin/run_code.py",
+      "harness-builder/src/harness_builder/core/builder.py"
+    ],
+    "acceptance_criteria": [
+      "Builder with run_code and Docker absent raises DockerUnavailableError at build",
+      "run_code args validated per FR-005",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T028` entry for this task"
+    ]
+  },
+  {
+    "id": "T029",
+    "title": "[M2] CodeAct strategy with codeact_agent compat layer and Docker prompt",
+    "description": "Implement src/harness_builder/strategies/codeact/_compat.py (ONLY module importing codeact_agent; lazy imports inside functions of extract_code_blocks, truncate_output, CODEACT_SYSTEM_PROMPT; option A of U2 ASSUMED), strategies/codeact/prompt.py (CODEACT_DOCKER_PROMPT derived from the sibling prompt keeping code-format, FINAL contract, execution-feedback format and completion rules; rewriting the persistence guarantee to stateless-per-block with /work files (U1), dropping Git Bash/awk, register(), llm_query (replaced by spawn_agent tool, U11), in-memory ContextStore (replaced by /work/context.txt); keep a list of reused section strings for the drift test), strategies/codeact/strategy.py (CodeActStrategy per designs.md 7.2: required_tools {run_code}; parse code blocks -> run_code calls, unsupported language -> format error, native tool calls passed through, no blocks/no calls -> final; render <execution> observations with truncate_output 4000 chars; remaining blocks skipped after FINAL). Register 'codeact' factory lazily in strategies/registry.py. Read sibling code at D:\\GitHub\\agent-foundry\\codeact_agent read-only; never modify it. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T029` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-004",
+      "FR-061"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T010"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/strategies/codeact/_compat.py",
+      "harness-builder/src/harness_builder/strategies/codeact/prompt.py",
+      "harness-builder/src/harness_builder/strategies/codeact/strategy.py",
+      "harness-builder/src/harness_builder/strategies/registry.py"
+    ],
+    "acceptance_criteria": [
+      "ReAct-only runs never import codeact_agent",
+      "Same task + tool set runs under codeact by changing strategy name only",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T029` entry for this task"
+    ]
+  },
+  {
+    "id": "T030",
+    "title": "[M2] CLI doctor command and Docker exit code mapping",
+    "description": "Extend src/harness_builder/cli/main.py with `harness doctor [--clean]` (rich report of CLI, daemon, image; prints build command; --clean sweeps labelled containers) and map DockerUnavailableError to exit code 3 in all commands; fail within 5 s. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T030` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-044"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T025",
+      "T015"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/cli/main.py"
+    ],
+    "acceptance_criteria": [
+      "`harness doctor` with Docker absent exits 3 within 5 s with actionable text",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T030` entry for this task"
+    ]
+  },
+  {
+    "id": "T031",
+    "title": "[M2] Executor unit tests with FakeDockerCli (Docker-free)",
+    "description": "Write tests/unit/test_docker_executor.py, test_docker_paths.py, test_preflight.py, test_run_code_tool.py, test_hb_entry.py and tests/integration/test_cli_doctor.py: exact argv (flags, mounts, labels, user, network none, no env leak, socket never mounted), kill-on-timeout sequence and rm -f, output flood capped with marker, OOM inspect mapped, Windows and POSIX path translation, preflight <= 5 s with DockerUnavailableError, builder fails fast, ExecResult round-trip, FINAL channel on host. Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T031` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-040",
+      "FR-041",
+      "FR-042",
+      "FR-043",
+      "FR-044",
+      "FR-045"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T027",
+      "T028",
+      "T030"
+    ],
+    "output_files": [
+      "harness-builder/tests/unit/test_docker_executor.py",
+      "harness-builder/tests/unit/test_docker_paths.py",
+      "harness-builder/tests/unit/test_preflight.py",
+      "harness-builder/tests/unit/test_run_code_tool.py",
+      "harness-builder/tests/unit/test_hb_entry.py",
+      "harness-builder/tests/integration/test_cli_doctor.py"
+    ],
+    "acceptance_criteria": [
+      "All tests run and pass with Docker stopped",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T032",
+    "title": "[M2] Real-Docker isolation tests (docker marker) and latency measurement",
+    "description": "Write tests/docker/ (all @pytest.mark.docker; fixture builds the image if missing): timeout kill of `while True: pass` within timeout+5 s and no leftover container; 10 MB print capped + marker; no state/file leak across two harness runs; OPENROUTER_API_KEY absent in container env; socket.create_connection fails under --network none; memory hog reported oom_killed; write to read-only rootfs fails; documented escape attempts (FR-046: mount/proc/sys writes, capability use, docker socket absence). Measure per-execution overhead (median of 10) against the 3 s target (OQ-13) and record numbers and OS in implementation-notes. If Docker is absent, all tests skip with reason and the task is still complete, with the skip recorded for the T036 gate. Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T032` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-040",
+      "FR-041",
+      "FR-042",
+      "FR-043",
+      "FR-046"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T027",
+      "T028"
+    ],
+    "output_files": [
+      "harness-builder/tests/docker/"
+    ],
+    "acceptance_criteria": [
+      "With Docker present: all docker tests pass and latency is recorded",
+      "With Docker absent: all skip with reason, recorded in implementation-notes",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T033",
+    "title": "[M2] CodeAct conformance, CodeAct-only cases, codeact_agent contract tests",
+    "description": "Add 'codeact' to the conformance STRATEGY_FACTORIES using FakeExecutor (Finish -> FINAL() block with final_set), plus tests/conformance/test_codeact_only.py (multiple blocks in order stop at FINAL, unsupported language, observation truncation, timed_out/oom_killed rendering, final_set with exit 0 vs non-zero) and tests/unit/test_codeact_compat.py (pins extract_code_blocks and truncate_output behaviour; asserts reused prompt sections are textually present in codeact_agent CODEACT_SYSTEM_PROMPT). Also an integration test running the same task and tools under react and codeact by changing only strategy.name. Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T033` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-002",
+      "FR-004",
+      "FR-061"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T028",
+      "T029",
+      "T019"
+    ],
+    "output_files": [
+      "harness-builder/tests/conformance/",
+      "harness-builder/tests/unit/test_codeact_compat.py",
+      "harness-builder/tests/integration/test_strategy_swap.py"
+    ],
+    "acceptance_criteria": [
+      "Conformance suite passes for react, codeact and echo (PRD AC 2)",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T034",
+    "title": "[M2] Review Docker executor, run_code, CodeAct, doctor (T025-T030)",
+    "description": "Review T025-T030: hardening flags vs FR-040/043, no env/socket leak paths, cleanup in all paths, stream capping without deadlock, Windows path handling, CodeAct prompt adaptation honesty, lazy compat import, exit codes. Write findings to shared/reviews/T034_review.md with severity (blocker/major/minor). Set review_feedback on the reviewed task(s) for blockers. Do not modify source code.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-004",
+      "FR-040",
+      "FR-041",
+      "FR-042",
+      "FR-043",
+      "FR-044",
+      "FR-045"
+    ],
+    "assigned_to": "backend_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T025",
+      "T026",
+      "T027",
+      "T028",
+      "T029",
+      "T030"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T034_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file written with verdict per task"
+    ]
+  },
+  {
+    "id": "T035",
+    "title": "[M2] Docs M2: Docker prerequisite, isolation boundary, CodeAct",
+    "description": "Write docs/isolation.md (what is blocked: network, env, host fs, socket, privileges, resource caps; what is not: shared kernel, escape CVEs, Docker Desktop VM limits, side channels; Windows notes; latency numbers from T032 if present), docs/docker.md (install, `harness doctor`, building the image, cleanup), docs/strategies.md (ReAct vs CodeAct, stateless model U1, FINAL, spawn_agent). Update README prerequisites. Commit locally; no push.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-046",
+      "FR-060"
+    ],
+    "assigned_to": "documentation",
+    "status": "not_started",
+    "blocked_by": [
+      "T028",
+      "T029",
+      "T030",
+      "T023"
+    ],
+    "output_files": [
+      "harness-builder/docs/isolation.md",
+      "harness-builder/docs/docker.md",
+      "harness-builder/docs/strategies.md",
+      "harness-builder/README.md"
+    ],
+    "acceptance_criteria": [
+      "Isolation limits stated honestly per FR-046"
+    ]
+  },
+  {
+    "id": "T036",
+    "title": "[M2] M2 exit gate: architecture review of executor and CodeAct",
+    "description": "Review M2: Executor protocol vs implementation, sibling coupling (codeact_agent only via _compat), state model U1, lifecycle U8, PRD exit AC 1, AC 2 (both strategies), AC 5. Explicitly flag if real-Docker tests (T032) were skipped and never ran; that is an open risk the orchestrator must surface to the user. Give go/no-go for M3 interface stability. Write findings to shared/reviews/T036_arch_review.md. Do not modify source code.",
+    "milestone": "M2",
+    "fr_refs": [
+      "FR-040",
+      "FR-046",
+      "FR-004",
+      "FR-061"
+    ],
+    "assigned_to": "architecture_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T024",
+      "T031",
+      "T032",
+      "T033",
+      "T034",
+      "T035"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T036_arch_review.md"
+    ],
+    "acceptance_criteria": [
+      "Go/no-go for M3 recorded; Docker-test execution status stated"
+    ]
+  },
+  {
+    "id": "T037",
+    "title": "[M3] AST static safety screening (shared by generator and skills)",
+    "description": "Implement src/harness_builder/safety/screen.py: screen(path | source) -> ScreenReport with findings (category network|subprocess|delete|dynamic_exec|secret, line, detail): imports/calls of socket, urllib, requests, httpx, aiohttp; subprocess, os.system, os.exec*; os.remove, unlink, shutil.rmtree, rmdir; eval, exec, __import__; key-like regexes and high-entropy string literals. Pure leaf module (stdlib only). PRD gate exception: this leaf has no dependency on M1/M2 interfaces and may start right after T002. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T037` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-032",
+      "FR-054"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T002"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/safety/screen.py"
+    ],
+    "acceptance_criteria": [
+      "Each category detected on a fixture; clean code yields no findings",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T037` entry for this task"
+    ]
+  },
+  {
+    "id": "T038",
+    "title": "[M3] Eval models and EvalRunner",
+    "description": "Implement src/harness_builder/evals/models.py (ToolCase(id, tool, args, check), TaskCase(id, input, check, runs=1), Check union Contains|Regex|Equals|PyAssert(code, run in Docker via Executor with `answer` bound)|Rubric(text, judge_model, live only), CaseResult(success_rate, mean_steps, tokens, cost, trace_paths), EvalReport) and evals/runner.py (EvalRunner(harness_factory, cases, runs=N, llm=None, live=False): ToolCase invokes the tool through the registry so permissions/executor limits apply; TaskCase runs harness.run N times; TaskCase/Rubric skipped as 'not run' unless live). Works on hand-written harnesses independent of the generator. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T038` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-033"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T024",
+      "T036"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/evals/models.py",
+      "harness-builder/src/harness_builder/evals/runner.py"
+    ],
+    "acceptance_criteria": [
+      "Runner works on a hand-written harness with a fake LLM",
+      "Report includes success rate, steps, tokens, cost",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T038` entry for this task"
+    ]
+  },
+  {
+    "id": "T039",
+    "title": "[M3] ContainerTool and hb_entry schema/call modes for generated tools",
+    "description": "Implement src/harness_builder/tools/container_tool.py (ContainerTool built from a JSON schema in tools.schema.json; each call runs `hb_entry.py call tools/x.py func` in Docker with the harness dir mounted read-only at /tools and args as JSON on stdin; in-container pydantic validation returns structured validation errors; result JSON -> Observation) and extend executor/image/hb_entry.py with `schema <module> <func>` (emit args model JSON schema) and `call <module> <func>` modes. Host runtime only via trust flag (U5 ASSUMED) using the same hb_entry functions in-process for hand-written fixtures. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T039` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-030",
+      "FR-032",
+      "FR-005"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T036"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/tools/container_tool.py",
+      "harness-builder/src/harness_builder/executor/image/hb_entry.py"
+    ],
+    "acceptance_criteria": [
+      "Invalid args return a validation error and never reach the tool body",
+      "Image tag changes because hb_entry changed (rebuild documented)",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T039` entry for this task"
+    ]
+  },
+  {
+    "id": "T040",
+    "title": "[M3] Full HarnessSpec v1 and loader (module tools, hooks, sandbox, evals, skills)",
+    "description": "Extend src/harness_builder/spec/models.py to the full designs.md 4.4 schema (ModuleToolRef{module, function, examples, runtime docker|host}}, ModuleHookRef, ChildProfile, sandbox SandboxConfig, skills SkillsConfig | None (fields: enabled, root, top_k=3, include_user_skills=False, include_bundled=False), evals {file} | inline cases), still schema_version 1; module refs confined to the harness dir (reject absolute and `..`); strategies by registered name only. Extend spec/loader.py and spec/io.py: build ContainerTool for runtime docker using tools.schema.json, host tools only when trust_host_tools / --trust-tools; inject `ask` rules for flagged tools when a screen report is supplied; add HarnessBuilder(trust_host_tools=..., allow_failed=...) options in core/builder.py; refuse to run a harness whose .harness-meta.json status is fail unless allow_failed. Leaves a skills-extension hook point (callable registry) so M4 does not edit loader internals. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T040` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-030",
+      "FR-016"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T039",
+      "T028"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/spec/models.py",
+      "harness-builder/src/harness_builder/spec/loader.py",
+      "harness-builder/src/harness_builder/spec/io.py",
+      "harness-builder/src/harness_builder/core/builder.py"
+    ],
+    "acceptance_criteria": [
+      "Invalid specs fail with located errors",
+      "Path traversal in module refs rejected",
+      "M1 spec files still load unchanged (version 1 compatible)",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T040` entry for this task"
+    ]
+  },
+  {
+    "id": "T041",
+    "title": "[M3] ValidationPipeline and ValidationReport",
+    "description": "Implement src/harness_builder/generator/validate.py per designs.md 9.3: stage A (spec parse with located errors; module/function existence via AST with typed params or args model and examples; `uv run ruff check` and `pyrefly check` as subprocesses on tools/; safety.screen with injected ask rules), stage B0 (schema extraction in Docker -> tools.schema.json), stage B (smoke run with scripted FakeLLMClient calling each tool once with its first example then finishing; pass only if stop done, no validation/tool_exception/executor_error, trace round-trips), stage C (ToolCases in Docker via EvalRunner; TaskCases only with live=True, otherwise 'not run'). Docker-runtime tools with Docker unavailable -> status incomplete (never pass; exit 3); no FakeExecutor substitution for generated tools; trust-tools mode runs B0/B/C on host for tools and FakeExecutor only for run_code. ValidationReport(status pass|fail|incomplete, stages, flagged_tools, attempts) with JSON and Markdown renderers. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T041` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-034"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T037",
+      "T038",
+      "T040"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/generator/validate.py"
+    ],
+    "acceptance_criteria": [
+      "A deliberately broken tool is caught by stage A or B (status fail)",
+      "Docker absent with docker-runtime tools yields incomplete, never pass",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T041` entry for this task"
+    ]
+  },
+  {
+    "id": "T042",
+    "title": "[M3] Generator agent harness and generation pipeline",
+    "description": "Implement src/harness_builder/generator/request.py (GenerationRequest(description, examples, constraints, allowed_tools, interactive)), generator/harness.py (generator built with HarnessBuilder: ReAct, system prompt describing HarnessSpec v1 and tool conventions; tools write_file/read_file path-guarded to the staging dir via permission rule + guard, list_builtin_tools, get_spec_schema, ask_user (interactive only, max 5 questions, else auto-denied), submit() ending the run; own budget covering repairs; never executes generated code), generator/ pipeline.py (draft into <out>.staging/ -> ValidationPipeline -> repair by feeding the report back up to max_attempts=3 ASSUMED -> atomic move to <out>/ with reports/validation.{json,md}, .harness-meta.json, README FAILED banner on fail), generator/templates/ (README.md and harness.yaml skeletons). Default output parent ./harnesses/<name>/ (U7 ASSUMED). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T042` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-031",
+      "FR-032",
+      "FR-034"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T041"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/generator/request.py",
+      "harness-builder/src/harness_builder/generator/harness.py",
+      "harness-builder/src/harness_builder/generator/pipeline.py",
+      "harness-builder/src/harness_builder/generator/templates/"
+    ],
+    "acceptance_criteria": [
+      "Failing harness is written with status fail and never reported as passing",
+      "write_file cannot escape the staging dir",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T042` entry for this task"
+    ]
+  },
+  {
+    "id": "T043",
+    "title": "[M3] CLI: new, validate, eval, run flags",
+    "description": "Extend src/harness_builder/cli/main.py: `harness new \"<description>\" -o <dir> [--non-interactive] [--max-attempts 3]`, `harness validate <dir> [--live] [--trust-tools]`, `harness eval <dir> [--runs N] [--live]`, and `run` flags --allow-failed and --trust-tools. Fake LLM injectable for tests through the T015 mechanism (cli.main.LLM_FACTORY monkeypatch and hidden --fake-llm PATH) for new, validate --live, eval and run. Exit codes 0/1/2/3 per designs.md 11.2. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T043` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-035",
+      "FR-033"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T042",
+      "T030"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/cli/main.py"
+    ],
+    "acceptance_criteria": [
+      "All four commands exist and print help",
+      "validate exits 1 on fail and 3 on incomplete",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T043` entry for this task"
+    ]
+  },
+  {
+    "id": "T044",
+    "title": "[M3] Tests: safety screen, eval runner, ContainerTool, full spec",
+    "description": "Write tests/unit/test_safety_screen.py, test_eval_runner.py (hand-written harness, fake LLM, ToolCase/TaskCase, live-only skipping), test_container_tool.py (FakeDockerCli argv, stdin args, validation error shape; docker-marked real schema/call round-trip), test_spec_full.py (located errors, path traversal rejection, M1 spec back-compat, trust flag gating, failed-harness refusal). Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T044` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-030",
+      "FR-032",
+      "FR-033",
+      "FR-005"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T037",
+      "T038",
+      "T039",
+      "T040"
+    ],
+    "output_files": [
+      "harness-builder/tests/unit/test_safety_screen.py",
+      "harness-builder/tests/unit/test_eval_runner.py",
+      "harness-builder/tests/unit/test_container_tool.py",
+      "harness-builder/tests/unit/test_spec_full.py"
+    ],
+    "acceptance_criteria": [
+      "FR-033 runner acceptance covered on a hand-written harness",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T045",
+    "title": "[M3] Generator tests: 3 fixture domains, broken generation, CLI",
+    "description": "Create tests/generator/fixtures/ for CSV bug triage, repo Q&A over a fixture folder, and unit conversion, each with a scripted FakeLLMClient driving the generator harness to write known files; plus tests/generator/fixtures/broken_tool/ (bad signature and a raising body; excluded from ruff/pyrefly in T001). Tests: each output dir loads, passes stages A and B offline with --trust-tools, passes stage C under the docker marker; broken generation ends status fail, exit 1, README FAILED banner; repair loop bounded by max attempts; Docker absent with docker-runtime tools -> incomplete exit 3; CLI new/validate/eval/run via CliRunner. Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T045` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-031",
+      "FR-034",
+      "FR-035"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T041",
+      "T042",
+      "T043"
+    ],
+    "output_files": [
+      "harness-builder/tests/generator/"
+    ],
+    "acceptance_criteria": [
+      "PRD AC 6 covered (offline parts pass; Docker stage C passes or skips with reason)",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T046",
+    "title": "[M3] Review generator, validation, spec, ContainerTool, evals (T037-T043)",
+    "description": "Review T037-T043: generated code never executed on host without trust flag, staging path guards, atomic finalize, fail/incomplete never reported as pass, repair bound, screen coverage, spec path confinement, CLI exit codes. Write findings to shared/reviews/T046_review.md with severity (blocker/major/minor). Set review_feedback on the reviewed task(s) for blockers. Do not modify source code.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-030",
+      "FR-031",
+      "FR-032",
+      "FR-033",
+      "FR-034",
+      "FR-035"
+    ],
+    "assigned_to": "backend_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T037",
+      "T038",
+      "T039",
+      "T040",
+      "T041",
+      "T042",
+      "T043"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T046_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file written with verdict per task"
+    ]
+  },
+  {
+    "id": "T047",
+    "title": "[M3] Docs M3: HarnessSpec reference and generator workflow",
+    "description": "Write docs/spec.md (HarnessSpec v1 field reference, versioning, module tools, runtime docker vs host, permissions defaults), docs/generator.md (harness new/validate/run/eval, validation stages, statuses pass/fail/incomplete, repair loop, --live, --trust-tools, output layout), docs/evals.md (ToolCase/TaskCase, checks, runner). Update README. Commit locally; no push.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-060",
+      "FR-030",
+      "FR-035"
+    ],
+    "assigned_to": "documentation",
+    "status": "not_started",
+    "blocked_by": [
+      "T043",
+      "T035"
+    ],
+    "output_files": [
+      "harness-builder/docs/spec.md",
+      "harness-builder/docs/generator.md",
+      "harness-builder/docs/evals.md",
+      "harness-builder/README.md"
+    ],
+    "acceptance_criteria": [
+      "CLI examples match implemented flags"
+    ]
+  },
+  {
+    "id": "T048",
+    "title": "[M3] M3 exit gate: architecture review of generator",
+    "description": "Review M3 against designs.md section 9 and PRD AC 6: generator built on the framework (no bypass), ValidationPipeline determinism, D9-D11 assumptions, Docker rule for generated tools, extensibility of HarnessSpec for M4 skills. Write findings to shared/reviews/T048_arch_review.md. Do not modify source code.",
+    "milestone": "M3",
+    "fr_refs": [
+      "FR-030",
+      "FR-031",
+      "FR-034"
+    ],
+    "assigned_to": "architecture_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T044",
+      "T045",
+      "T046",
+      "T047"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T048_arch_review.md"
+    ],
+    "acceptance_criteria": [
+      "Go/no-go recorded for M3 exit"
+    ]
+  },
+  {
+    "id": "T049",
+    "title": "[M4] Skills compat and store: ScopedSkillManager, SkillStore, stats sidecar",
+    "description": "Implement src/harness_builder/skills/_compat.py (ONLY module importing skillful_agent; lazy import of skill_manager.SkillManager and SkillCatalogEntry) and skills/store.py (ScopedSkillManager(search_paths) subclass setting _search_paths before super().__init__(), neutralised _find_project_root, discover_skills over explicit paths only reusing inherited _scan_dir/_parse_skill_md; U3 option A ASSUMED; SkillStore with live .agents/skills, pending .agents/skills-pending, meta .agents/skills-meta/stats.json (atomic temp + os.replace), trash .agents/skills-trash; skills root resolution U4: SkillsConfig.root -> CLI -> HARNESS_SKILLS_ROOT -> nearest pyproject.toml ancestor of CWD -> CWD; bundled and ~/.agents/skills excluded by default). Read sibling at D:\\GitHub\\agent-foundry\\skillful_agent read-only; never modify it. Can run in parallel with M3 after the M2 gate. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T049` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-050",
+      "FR-052",
+      "FR-061"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T024",
+      "T036"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/skills/_compat.py",
+      "harness-builder/src/harness_builder/skills/store.py"
+    ],
+    "acceptance_criteria": [
+      "Catalog contains only skills from explicit search paths (no bundled coding/preflight/task-reminder)",
+      "Stats writes are atomic",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T049` entry for this task"
+    ]
+  },
+  {
+    "id": "T050",
+    "title": "[M4] LexicalRetriever (BM25) behind Retriever protocol",
+    "description": "Implement src/harness_builder/skills/retriever.py: LexicalRetriever pure-Python BM25 over name (weight 2, split on '-'), description, optional triggers; index(entries), search(query, k=3) -> list[ScoredSkill]; normalized similarity helper for dedup; < 100 ms for 1,000 skills (D4 ASSUMED). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T050` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-051"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T049"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/skills/retriever.py"
+    ],
+    "acceptance_criteria": [
+      "Deterministic ranking; search over 1,000 synthetic skills < 100 ms",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T050` entry for this task"
+    ]
+  },
+  {
+    "id": "T051",
+    "title": "[M4] SkillsExtension: prompt contributor, activate_skill, run_skill_script, stats hook",
+    "description": "Implement src/harness_builder/skills/extension.py SkillsExtension.install(builder): top-k (3) retrieved name+description into the prompt in <available_skills> XML shape (not the full catalog); activate_skill(name) returns body + resource list only for retrieved/explicit names; run_skill_script(name, script, args) mounts the skill dir read-only at /skill, args as JSON stdin, runs via the Executor with the same limits; post_tool hook updating usage/success stats. Wire SkillsConfig through the loader's extension hook point from T040 (no loader internals edits). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T051` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-051",
+      "FR-052"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T050",
+      "T040"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/skills/extension.py"
+    ],
+    "acceptance_criteria": [
+      "Skill body absent from prompt until activate_skill",
+      "Skill scripts only run through the Executor",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T051` entry for this task"
+    ]
+  },
+  {
+    "id": "T052",
+    "title": "[M4] Promotion hook/service, CandidateValidator, ApprovalGate",
+    "description": "Implement src/harness_builder/skills/promotion.py (PromotionHook on_stop never vetoes, errors traced; verified success = stop done + last run_code final_set + exit_code 0 + passing test (OQ-9 ASSUMED); modes on_stop|deferred; PromotionService generalizes the snippet via LLMClient on its own budget into SKILL.md + scripts/<name>.py + tests/test_<name>.py in .agents/skills-pending/<cid>/<name>/ with candidate.json), skills/validation.py (CandidateValidator: frontmatter name == dir, kebab-case, description <= 200 chars; ast.parse; test passes in Docker; throwaway ScopedSkillManager loads it with zero warnings; dedup by name collision or BM25 similarity >= 0.8 ASSUMED proposing merge/skip/replace; safety.screen), skills/approval.py (ApprovalGate rich review of description, script, test output, dedup, safety; atomic promote via .tmp-<cid> + os.replace; replace moves old to skills-trash; --auto-approve refused unless root has .hb-sandbox-library marker). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T052` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-053",
+      "FR-054",
+      "FR-055"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T049",
+      "T050",
+      "T037"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/skills/promotion.py",
+      "harness-builder/src/harness_builder/skills/validation.py",
+      "harness-builder/src/harness_builder/skills/approval.py"
+    ],
+    "acceptance_criteria": [
+      "No skill reaches .agents/skills without approval",
+      "Invalid candidates rejected with a reason",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T052` entry for this task"
+    ]
+  },
+  {
+    "id": "T053",
+    "title": "[M4] Skills hygiene, skills CLI, skills-on vs skills-off eval",
+    "description": "Implement src/harness_builder/skills/hygiene.py (list/show/stats/dedup/prune; dry-run default; never auto-prune; confirmation for destructive actions; prune moves to trash) and extend cli/main.py with `harness skills list|show|stats|review|propose|dedup|prune [--dry-run/--apply] [--skills-root]`, plus the skills eval (FR-057): EvalRunner run twice with empty vs seeded SkillsConfig reporting steps and success rate (CLI `harness eval <dir> --skills-compare` or a skills eval subcommand; record choice in notes). Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T053` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-056",
+      "FR-057"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T051",
+      "T052",
+      "T043",
+      "T038"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/skills/hygiene.py",
+      "harness-builder/src/harness_builder/cli/main.py",
+      "harness-builder/src/harness_builder/evals/skills_compare.py"
+    ],
+    "acceptance_criteria": [
+      "prune without --apply changes nothing",
+      "skills eval reports both configurations side by side",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T053` entry for this task"
+    ]
+  },
+  {
+    "id": "T054",
+    "title": "[M4] Skills tests: SkillManager contract, store, retriever quality and speed",
+    "description": "Write tests/skills/test_skillmanager_contract.py (pins private _scan_dir, _parse_skill_md, _catalog names/behaviour of the sibling), test_store.py (root resolution order, explicit paths only, atomic stats), test_retriever.py (fixture library of ~30 skills in tests/skills/fixtures with labelled queries: top-3 hit rate >= 90% ASSUMED; 1,000 generated skills search < 100 ms), test_extension.py (body absent until activation, run_skill_script via FakeExecutor; docker-marked real script run). Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T054` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-050",
+      "FR-051",
+      "FR-052"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T049",
+      "T050",
+      "T051"
+    ],
+    "output_files": [
+      "harness-builder/tests/skills/"
+    ],
+    "acceptance_criteria": [
+      "Hit-rate and latency thresholds asserted",
+      "SkillManager loads fixtures without warnings",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T055",
+    "title": "[M4] Promotion/approval/hygiene tests and end-to-end skill demo",
+    "description": "Write tests/skills/test_promotion.py, test_candidate_validation.py, test_approval.py (atomic promote incl. simulated crash between copy and rename, auto-approve refused without marker, replace to trash), test_hygiene.py (dry-run default, confirmation), tests/integration/test_skills_e2e.py (PRD AC 7 with fake LLM + FakeExecutor: successful snippet -> candidate -> approval -> SkillManager loads -> retriever returns it -> repeat task uses it; docker-marked variant runs the candidate test in Docker) and skills-on vs skills-off eval smoke (AC 8 mechanics). Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T055` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-053",
+      "FR-054",
+      "FR-055",
+      "FR-056",
+      "FR-057"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T052",
+      "T053"
+    ],
+    "output_files": [
+      "harness-builder/tests/skills/",
+      "harness-builder/tests/integration/test_skills_e2e.py"
+    ],
+    "acceptance_criteria": [
+      "AC 7 end-to-end passes offline",
+      "Unapproved candidate never discovered",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T056",
+    "title": "[M4] Review skills extension (T049-T053)",
+    "description": "Review T049-T053: approval gate cannot be bypassed, atomicity, sibling private-API reliance confined to store.py and pinned by contract tests, retrieval progressive disclosure, scripts only via Executor, hygiene safety. Write findings to shared/reviews/T056_review.md with severity (blocker/major/minor). Set review_feedback on the reviewed task(s) for blockers. Do not modify source code.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-050",
+      "FR-051",
+      "FR-052",
+      "FR-053",
+      "FR-054",
+      "FR-055",
+      "FR-056",
+      "FR-057"
+    ],
+    "assigned_to": "backend_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T049",
+      "T050",
+      "T051",
+      "T052",
+      "T053"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T056_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file written with verdict per task"
+    ]
+  },
+  {
+    "id": "T057",
+    "title": "[M4] Docs M4: skill format, retrieval, promotion and approval workflow",
+    "description": "Write docs/skills.md (SKILL.md frontmatter rules, scripts/tests layout, storage locations live/pending/meta/trash, skills root resolution, retrieval and progressive disclosure, promotion trigger, approval gate, hygiene commands, skills eval). Update README. Commit locally; no push.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-060",
+      "FR-050",
+      "FR-055"
+    ],
+    "assigned_to": "documentation",
+    "status": "not_started",
+    "blocked_by": [
+      "T053",
+      "T047"
+    ],
+    "output_files": [
+      "harness-builder/docs/skills.md",
+      "harness-builder/README.md"
+    ],
+    "acceptance_criteria": [
+      "Approval workflow documented with CLI examples"
+    ]
+  },
+  {
+    "id": "T058",
+    "title": "[M4] M4 exit gate: architecture review of skills extension",
+    "description": "Review M4 against designs.md section 10: extension installs through public builder/loader hook points only, sibling coupling via skills/_compat.py only, D3/D4/D6 assumptions, PRD AC 7 and AC 8 mechanics. Write findings to shared/reviews/T058_arch_review.md. Do not modify source code.",
+    "milestone": "M4",
+    "fr_refs": [
+      "FR-050",
+      "FR-053",
+      "FR-055",
+      "FR-061"
+    ],
+    "assigned_to": "architecture_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T054",
+      "T055",
+      "T056",
+      "T057"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T058_arch_review.md"
+    ],
+    "acceptance_criteria": [
+      "Go/no-go recorded for M4 exit"
+    ]
+  },
+  {
+    "id": "T059",
+    "title": "[M5] Hardening pass: repo-wide lint/types, review follow-ups, Windows checks",
+    "description": "Resolve open minor/major findings from shared/reviews/ not yet addressed; make `uv run ruff format --check .`, `uv run ruff check .` and `uv run pyrefly check` clean repo-wide; verify Windows bind-mount behaviour and, if T032 recorded latency over the 3 s target, implement the U8 fallback (docker run --rm with exit-137 OOM inference) behind SandboxConfig and record it; finalize .env.example; confirm `harness --help` cold start does not import ADK/openai-agents. Do not implement option B sibling refactors (U2/U3) unless the user approved them. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T059` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "milestone": "M5",
+    "fr_refs": [
+      "FR-060",
+      "FR-061"
+    ],
+    "assigned_to": "python_coder",
+    "status": "not_started",
+    "blocked_by": [
+      "T048",
+      "T058"
+    ],
+    "output_files": [
+      "harness-builder/src/harness_builder/",
+      "harness-builder/.env.example"
+    ],
+    "acceptance_criteria": [
+      "All review files have no unresolved blocker/major items or a recorded rationale",
+      "`uv run ruff format --check .` and `uv run ruff check .` pass",
+      "`uv run pyrefly check` reports no errors in touched modules",
+      "Default `uv run pytest` (no Docker, no network) still passes",
+      "Public functions/classes have type hints and docstrings",
+      "shared/implementation-notes.md has a `### T059` entry for this task"
+    ]
+  },
+  {
+    "id": "T060",
+    "title": "[M5] Final full test run and eval results",
+    "description": "Run the full suite (default and, if available, with Docker), ruff and pyrefly. Run the EvalRunner over the three generated fixture harnesses and the skills-on vs skills-off comparison (FR-057) with the fake LLM; if HARNESS_LIVE=1 and a key are present also run live TaskCases (OQ-15 task set and threshold ASSUMED: >= 20% fewer steps with no success drop). Write results to shared/eval_results.json (mark offline vs live). Live absence is a recorded skip, not a failure. Conventions: pytest + anyio (anyio_backend=asyncio), FakeLLMClient only (no network), tests requiring a real daemon carry @pytest.mark.docker and tests needing a real LLM carry @pytest.mark.live. If Docker is absent, docker-marked tests must SKIP with a reason (not fail); record in shared/implementation-notes.md under `### T060` which docker/live tests were skipped and why. Do not modify src/ except to report defects (set review feedback instead). Commit locally on feat/harness-builder staging only harness-builder/ paths; no push.",
+    "milestone": "M5",
+    "fr_refs": [
+      "FR-033",
+      "FR-057"
+    ],
+    "assigned_to": "python_test",
+    "status": "not_started",
+    "blocked_by": [
+      "T059"
+    ],
+    "output_files": [
+      "harness-builder/shared/eval_results.json"
+    ],
+    "acceptance_criteria": [
+      "shared/eval_results.json written with per-case success rate, steps, tokens, cost",
+      "Full default suite passes",
+      "Default `uv run pytest` passes offline without Docker (docker/live tests skipped with a reason, never failing because Docker is absent)",
+      "`uv run ruff check tests` passes",
+      "Skipped docker/live tests recorded in shared/implementation-notes.md"
+    ]
+  },
+  {
+    "id": "T061",
+    "title": "[M5] Final README, docs index, examples, eval report",
+    "description": "Finalize README.md (overview, install with uv, Docker prerequisite and doctor, config, quickstart for code-built and spec-built harnesses, CLI reference, links), docs/index.md, examples/ (code-built ReAct harness, CodeAct harness, sample harness.yaml), and docs/eval-report.md from shared/eval_results.json stating offline vs live and every ASSUMED default still pending confirmation. Commit locally; no push.",
+    "milestone": "M5",
+    "fr_refs": [
+      "FR-060"
+    ],
+    "assigned_to": "documentation",
+    "status": "not_started",
+    "blocked_by": [
+      "T060",
+      "T023",
+      "T035",
+      "T047",
+      "T057"
+    ],
+    "output_files": [
+      "harness-builder/README.md",
+      "harness-builder/docs/index.md",
+      "harness-builder/docs/eval-report.md",
+      "harness-builder/examples/"
+    ],
+    "acceptance_criteria": [
+      "README covers every FR-060 topic",
+      "Examples run with the fake LLM"
+    ]
+  },
+  {
+    "id": "T062",
+    "title": "[M5] Review hardening pass (T059)",
+    "description": "Review T059 changes and confirm review follow-ups are closed or justified. Write findings to shared/reviews/T062_review.md with severity (blocker/major/minor). Set review_feedback on the reviewed task(s) for blockers. Do not modify source code.",
+    "milestone": "M5",
+    "fr_refs": [
+      "FR-060",
+      "FR-061"
+    ],
+    "assigned_to": "backend_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T059"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T062_review.md"
+    ],
+    "acceptance_criteria": [
+      "Review file written with verdict"
+    ]
+  },
+  {
+    "id": "T063",
+    "title": "[M5] Final architecture review and project acceptance check",
+    "description": "Check PRD project-level acceptance criteria AC 1-8 against tests, reviews, shared/eval_results.json and docs; list which ASSUMED decisions were baked in and which ACs were only verified offline (Docker/live skipped). Write findings to shared/reviews/T063_arch_review.md. Do not modify source code.",
+    "milestone": "M5",
+    "fr_refs": [
+      "FR-060",
+      "FR-061"
+    ],
+    "assigned_to": "architecture_reviewer",
+    "status": "not_started",
+    "blocked_by": [
+      "T060",
+      "T061",
+      "T062"
+    ],
+    "output_files": [
+      "harness-builder/shared/reviews/T063_arch_review.md"
+    ],
+    "acceptance_criteria": [
+      "Each PRD AC marked met / met-offline-only / not met with evidence"
+    ]
+  }
+]
