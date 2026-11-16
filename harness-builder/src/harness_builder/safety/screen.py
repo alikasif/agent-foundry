@@ -1,1 +1,254 @@
-"""AST static screening (implemented in T037)."""
+"""AST static safety screening, shared by the generator and skill validation.
+
+``screen`` parses Python source (never imports or runs it) and reports risky
+constructs in five categories:
+
+- ``network``: imports of ``socket``, ``urllib``, ``requests``, ``httpx``,
+  ``aiohttp`` (and dynamic imports of them);
+- ``subprocess``: ``subprocess`` imports, ``os.system``, ``os.popen``,
+  ``os.exec*``, ``os.spawn*``;
+- ``delete``: ``os.remove``, ``os.unlink``, ``os.rmdir``, ``os.removedirs``,
+  ``shutil.rmtree`` and any ``.unlink()`` / ``.rmdir()`` method call;
+- ``dynamic_exec``: ``eval``, ``exec``, ``__import__``,
+  ``importlib.import_module``;
+- ``secret``: key-like string literals, string literals assigned to
+  secret-looking names, and high-entropy string literals.
+
+The screen is a heuristic. It cannot see through ``getattr`` tricks or data
+flow, and it flags every delete because "outside the workdir" is not
+decidable statically. Pure stdlib leaf module.
+"""
+
+import ast
+import math
+import re
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
+
+__all__ = ["Category", "Finding", "ScreenReport", "screen"]
+
+Category = Literal["network", "subprocess", "delete", "dynamic_exec", "secret"]
+
+NETWORK_MODULES = frozenset({"socket", "urllib", "requests", "httpx", "aiohttp"})
+SUBPROCESS_MODULES = frozenset({"subprocess"})
+SUBPROCESS_CALLS = frozenset({"os.system", "os.popen"})
+SUBPROCESS_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn")
+DELETE_CALLS = frozenset(
+    {"os.remove", "os.unlink", "os.rmdir", "os.removedirs", "shutil.rmtree"}
+)
+DELETE_METHODS = frozenset({"unlink", "rmdir"})
+DYNAMIC_EXEC_CALLS = frozenset(
+    {
+        "eval",
+        "exec",
+        "__import__",
+        "builtins.eval",
+        "builtins.exec",
+        "builtins.__import__",
+        "importlib.import_module",
+    }
+)
+
+KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("sk- style API key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}")),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}")),
+    ("Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}")),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}")),
+    ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+)
+SECRET_NAME = re.compile(r"(?i)(api_?key|secret|token|passw(or)?d|credential)")
+MIN_NAMED_SECRET_LEN = 8
+TOKEN_LIKE = re.compile(r"^[A-Za-z0-9+/=_\-]{20,}$")
+HEX_LIKE = re.compile(r"^[0-9a-fA-F]{32,}$")
+TOKEN_ENTROPY_BITS = 4.0
+HEX_ENTROPY_BITS = 3.0
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One risky construct: its category, 1-based source line and a detail.
+
+    ``detail`` never contains a full secret value; secrets are redacted.
+    """
+
+    category: Category
+    line: int
+    detail: str
+
+
+@dataclass(frozen=True)
+class ScreenReport:
+    """Findings for one screened source, ordered by line then category."""
+
+    findings: tuple[Finding, ...]
+    path: Path | None = None
+
+    @property
+    def flagged(self) -> bool:
+        """True when at least one finding exists."""
+        return bool(self.findings)
+
+    @property
+    def categories(self) -> frozenset[Category]:
+        """The distinct categories present in ``findings``."""
+        return frozenset(f.category for f in self.findings)
+
+
+def screen(target: Path | str) -> ScreenReport:
+    """Statically screen Python code for risky constructs.
+
+    Args:
+        target: a ``Path`` to a ``.py`` file (read as UTF-8), or a ``str``
+            holding Python source code. A ``str`` is always treated as
+            source, never as a path.
+
+    Returns:
+        A ``ScreenReport``; clean code yields an empty ``findings`` tuple.
+
+    Raises:
+        SyntaxError: the source does not parse.
+        OSError: the file cannot be read.
+    """
+    path = target if isinstance(target, Path) else None
+    source = target.read_text(encoding="utf-8") if isinstance(target, Path) else target
+    tree = ast.parse(source, filename=str(path) if path else "<source>")
+    visitor = _Screener()
+    visitor.visit(tree)
+    findings = sorted(set(visitor.findings), key=lambda f: (f.line, f.category))
+    return ScreenReport(findings=tuple(findings), path=path)
+
+
+@dataclass
+class _Screener(ast.NodeVisitor):
+    """Collects findings; ``aliases`` maps local names to dotted origins."""
+
+    findings: list[Finding] = field(default_factory=list)
+    aliases: dict[str, str] = field(default_factory=dict)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            local = alias.asname or alias.name.split(".")[0]
+            self.aliases[local] = alias.name if alias.asname else local
+            self._check_module(alias.name, node.lineno, "import")
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
+        if node.level == 0:
+            self._check_module(module, node.lineno, "from-import")
+        for alias in node.names:
+            origin = f"{module}.{alias.name}" if module else alias.name
+            self.aliases[alias.asname or alias.name] = origin
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        name = self._qualified(node.func)
+        if name is not None:
+            self._check_call(name, node)
+        if isinstance(node.func, ast.Attribute) and node.func.attr in DELETE_METHODS:
+            if name not in DELETE_CALLS:
+                self._add("delete", node, f"call .{node.func.attr}()")
+        for keyword in node.keywords:
+            if keyword.arg is not None:
+                self._check_named_secret(keyword.arg, keyword.value)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._check_named_secret(_target_name(target), node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._check_named_secret(_target_name(node.target), node.value)
+        self.generic_visit(node)
+
+    def visit_Dict(self, node: ast.Dict) -> None:
+        for key, value in zip(node.keys, node.values, strict=True):
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                self._check_named_secret(key.value, value)
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if not isinstance(node.value, str):
+            return
+        for label, pattern in KEY_PATTERNS:
+            match = pattern.search(node.value)
+            if match:
+                self._add("secret", node, f"{label} {_redact(match.group())}")
+                return
+        if _is_high_entropy(node.value):
+            self._add("secret", node, f"high-entropy literal {_redact(node.value)}")
+
+    def _check_module(self, module: str, line: int, how: str) -> None:
+        top = module.split(".")[0]
+        if top in NETWORK_MODULES:
+            self.findings.append(Finding("network", line, f"{how} {module}"))
+        if top in SUBPROCESS_MODULES:
+            self.findings.append(Finding("subprocess", line, f"{how} {module}"))
+
+    def _check_call(self, name: str, node: ast.Call) -> None:
+        if name in SUBPROCESS_CALLS or name.startswith(SUBPROCESS_PREFIXES):
+            self._add("subprocess", node, f"call {name}()")
+        if name in DELETE_CALLS:
+            self._add("delete", node, f"call {name}()")
+        if name not in DYNAMIC_EXEC_CALLS:
+            return
+        self._add("dynamic_exec", node, f"call {name}()")
+        first = node.args[0] if node.args else None
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            self._check_module(first.value, node.lineno, f"dynamic import via {name}")
+
+    def _check_named_secret(self, name: str | None, value: ast.expr) -> None:
+        if name is None or not SECRET_NAME.search(name):
+            return
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            return
+        text = value.value
+        if len(text) < MIN_NAMED_SECRET_LEN or any(c.isspace() for c in text):
+            return
+        self._add("secret", value, f"literal assigned to {name!r} {_redact(text)}")
+
+    def _qualified(self, node: ast.expr) -> str | None:
+        """Resolve ``a.b.c`` through import aliases; None for other callees."""
+        if isinstance(node, ast.Name):
+            return self.aliases.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            base = self._qualified(node.value)
+            return f"{base}.{node.attr}" if base else None
+        return None
+
+    def _add(self, category: Category, node: ast.expr, detail: str) -> None:
+        self.findings.append(Finding(category, node.lineno, detail))
+
+
+def _target_name(target: ast.expr) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return None
+
+
+def _redact(text: str) -> str:
+    return f"'{text[:4]}...' ({len(text)} chars)"
+
+
+def _is_high_entropy(text: str) -> bool:
+    """Token-shaped literal with letters, digits and high Shannon entropy."""
+    if "://" in text:
+        return False
+    if HEX_LIKE.match(text):
+        return _entropy(text) >= HEX_ENTROPY_BITS
+    if not TOKEN_LIKE.match(text):
+        return False
+    has_letter = any(c.isalpha() for c in text)
+    has_digit = any(c.isdigit() for c in text)
+    return has_letter and has_digit and _entropy(text) >= TOKEN_ENTROPY_BITS
+
+
+def _entropy(text: str) -> float:
+    counts = Counter(text).values()
+    return -sum(n / len(text) * math.log2(n / len(text)) for n in counts)

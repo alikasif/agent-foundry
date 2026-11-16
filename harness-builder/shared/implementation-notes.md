@@ -140,3 +140,41 @@
   - lazy exports.
 - **Package `__init__` rule.** Importing a leaf runs the `__init__.py` of `executor`, `core`, `llm` and `trace`. Those four files must stay docstring-only, or use PEP 562 lazy exports. An eager re-export such as `from .docker import DockerExecutor` would make the leaves import concrete code and would create circular imports. T016's import-rule test should enforce this.
 - **For T004.** `ValidatedCall.args` is a JSON-mode dump. `invoke` must re-validate through `args_model` before calling the tool body. Otherwise `Path`, datetime and nested-model params arrive as plain JSON values.
+
+### T037
+- **API.** `screen(target: Path | str) -> ScreenReport`. A `Path` is read as UTF-8; a `str` is always source code, never a path. `ScreenReport(findings: tuple[Finding, ...], path: Path | None)` with `.flagged` and `.categories`. `Finding(category, line, detail)`; `Category = Literal["network", "subprocess", "delete", "dynamic_exec", "secret"]`. Findings are deduplicated and sorted by (line, category).
+- **Stdlib dataclasses, not pydantic.** The task requires a stdlib-only leaf, so the models are frozen dataclasses (`dataclasses.asdict` for the generation report). This differs from the T002 frozen-pydantic convention.
+- **Categories are not `core.types.ToolRisk`.** `ToolRisk` is `network|filesystem_write|code_exec|subprocess`; the screen uses the task's five categories and does not import core. Suggested mapping for T042 (injecting `ask`) if needed: network->network, subprocess->subprocess, delete->filesystem_write, dynamic_exec->code_exec, secret->none.
+- **Syntax errors raise.** `SyntaxError` propagates (stage A / FR-054 "script parses" run before the screen). Unreadable files raise `OSError`.
+- **Import vs call findings.** Network and `subprocess` modules are flagged at the import statement (one finding per import), not on every call. Function-level APIs (`os.system`, `os.popen`, `os.exec*`, `os.spawn*`, `os.posix_spawn*`, deletes, `eval`/`exec`/`__import__`/`importlib.import_module`) are flagged at the call, resolved through import aliases (`from os import system as s` -> `os.system`). A dynamic import with a literal risky module name (`__import__("socket")`) yields both `dynamic_exec` and `network`.
+- **Deletes.** Every delete is flagged; "outside the workdir" is not decidable statically. Any `.unlink()` / `.rmdir()` method call is flagged regardless of receiver (catches `pathlib.Path`, may false-positive on unrelated objects).
+- **Secrets.** Three rules: known key patterns (AWS `AKIA...`, `sk-...` incl. OpenRouter, GitHub `gh?_`, Slack `xox?-`, Google `AIza`, PEM private-key header); a string literal >= 8 chars without whitespace assigned (assign, annotated assign, keyword arg, dict key) to a name matching `api_key|secret|token|password|credential`; high-entropy literals (token charset, >= 20 chars, letters+digits, Shannon >= 4.0 bits/char; or hex >= 32 chars, >= 3.0). URLs (`://`) and whitespace-containing strings are skipped. `detail` redacts values to the first 4 chars plus length.
+- **Known limits.** No data-flow: `getattr(os, "system")`, string-built module names and `ctypes` are not caught. `compile` is not flagged (it needs `exec`/`eval` to run).
+- **Tests.** `tests/unit/test_safety_screen.py` is owned by T044, so none was added. Verified with a scratchpad script: every category detected on several fixtures (aliases, from-imports, Path.unlink, dynamic imports, each secret rule), a clean module with URL/identifier/alphabet strings yields no findings, Path input keeps `path` and lines, `SyntaxError` on bad source, and secret values never appear in `detail`.
+
+### T010
+- **Registry API.**
+  - `register_strategy(name, factory, *, replace=False)`.
+  - `get_strategy(name, options=None) -> Strategy`.
+  - `strategy_names() -> list[str]`. This was added so that T014 and the CLI can list or validate names.
+  - A factory is a callable that takes the strategy options as **keyword arguments**, or a lazy `"module:attr"` string.
+  - `codeact` is registered as `"harness_builder.strategies.codeact.strategy:CodeActStrategy"`. **For T029:** the class must have that name, and its constructor keyword arguments are the spec's `strategy.options`.
+  - Lazy refs are imported on every `get_strategy`. The result is not cached, and `sys.modules` makes repeated imports cheap.
+- **Errors.**
+  - `get_strategy` raises `ConfigError` in three cases: an unknown name (the message lists the registered names), a lazy ref that fails to import or resolve, and options that the factory signature rejects. The options check uses `inspect.signature(...).bind`, so a `TypeError` raised inside a factory is not masked.
+  - `register_strategy` raises `ValueError` for a programming error: a lazy string without `:`, or re-registering a name with a different factory when `replace` is not set. Registering the identical factory again is a no-op, which keeps test re-imports safe.
+  - Until T029 lands, `get_strategy("codeact")` raises `ConfigError` ("no attribute CodeActStrategy").
+- **ReActStrategy decisions not in designs.md 7.1.**
+  - The constructor takes no options. `name="react"` and `required_tools=frozenset()` are class attributes.
+  - `system_prompt(base, tools)` appends a short `REACT_GUIDANCE` paragraph to `base`. Tools are not listed in the prompt, because they are sent as native declarations.
+  - `build_request` moves the **leading** system-role messages, joined with a blank line, into `LLMRequest.system`. It passes the rest of the messages verbatim and leaves `purpose="step"`. **For T005/T011:** LLM clients should take the system prompt from `req.system`. A system message later in the history, such as a summary, stays in `messages`.
+  - "Malformed" (`parse_error`, type `format`) covers three cases: an empty response (blank text and no calls), a call whose name is blank, and duplicate call ids. An unknown tool name is *not* a format error; the registry reports it as `unknown_tool`. A call with an empty id gets the deterministic id `call_<index>`, which is safe for replay.
+  - When `parse_error` is set, the assistant message carries only the text and **no tool_calls**. This keeps the history valid for providers that require every tool call to have a tool response. The loop (T011) feeds the error back.
+  - Text that comes with tool calls is kept as the assistant message content. It is not treated as the final answer.
+  - `render_observations` produces one `tool` message per outcome, with `tool_call_id=call.id`. The content is chosen in this order:
+    1. an error, rendered as `{"error": {"type", "message", "hint"}}` (the hint may be null);
+    2. dict content, rendered as JSON (`sort_keys`, `ensure_ascii=False`, so the output is deterministic);
+    3. string content, as is;
+    4. `Observation.final`, when the content is empty.
+- **Tests.** No test files were added, because T018 owns the strategy tests. A scratchpad script checked parsing, rendering, the registry errors, a third strategy (`echo`) plugged in through `register_strategy`, a lazy-string registration, and that `codeact_agent` and `agents` stay out of `sys.modules`.
+- **Unrelated failures at the time of the check, left alone:** `ruff check .` failed on PEP 695 syntax in `budget/ledger.py:212` (T003, in progress), and pyrefly warned about `permissions/approvers.py:49`.
