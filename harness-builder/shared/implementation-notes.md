@@ -341,3 +341,48 @@
 - **Tests.** I added `tests/unit/test_docker_cli.py` (20 tests, about 1.5 s, Docker-free), because T031 owns `test_docker_paths.py` and `test_preflight.py`. `SubprocessDockerCli` is tested with `sys.executable` standing in as the binary: a 1 MB flood is capped and drained, stdin and exit codes are checked, and a timeout kill completes in under 5 s. A missing binary makes `preflight` fail in under 5 s. Docker was not used; Docker Desktop is stopped on this machine.
 - No dependency was missing, and none was added.
 - **Unrelated failures in the shared tree at commit time.** `uv run pyrefly check` reports 1 error, in `trace/redact.py:103` (another task). `ruff format --check` flags `llm/tokens.py` (another task). My files are clean.
+
+### T009
+- **Redaction (`trace/redact.py`).**
+  - `Redactor(secrets=None, environ=None)` takes explicit name-to-value secrets, plus every env var (default `os.environ`) whose upper-cased name contains KEY, TOKEN, SECRET or PASSWORD. This is a case-insensitive substring match, equivalent to the `*X*` globs on every OS.
+  - Markers are `[REDACTED:<NAME>]`, with env names upper-cased. Explicit secrets win when two names share a value.
+  - **Not in spec:** values shorter than `MIN_SECRET_LENGTH = 6` are not redacted, so `X_KEY=1` does not mask every `1`. Longer values are replaced first.
+  - **`Redactor.from_settings(settings, environ=None)` is required for the API key.** `Settings.from_env` never copies `.env` into `os.environ`, so a key that exists only in `.env` is invisible to the env scan. T011 should build the run redactor this way.
+  - One public entry point, `redact_model(model)`, covers events and whole traces. It dumps the model in JSON mode, redacts strings recursively (dict keys included), and re-validates. Redacting the data rather than the JSON text means secrets that contain `"` or `\` are still matched. The separate `redact_event`/`redact_trace` helpers were dropped as duplicates.
+- **Recorder (`trace/recorder.py`).**
+  - `TraceRecorder(*, run_id, harness_name, config_hash, strategy, model, task, parent_run_id=None, depth=0, spec_snapshot=None, redactor=None, trace_dir=None)` implements `TraceSink`.
+  - `trace_dir=None` writes nothing. T011 passes `Settings.trace_dir` (default `.harness/traces`, U12). After `finish`, `recorder.path` holds the written path, for use as `RunResult.trace_path`.
+  - `start_step(index)` requires strictly increasing indices and raises `ValueError` otherwise.
+  - **Decision:** a `record` before any `start_step` implicitly opens step 0.
+  - `record`, `start_step` and `finish` after `finish` raise `RuntimeError`.
+  - `finish` redacts the whole trace again, which covers header fields such as `task`, `spec_snapshot` and `env`.
+  - **`Trace.usage` is computed in `finish`**, because `finish(stop)` receives nothing else. It is the sum of this run's `LlmCallEvent`s plus every embedded child `Trace.usage`, so the parent total includes sub-agents, matching budget propagation.
+  - `cost_usd` is None if any contributing call has an unknown cost (`event.cost_usd`, falling back to `event.usage.cost_usd`), or if there were no calls at all. `llm_calls` counts events; the per-event `usage.llm_calls` is ignored.
+  - `env` holds python, os, and the harness-builder, google-adk and litellm versions, read with `importlib.metadata` and never imported (the cold import cost is avoided). Missing distributions are left out.
+  - `child(*, run_id, task, ...)` returns a recorder with `parent_run_id=self.run_id`, `depth+1`, the same redactor and no trace dir. The caller (T012) records `SubagentEvent(call_id, child=child_recorder.finish(stop))` on the parent.
+  - **Public helpers for other tasks:**
+    - `canonical_json(value)`: `stable_dump`, then `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+    - `config_hash(config: BaseModel | Mapping)`: sha256 of that canonical JSON. T011 and T014 must both use it on the same resolved config for FR-016.
+    - `request_fingerprint(LLMRequest)`: for T011 when it records `LlmCallEvent`, and for T013 replay.
+    - `trace_path(dir, run_id)`, `write_trace(trace, path)` (UTF-8, creates parent directories) and `load_trace(path)` (for T013 and T015).
+- **Diff (`trace/diff.py`).**
+  - `diff_traces(a, b) -> TraceDiff`. `TraceDiff` is a frozen model with:
+    - `first_divergence: Divergence(step_index, field, a, b) | None`, where `field` is one of `missing_step`, `tool_names`, `tool_args`, `final` or `response`, checked in that order;
+    - a `Delta(a, b, delta)` each for steps, input tokens, output tokens and cost (`delta` is None when either side is None);
+    - `tool_usage: dict[name, Delta]`;
+    - `stop_reason: (a, b)`;
+    - an `identical` property.
+  - Steps are aligned by `TraceStep.index`. A step's key has four parts:
+    - the tool names from its `DecisionEvent`s;
+    - their args as canonical JSON strings, so `true` and `1` differ;
+    - the decision `final`s;
+    - the sha256 of each `purpose == "step"` LLM response text.
+  - **`ToolCall.id` is excluded.** It is not marked volatile but differs between runs.
+  - Tool usage counts this run's `ToolCallEvent`s only; child traces are not descended into.
+  - Renderers are `render_json(diff)`, which is `model_dump_json(indent=2)`, and `render_rich(diff) -> Group`. All rich cells are `Text`, so `[REDACTED:...]` is not parsed as markup.
+- **Not touched:** no frozen leaf was edited and no dependency was added. There are no test files, because T018 owns `test_trace_recorder.py`, `test_redact.py` and `test_trace_diff.py`. A scratchpad script checked:
+  - a JSON round-trip through `load_trace`;
+  - that the key, containing `"` and `\` and supplied only through `Settings`, is absent from the written file. The key appeared in the task, an observation dict key, args, the system prompt and a nested child trace;
+  - that traces differing only in run_id, call ids and latency give no divergence;
+  - that a changed final gives a divergence at step 1, `final`;
+  - usage totals including the child, and the guard after `finish`.
