@@ -100,3 +100,41 @@
 - Wheel packaging: hatch already includes `executor/image/Dockerfile` (checked with `uv build --wheel`), so no hatch config change was needed.
 - Tests are in `tests/unit/test_sandbox_image.py`, because T031 owns `test_hb_entry.py`. There are 13 tests, including the standalone-script exit codes run through a subprocess. Bash mode is not unit-tested on the host (Windows).
 - Unrelated: `uv run ruff check .` reports N818 on `ReplayDivergence` in `src/harness_builder/errors.py` (T002, in progress). It was left alone.
+
+### T002
+- **Leaf imports.** "Leaf modules import only stdlib/pydantic" cannot hold literally (`Observation.exec` needs `ExecResult`, `LLMResponse.tool_calls` needs `ToolCall`). Leaves may import other leaves, acyclic in this order: `executor/models.py` -> `core/types.py` -> `llm/types.py` -> `trace/models.py` -> `core/protocols.py`. `errors.py` is stdlib-only. The T016 AST rule should whitelist `harness_builder.{executor.models,core.types,llm.types,trace.models}` for leaf modules.
+- **Types the protocols need that no task owned.** These were added to `core/types.py` so parallel layer tasks share one definition: `ValidatedCall(call, args)` (args = validated `model_dump(mode="json")`), `ApprovalRequest(call, rule_id, reason)`, `BudgetLimits(max_steps=10, max_input_tokens, max_output_tokens, max_cost_usd)`, `BudgetSnapshot(steps, usage, limits)`, `SkillEntry(name, description, triggers, path)`, `ScoredSkill(entry, score)`, `RunResult(answer, stop, usage, trace_path)`. Also the literal aliases `Role`, `StopReason`, `ErrorType`, `ToolRisk`, `PermissionValue`, `HookEvent`, `HookAction`.
+- **RunResult lives in core/types.py**, not core/run_context.py. T011 should re-export it from run_context instead of redefining it. It has to be a leaf type because `HookManager.on_stop(result, ctx)` in protocols.py takes it.
+- **Structural protocols instead of concrete imports.** `RunContextView` (read-only properties `run_id`, `depth`, `workdir`, `messages`, `ledger: Budget`, `recorder: TraceSink`) stands in for T011's concrete `RunContext`. `ToolDefinition` (`name`, `description`, `args_model`, `timeout_s`, `nondeterministic`, `risk: frozenset[ToolRisk]`) stands in for T004's `Tool`. Every protocol takes `ctx: RunContextView`. Concrete classes must expose these attributes; plain attributes or pydantic fields satisfy read-only properties.
+- **Additions to protocols beyond designs.md section 3:**
+  - `ToolRegistry.get(name)`;
+  - `HookManager.register(event, hook, priority=0, name=None)`;
+  - `TraceSink.start_step(index)`, so that the recorder can group events into `TraceStep`s.
+- **Async.** All HookManager methods are async. `PromotionHook.on_stop` calls an LLM, and `ContextPolicy.apply` already set the precedent. Hook callables may be sync or async. `Budget.check_before_step()` counts the step (documented on the protocol).
+- **Strategy** matches designs.md 3.1 exactly: `name`, `required_tools`, `system_prompt`, `build_request`, `parse`, `render_observations`.
+- **Models.**
+  - All models are frozen with `extra="forbid"`. Use `model_copy(update=...)` to change a value; list fields can still be appended to in place.
+  - `HookOutcome(action="allow", args, reason)`. `args` is the replacement args for `modify`.
+  - `PermissionDecision(decision, rule_id, reason)`.
+  - `ToolOutcome(call, observation)`.
+  - `LLMRequest(model, system, messages, tools, purpose)`. `purpose` (step|summarize|promotion) is on the request so that the fingerprint and trace carry it.
+  - `LLMResponse(text, tool_calls, usage, finish_reason, model)`.
+- **ExecRequest.run_id (deviation).** Added `run_id: str | None`, which designs.md 4.2 does not have. T027 needs it for the `hb-<run>-<n>` container name and the `hb.run` label.
+- **SandboxConfig.image** defaults to `None`, meaning `HARNESS_DOCKER_IMAGE` or the content-hash tag from `executor/image_build.py`.
+- **Volatile fields.**
+  - Fields are marked with `Field(json_schema_extra={"volatile": True})` (`trace.models.VOLATILE`).
+  - `trace.models.stable_dump(model)` drops volatile fields recursively, including in nested models. `is_volatile(field_info)` is exposed for T009 and T013. This is a per-model marker rather than a flat name set, so a name like `env` can be volatile in `Trace` without being volatile elsewhere.
+  - **Volatile beyond designs.md 4.3:** `Trace.run_id`, `Trace.parent_run_id`, `ExecResult.duration_s` and `ExecResult.container_name`. Without these, the T014 criterion "code-built and spec-built traces are equal excluding volatile fields" can never hold, because run ids are random.
+- **Trace.** `spec_snapshot` is `dict[str, Any] | None`, so trace/models.py does not import spec/models.py (owned by T014). `SubagentEvent.child: Trace` is recursive and resolved with `model_rebuild()`. The hook event class is named `HookTraceEvent`, so it does not clash with the `HookEvent` literal.
+- **Settings.**
+  - `pydantic-settings` is not a dependency, so `Settings` is a plain frozen `BaseModel` with `Settings.from_env(environ=None, dotenv_path=None)`.
+  - It reads `./.env` with `dotenv_values` and never calls `load_dotenv`. That keeps `os.environ` unmutated and the sandbox env allowlist meaningful. Process env wins over `.env`, and empty values count as unset.
+  - Field names are short (`openrouter_api_key`, `model`, `trace_dir`, `skills_root`, `docker_image`). `config.ENV_VARS` maps them to the env var names.
+- **errors.py.** `ReplayDivergence` keeps the design's name and carries `# noqa: N818`. `SpecError` is a plain message exception; T014 formats located paths into the message.
+- **Lazy `__init__`.** Lazy loading uses PEP 562 `__getattr__` over a literal `__all__`, plus `TYPE_CHECKING` imports for static typing. Only names that exist after T002 are exported, so T011 adds `Harness` and `HarnessBuilder`.
+- **Tests.** No test files were added, because T016 owns `test_models_roundtrip.py` and `test_import_rules.py`. Verification was a scratchpad script covering:
+  - dict and JSON round-trip of every model, including a nested subagent trace and `ExecRequest.ro_mounts: dict[Path, str]`;
+  - `stable_dump` equality across different run ids;
+  - the leaf-import AST check;
+  - `Settings.from_env`;
+  - lazy exports.
