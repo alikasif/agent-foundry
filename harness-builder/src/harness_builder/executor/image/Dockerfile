@@ -1,1 +1,25 @@
-# Dockerfile placeholder; the real sandbox image is defined in T026.
+# harness-builder sandbox image. Build with the command from
+# harness_builder.executor.image_build.build_command() (context = this directory).
+# python:3.11-slim multi-arch index digest, resolved 2026-11-16.
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Curated package set (OQ-6 ASSUMED); versions match the host uv.lock.
+RUN pip install --no-cache-dir "pydantic==2.14.3" "pyyaml==6.0.3"
+
+# Non-root user. POSIX hosts override it with --user $(id -u):$(id -g).
+RUN useradd --uid 10001 --user-group --no-create-home --home-dir /tmp \
+        --shell /usr/sbin/nologin hb
+
+COPY --chmod=0644 hb_entry.py /opt/hb/hb_entry.py
+
+# hb-final is generated here (not copied) so a CRLF checkout cannot break it.
+RUN printf '#!/bin/sh\nexec python /opt/hb/hb_entry.py final "$@"\n' \
+        > /usr/local/bin/hb-final \
+    && chmod 0755 /usr/local/bin/hb-final
+
+USER 10001
+WORKDIR /work
