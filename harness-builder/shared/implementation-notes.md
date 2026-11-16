@@ -138,3 +138,5 @@
   - the leaf-import AST check;
   - `Settings.from_env`;
   - lazy exports.
+- **Package `__init__` rule.** Importing a leaf runs the `__init__.py` of `executor`, `core`, `llm` and `trace`. Those four files must stay docstring-only, or use PEP 562 lazy exports. An eager re-export such as `from .docker import DockerExecutor` would make the leaves import concrete code and would create circular imports. T016's import-rule test should enforce this.
+- **For T004.** `ValidatedCall.args` is a JSON-mode dump. `invoke` must re-validate through `args_model` before calling the tool body. Otherwise `Path`, datetime and nested-model params arrive as plain JSON values.
