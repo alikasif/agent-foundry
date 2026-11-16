@@ -241,3 +241,42 @@
   - post_tool/on_stop errors ignored;
   - trace event outcomes;
   - protocol conformance (`m: protocols.HookManager = HookManager()` passes pyrefly).
+
+### T004
+- **Contract: how the body is called.** `invoke` re-validates `ValidatedCall.args` (JSON mode) through `args_model`. It then calls `fn(**{field: getattr(model, field)})`, so `Path`, datetime and nested-model params keep their types. This also applies to an explicit `args_model`: the function takes one keyword per model field, not the model instance. If re-validation fails in `invoke` (replayed or hook-modified args), it returns a `validation` observation.
+- **Contract: ctx injection.** A parameter named `ctx` is left out of the derived args model. When the tool's `fn` has a `ctx` parameter, `invoke` passes the `RunContextView` as `ctx=`. Run_code (T028), spawn_agent (T012) and deref (T008) should use this. The name `ctx` is reserved and cannot be a model-visible arg.
+- **Contract: return value mapping** (`_to_observation`):
+  - `Observation` passes through with `call_id` replaced (T028 run_code returns one with `exec`).
+  - `ToolResult` maps `content` and `final`; `final` ends up in `Observation.final`.
+  - `str` and `dict` become `content`. A dict goes through `to_jsonable_python`.
+  - Another pydantic model becomes `model_dump(mode="json")`.
+  - `None` becomes empty content.
+  - Anything else (int, list, ...) becomes `json.dumps(to_jsonable_python(x))`.
+  - A conversion failure is reported as `tool_exception`.
+- **Registry accepts `ToolDefinition` plus a callable `fn` attribute.** The protocol's `register(tool: ToolDefinition)` has no `fn`, so the concrete signature stays `ToolDefinition` to remain protocol-compatible. Registration raises `ConfigError` when `fn` is missing, and on duplicate names. ContainerTool (T039) can be a `Tool` with an async closure as `fn`, or any object exposing the `ToolDefinition` attributes plus `fn`. Sync versus async is decided by `inspect.iscoroutinefunction(fn)`. A callable instance with an async `__call__` is not detected and would run in a thread, so use an `async def` function or bound method.
+- **`Tool` model.** Frozen with `extra="forbid"`. `risk: frozenset[ToolRisk]`, not `set` as in designs.md 3.2, matching the T002 protocol. The `@tool` decorator also accepts any iterable for `risk`. pydantic accepted `fn: Callable` and `args_model: type[BaseModel]` without `arbitrary_types_allowed`. Pyrefly confirms the structural conformance of `ToolRegistry` with `protocols.ToolRegistry` and of `Tool` with `ToolDefinition` (checked in a scratch script).
+- **`@tool` decorator.** Works bare (`@tool`) or with options (`name`, `description`, `args_model`, `timeout_s`, `nondeterministic`, `risk`). It returns a `Tool`, not the function. The description defaults to `inspect.getdoc`. Each of these raises `ConfigError`:
+  - no description and no docstring;
+  - an untyped parameter;
+  - a `*args`, `**kwargs` or positional-only parameter;
+  - an unresolvable string annotation.
+
+  Hints come from `inspect.get_annotations(eval_str=True)`, so `Annotated[..., Field(description=...)]` ends up in the schema. The derived model is named `<PascalName>Args` and uses `extra="forbid"`, so unknown args are a validation error and never reach the body. The decorator ignores the function's return annotation.
+- **Timeouts.** `anyio.move_on_after(timeout_s)` is used instead of `fail_after` plus `except TimeoutError`, so that a tool raising its own `TimeoutError` is reported as `tool_exception`, not `timeout`. `None` means no timeout. Sync bodies run with `to_thread.run_sync(..., abandon_on_cancel=True)`. Without it the timeout cannot interrupt the wait. Tradeoff: an abandoned thread keeps running in the background until it returns, because Python cannot kill threads. Only `Exception` is caught, so outer cancellation still propagates.
+- **Error observations.**
+  - Failed observations have `ok=False`, `content=error.message` and `error` set.
+  - `unknown_tool` hint: the list of all registered tool names. The registry does not know per-call visibility.
+  - `validation` message: `"<dotted loc>: <msg>"` joined with `; `; the hint lists the fields and required fields.
+  - `tool_exception` message: `"<ExcType>: <msg>"`.
+- **Schemas.** `schemas(visible)` keeps registration order and silently skips `visible` names that are not registered. The builder should reject unknown names itself. `parameters` is the raw `model_json_schema()`, including pydantic `title` keys, `$defs` for nested models and `additionalProperties: false`. It is not post-processed, so the LLM adapter (T005) must handle `$defs`/`$ref` if a provider needs inlined schemas.
+- **Extras beyond the protocol:** `ToolRegistry(tools=...)` constructor, `ToolRegistry.names()`, module-level `derive_args_model(fn, name)` (reusable by T039 for host-trusted fixtures), `CTX_PARAM = "ctx"`.
+- `tools/__init__.py` re-exports `Tool`, `ToolRegistry`, `derive_args_model` and `tool` eagerly. This is safe because registry.py imports only leaf modules and `errors`.
+- No tests were added, because T016 owns `tests/unit/test_tool_registry.py`. A scratch script verified the following:
+  - unknown, invalid and extra args never call the body;
+  - a sync `time.sleep` tool and an async tool both time out at 0.2s;
+  - a raising tool and a tool raising its own `TimeoutError` return `tool_exception`;
+  - `ToolResult.final` propagates;
+  - an `Observation` passes through and ctx is injected;
+  - a `Path` param and a nested-model param keep their types;
+  - a list return is JSON-encoded;
+  - duplicate and untyped tools raise `ConfigError`.
