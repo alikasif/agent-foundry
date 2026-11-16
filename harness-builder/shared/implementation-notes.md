@@ -364,6 +364,7 @@
     - `canonical_json(value)`: `stable_dump`, then `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
     - `config_hash(config: BaseModel | Mapping)`: sha256 of that canonical JSON. T011 and T014 must both use it on the same resolved config for FR-016.
     - `request_fingerprint(LLMRequest)`: for T011 when it records `LlmCallEvent`, and for T013 replay.
+    - **Fingerprint rule for T011 and T013:** compute `request_fingerprint(redactor.redact_model(request))` on both sides. The recorder stores the request redacted, and replay rebuilds the history from redacted observations, so a fingerprint of the raw request would falsely diverge. Designs.md 4.3 asks for redacted forms on both sides.
     - `trace_path(dir, run_id)`, `write_trace(trace, path)` (UTF-8, creates parent directories) and `load_trace(path)` (for T013 and T015).
 - **Diff (`trace/diff.py`).**
   - `diff_traces(a, b) -> TraceDiff`. `TraceDiff` is a frozen model with:
