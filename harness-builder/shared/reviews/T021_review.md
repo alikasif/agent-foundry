@@ -212,3 +212,75 @@ the design is violated:
 - `PriceTable` avoids the network import of litellm, which makes U10
   deterministic offline. This was good investigative work.
 - The implementation notes are thorough, and every deviation is justified.
+
+---
+
+## Round 2 (2026-11-17): verification of fix commit 9fd67cf
+
+### Final verdict: CHANGES_REQUESTED
+
+Seven of the eight items are fixed and verified. The M2 fix is incomplete: it
+protects field **values** but not field **names** (finding R2-M1 below). That one
+small change is still needed before T011/T013 rely on `record()` never raising.
+
+Checks run on the full tree at 9fd67cf:
+- `ruff check src` passes and `ruff format --check src` passes (83 files).
+- `pyrefly check --min-severity=warn` reports 0 diagnostics.
+- `pytest -q` gives 817 passed and 2 skipped.
+- I ran a scratchpad script against the real modules for each item below. Its output is quoted.
+
+| Item | Status | Evidence |
+|---|---|---|
+| M1 single fingerprint | **Fixed** | `summarize.request_fingerprint is trace.models.request_fingerprint` (True). The recorder overwrote a bogus `"bogus"` fingerprint with `request_fingerprint(redacted.request)` for a non-ASCII request that contained the secret (`fp recomputed: True`). The secret is absent from the finished trace. `trace/models.py` adds only stdlib `hashlib`/`json`, so the leaf rule holds. |
+| M2 Literal redaction crash | **Partially fixed** | Literal **values** are kept (`kind="decision"` survives `MY_TOKEN_KIND=decision`). Free-text fields are still redacted, and the args dict is still redacted by value, which is better than my suggested skip list. **Dict keys that are model field names are still rewritten**; see R2-M1. |
+| M3 insecure default redactor | **Fixed** | `TraceRecorder(redactor=None)` now uses `Redactor.from_settings(Settings.from_env())`. `from_settings` registers every secret-named key from `.env` (`dotenv redacted: [REDACTED:OPENROUTER_API_KEY] [REDACTED:GITHUB_TOKEN]`). |
+| m1 SecretStr | **Fixed** | `repr(Settings)` and `model_dump_json()` no longer contain the key. `adk_litellm.py` reads it with `get_secret_value()` and still raises `MISSING_KEY` for an empty value. |
+| m3 refs unredacted on disk | **Fixed** | The disk copy holds `data [REDACTED:GITHUB_TOKEN] more` and the in-memory copy is raw. `core/builder.py:454-457` passes `redact=redactor.redact_text`. |
+| m4 run_id path traversal | **Fixed** | `../x`, `a/b`, `""` and `a b` are all rejected with `ValueError`, both by `trace_path` and by `TraceRecorder.__init__`. |
+| m7 unbounded summaries | **Fixed** | LRU `OrderedDict` capped at `MAX_TRACKED_RUNS = 64`, with `move_to_end` on use. |
+| m10 pyrefly warnings | **Fixed** | `int()` removed; the yaml import carries a targeted ignore. Adding `types-PyYAML` is left to a planning task, which is acceptable. |
+
+Accepted as recorded: m2 (documented), m5 (`by_alias=True`), m8 (caveat
+comment), m6 (skipped), m9 (deferred to the loop with a clear contract) and
+M4/M5 (owned by T011/T012).
+
+### R2-M1 [major] Redacting dict keys still crashes on model field names
+
+**Location:** `trace/redact.py`, in `Redactor.redact` (the dict branch,
+`self.redact_text(str(key))`) and `redact_model`.
+
+`redact()` rewrites every dict **key**, including the keys of the model dump
+itself, and those keys are field names. If an env var with a secret-like name has a value equal to a
+field name of six or more characters, the field is renamed to `[REDACTED:...]`.
+That name is unknown, so validation fails with `extra_forbidden` (and the field is
+reported missing). `_get_at` finds no original scalar to restore, so the fallback
+raises `RedactionError` from `record()` and the run aborts. This is the same failure class as
+M2. Field names at risk include `validation`, `decision`, `outcome`, `purpose`,
+`content`, `message`, `events`, `request`, `response`, `observation`,
+`tool_calls` and `parse_error`.
+
+Probe output:
+- `Redactor(environ={"MY_KEY": "parse_error"}).redact_model(DecisionEvent(final="x"))`
+  raises `RedactionError: cannot redact DecisionEvent at ('[REDACTED:MY_KEY]',)`.
+- `Redactor(environ={"X_TOKEN": "validation"}).redact_model(ToolCallEvent(...))`
+  raises `RedactionError` even with harmless args, because every
+  `ToolCallEvent` dump contains the key `validation`.
+
+**Fix (small):**
+1. While walking the schema in `literal_fields`, also collect the property names
+   of the model and its nested models. Return them as a second cached set, for
+   example `field_names(model_type)`.
+2. In `redact()`, leave a key unchanged when it is in that set. Keys inside
+   free-form dicts (`args`, `content`, `spec_snapshot`) that are **not** schema
+   field names are still redacted.
+3. A key equal to a public field name is not a secret, so this is safe.
+4. Add regression tests to `test_review_t021_fixes.py` for `DecisionEvent` and
+   `ToolCallEvent`, using an env value equal to a field name.
+
+### Note (no action needed)
+
+The scalar fallback in `redact_model` restores the original value of a typed field
+that fails validation, for example `created_at`. That value, by definition, contains
+the matched "secret" text. This is acceptable: such fields cannot hold free text, so
+the match is a coincidence, as it is for the kept Literal constants. The behaviour
+is documented in the docstring and in the implementation notes.
