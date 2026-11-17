@@ -284,3 +284,35 @@ that fails validation, for example `created_at`. That value, by definition, cont
 the matched "secret" text. This is acceptable: such fields cannot hold free text, so
 the match is a coincidence, as it is for the kept Literal constants. The behaviour
 is documented in the docstring and in the implementation notes.
+
+---
+
+## Round 3 (2026-11-17): verification of 7a917ec
+
+### Final verdict: APPROVED
+
+R2-M1 is fixed. `_schema_info` walks the schema once (cached) and collects both the
+Literal `(field, constant)` pairs and every schema property name, including those
+of nested models and `$defs`. `redact()` leaves a dict key unchanged when the key
+is a schema field name. Free-form keys are still redacted.
+
+Probe output against the real modules:
+- `MY_KEY=parse_error` on `DecisionEvent`: validation succeeds, and the free text
+  in `final` is still redacted (`final='x [REDACTED:MY_KEY]'`).
+- `X_TOKEN=validation` on `ToolCallEvent`: validation succeeds. The structural
+  key `validation='ok'` is kept, and `args` is still redacted, including its
+  values and free-form keys (`'k_[REDACTED:X_TOKEN]_x'`).
+- `A_SECRET=supersecret1` used as an `args` key and value: both are redacted.
+- A nested child trace inside a `SubagentEvent` still validates after redaction.
+- Rerunning the round-2 probes (M1, M3, m1, m3, m4) gives unchanged, passing results.
+
+The only text kept unredacted under this fix is a value equal to a public field name
+(as a structural key) or a schema Literal constant. Neither can be a real secret.
+
+Checks:
+- `ruff check src tests` passes and `ruff format --check` passes (110 files).
+- `pyrefly check --min-severity=warn` reports 0 diagnostics.
+- `pytest -q` gives 821 passed and 2 skipped, including the new R2-M1 regression tests.
+
+The open handoffs are unchanged and are tracked in the owning tasks, not here:
+M4/M5 and m9 belong to T011/T012, and m6 is optional.
