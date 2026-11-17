@@ -9,7 +9,7 @@ about 12 s cold, global monkey-patch) is never imported by ReAct-only runs.
 import importlib
 import inspect
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from harness_builder.core.protocols import Strategy
 from harness_builder.errors import ConfigError
@@ -78,4 +78,5 @@ def _resolve(name: str, ref: str) -> StrategyFactory:
         ) from exc
     if not callable(factory):
         raise ConfigError(f"strategy {name!r} factory {ref!r} is not callable")
-    return factory
+    # callable() narrows to "(...) -> object"; the return type is the contract.
+    return cast(StrategyFactory, factory)
