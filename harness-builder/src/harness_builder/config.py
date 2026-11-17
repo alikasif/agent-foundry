@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SecretStr
 
 ENV_VARS: dict[str, str] = {
     "openrouter_api_key": "OPENROUTER_API_KEY",
@@ -25,12 +25,21 @@ ENV_VARS: dict[str, str] = {
 DEFAULT_TRACE_DIR = Path(".harness") / "traces"
 
 
+def default_dotenv_path() -> Path:
+    """The ``.env`` file read when no path is given: ``./.env``."""
+    return Path.cwd() / ".env"
+
+
 class Settings(BaseModel):
-    """Runtime settings; every field is optional except the trace dir default."""
+    """Runtime settings; every field is optional except the trace dir default.
+
+    The API key is a ``SecretStr``: it shows as ``**********`` in ``repr``,
+    errors and JSON dumps; read it with ``get_secret_value()``.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    openrouter_api_key: str | None = None
+    openrouter_api_key: SecretStr | None = None
     model: str | None = None
     trace_dir: Path = DEFAULT_TRACE_DIR
     skills_root: Path | None = None
@@ -47,7 +56,7 @@ class Settings(BaseModel):
         ``dotenv_path`` defaults to ``./.env``; a missing file is ignored.
         Empty values count as unset.
         """
-        path = dotenv_path if dotenv_path is not None else Path.cwd() / ".env"
+        path = dotenv_path if dotenv_path is not None else default_dotenv_path()
         file_values = dotenv_values(path) if path.is_file() else {}
         env = os.environ if environ is None else environ
         values: dict[str, str] = {}

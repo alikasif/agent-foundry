@@ -201,7 +201,10 @@ class ToolRegistry:
             model = found.args_model.model_validate(call.args)
         except ValidationError as exc:
             return _validation_error(found, exc)
-        return ValidatedCall(call=call, args=model.model_dump(mode="json"))
+        # by_alias: ``invoke`` re-validates this dump, which must accept aliases.
+        return ValidatedCall(
+            call=call, args=model.model_dump(mode="json", by_alias=True)
+        )
 
     async def invoke(
         self, vcall: ValidatedCall, ctx: protocols.RunContextView

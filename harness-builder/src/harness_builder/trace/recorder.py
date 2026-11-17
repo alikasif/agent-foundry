@@ -8,8 +8,8 @@ when a trace dir is set (U12: ``HARNESS_TRACE_DIR``, default
 """
 
 import hashlib
-import json
 import platform
+import re
 from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -17,17 +17,31 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from harness_builder.config import Settings
 from harness_builder.core.types import StopInfo, Usage
-from harness_builder.llm.types import LLMRequest
 from harness_builder.trace.models import (
     LlmCallEvent,
     SubagentEvent,
     Trace,
     TraceEvent,
     TraceStep,
-    stable_dump,
+    canonical_json,
+    request_fingerprint,
 )
 from harness_builder.trace.redact import Redactor
+
+__all__ = [
+    "ENV_PACKAGES",
+    "TraceRecorder",
+    "canonical_json",
+    "config_hash",
+    "load_trace",
+    "request_fingerprint",
+    "runtime_env",
+    "trace_path",
+    "validate_run_id",
+    "write_trace",
+]
 
 ENV_PACKAGES: dict[str, str] = {
     "harness_builder": "harness-builder",
@@ -36,12 +50,8 @@ ENV_PACKAGES: dict[str, str] = {
 }
 """Trace ``env`` key -> distribution name (read from metadata, not imported)."""
 
-
-def canonical_json(value: Any) -> str:
-    """Canonical JSON of ``value``: volatile fields dropped, keys sorted."""
-    return json.dumps(
-        stable_dump(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+"""Run ids become file names, so only these characters are allowed."""
 
 
 def config_hash(config: BaseModel | Mapping[str, Any]) -> str:
@@ -53,9 +63,11 @@ def config_hash(config: BaseModel | Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(config).encode("utf-8")).hexdigest()
 
 
-def request_fingerprint(request: LLMRequest) -> str:
-    """sha256 hex of the canonical, volatile-free JSON of an LLM request."""
-    return hashlib.sha256(canonical_json(request).encode("utf-8")).hexdigest()
+def validate_run_id(run_id: str) -> str:
+    """Return ``run_id``; raise ``ValueError`` unless it matches ``[A-Za-z0-9_-]+``."""
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise ValueError(f"invalid run id {run_id!r}; expected [A-Za-z0-9_-]+")
+    return run_id
 
 
 def runtime_env() -> dict[str, str]:
@@ -70,8 +82,11 @@ def runtime_env() -> dict[str, str]:
 
 
 def trace_path(trace_dir: Path, run_id: str) -> Path:
-    """Path of the trace file for ``run_id`` inside ``trace_dir``."""
-    return trace_dir / f"{run_id}.json"
+    """Path of the trace file for ``run_id`` inside ``trace_dir``.
+
+    ``run_id`` is validated first, so it can never name a path outside the dir.
+    """
+    return trace_dir / f"{validate_run_id(run_id)}.json"
 
 
 def write_trace(trace: Trace, path: Path) -> Path:
@@ -135,10 +150,11 @@ class TraceRecorder:
     ) -> None:
         """Create a recorder; ``trace_dir`` None means ``finish`` writes nothing.
 
-        ``redactor`` defaults to ``Redactor()`` (secret-named env vars of
-        ``os.environ``); pass ``Redactor.from_settings`` to cover ``.env``.
+        ``redactor`` defaults to ``Redactor.from_settings(Settings.from_env())``
+        (secret-named vars of ``os.environ`` and ``./.env`` plus the API key).
+        ``run_id`` must match ``[A-Za-z0-9_-]+`` (``ValueError`` otherwise).
         """
-        self.run_id = run_id
+        self.run_id = validate_run_id(run_id)
         self.harness_name = harness_name
         self.config_hash = config_hash
         self.strategy = strategy
@@ -147,7 +163,11 @@ class TraceRecorder:
         self.parent_run_id = parent_run_id
         self.depth = depth
         self.spec_snapshot = spec_snapshot
-        self.redactor = redactor if redactor is not None else Redactor()
+        self.redactor = (
+            redactor
+            if redactor is not None
+            else Redactor.from_settings(Settings.from_env())
+        )
         self.trace_dir = trace_dir
         self.path: Path | None = None
         self._steps: list[tuple[int, list[TraceEvent]]] = []
@@ -165,12 +185,19 @@ class TraceRecorder:
     def record(self, event: TraceEvent) -> None:
         """Redact ``event`` and append it to the current step.
 
-        Events recorded before any ``start_step`` open step 0 implicitly.
+        Events recorded before any ``start_step`` open step 0 implicitly. The
+        ``request_fingerprint`` of an ``LlmCallEvent`` is recomputed from the
+        redacted request, whatever the caller passed (T009 rule).
         """
         self._ensure_open()
         if not self._steps:
             self._steps.append((0, []))
-        self._steps[-1][1].append(self.redactor.redact_model(event))
+        redacted = self.redactor.redact_model(event)
+        if isinstance(redacted, LlmCallEvent):
+            redacted = redacted.model_copy(
+                update={"request_fingerprint": request_fingerprint(redacted.request)}
+            )
+        self._steps[-1][1].append(redacted)
 
     def child(
         self,

@@ -5,9 +5,9 @@ policy charges the call to ``ctx.ledger`` and records it as an ``llm_call``
 trace event, so summarization is budgeted and traced like a step call.
 """
 
-import hashlib
 import json
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from harness_builder.context.truncate import (
@@ -20,7 +20,19 @@ from harness_builder.context.truncate import (
 from harness_builder.core.protocols import LLMClient, RunContextView, TokenCounter
 from harness_builder.core.types import Message, ModelConfig
 from harness_builder.llm.types import LLMRequest
-from harness_builder.trace.models import LlmCallEvent, stable_dump
+from harness_builder.trace.models import LlmCallEvent, request_fingerprint
+
+__all__ = [
+    "MAX_TRACKED_RUNS",
+    "SUMMARY_HEADER",
+    "SUMMARY_SYSTEM",
+    "SummarizePolicy",
+    "render_transcript",
+    "request_fingerprint",
+]
+
+MAX_TRACKED_RUNS = 64
+"""Running summaries kept (least recently used evicted) in a long-lived harness."""
 
 SUMMARY_SYSTEM = (
     "You maintain a running summary of an agent's work on a task. Merge the "
@@ -35,12 +47,6 @@ SUMMARY_HEADER = "[Summary of earlier conversation]"
 class _Running:
     summary: str
     folded: int  # number of non-pinned canonical messages already folded
-
-
-def request_fingerprint(req: LLMRequest) -> str:
-    """sha256 of the canonical JSON of ``req`` without volatile fields."""
-    canonical = json.dumps(stable_dump(req), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def render_transcript(messages: list[Message]) -> str:
@@ -61,9 +67,10 @@ class SummarizePolicy:
     Nothing changes while the history fits ``max_tokens``. Above it, messages
     older than the kept tail are folded into the summary with one LLM call per
     application (only messages not folded before are sent). The summary is
-    held per ``ctx.run_id``. If the result still exceeds ``max_tokens``, the
-    oldest tail messages are dropped as in ``TruncatePolicy``; bound the
-    summary with ``model.max_output_tokens``.
+    held per ``ctx.run_id`` (the ``MAX_TRACKED_RUNS`` most recent runs). While
+    nothing has been folded no summary message is added. If the result still
+    exceeds ``max_tokens``, the oldest tail messages are dropped as in
+    ``TruncatePolicy``; bound the summary with ``model.max_output_tokens``.
     """
 
     name = "summarize"
@@ -84,7 +91,7 @@ class SummarizePolicy:
         self.max_tokens = max_tokens
         self.keep_last = keep_last
         self.counter = counter
-        self._runs: dict[str, _Running] = {}
+        self._runs: OrderedDict[str, _Running] = OrderedDict()
 
     async def apply(
         self, messages: list[Message], ctx: RunContextView
@@ -104,13 +111,17 @@ class SummarizePolicy:
             )
             running = _Running(summary, start)
             self._runs[ctx.run_id] = running
+        if ctx.run_id in self._runs:
+            self._runs.move_to_end(ctx.run_id)
+            while len(self._runs) > MAX_TRACKED_RUNS:
+                self._runs.popitem(last=False)
         recent = tail[running.folded :]
-        summary_msg = Message(
-            role="user", content=f"{SUMMARY_HEADER}\n{running.summary}"
-        )
-        kept = fit_tail(
-            [*head, summary_msg], recent, self.max_tokens, len(recent), self.counter
-        )
+        base = list(head)
+        if running.summary:
+            base.append(
+                Message(role="user", content=f"{SUMMARY_HEADER}\n{running.summary}")
+            )
+        kept = fit_tail(base, recent, self.max_tokens, len(recent), self.counter)
         record_context(ctx, self.name, messages, kept, self.counter)
         return kept
 

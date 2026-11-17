@@ -82,8 +82,11 @@ def settings_redactor(tmp_path: Path) -> Redactor:
     dotenv = tmp_path / ".env"
     dotenv.write_text(f"OPENROUTER_API_KEY={PLAIN_KEY}\n", encoding="utf-8")
     settings = Settings.from_env(environ={}, dotenv_path=dotenv)
-    assert settings.openrouter_api_key == PLAIN_KEY
-    return Redactor.from_settings(settings, environ=NO_SECRET_ENV)
+    assert settings.openrouter_api_key is not None
+    assert settings.openrouter_api_key.get_secret_value() == PLAIN_KEY
+    return Redactor.from_settings(
+        settings, environ=NO_SECRET_ENV, dotenv_path=tmp_path / "missing.env"
+    )
 
 
 def test_plain_key_never_appears_in_written_json(
@@ -102,7 +105,9 @@ def test_escape_heavy_key_never_appears_in_written_json(tmp_path: Path) -> None:
         environ={"OPENROUTER_API_KEY": ESCAPED_KEY},
         dotenv_path=tmp_path / "missing.env",
     )
-    redactor = Redactor.from_settings(settings, environ=NO_SECRET_ENV)
+    redactor = Redactor.from_settings(
+        settings, environ=NO_SECRET_ENV, dotenv_path=tmp_path / "missing.env"
+    )
     text = record_secret_everywhere(redactor, ESCAPED_KEY, tmp_path).read_text(
         encoding="utf-8"
     )
@@ -207,5 +212,7 @@ def test_default_environ_is_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_from_settings_without_key_redacts_nothing_extra(tmp_path: Path) -> None:
     settings = Settings.from_env(environ={}, dotenv_path=tmp_path / "missing.env")
-    redactor = Redactor.from_settings(settings, environ=NO_SECRET_ENV)
+    redactor = Redactor.from_settings(
+        settings, environ=NO_SECRET_ENV, dotenv_path=tmp_path / "missing.env"
+    )
     assert redactor.redact_text(PLAIN_KEY) == PLAIN_KEY

@@ -55,4 +55,4 @@ class LiteLlmCounter:
             }
             for m in messages
         ]
-        return int(litellm.token_counter(model=self.model, messages=payload))
+        return litellm.token_counter(model=self.model, messages=payload)

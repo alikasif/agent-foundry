@@ -385,11 +385,6 @@ async def test_summarize_drops_tail_when_still_over_limit(ctx: FakeCtx) -> None:
     assert len(kept) == 3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="T017 defect: summarize inserts an empty summary message when nothing "
-    "was folded (tail fits keep_last but is over max_tokens) and drops the tail",
-)
 async def test_summarize_without_fold_adds_no_empty_summary(ctx: FakeCtx) -> None:
     msgs = history(2)  # 60 tokens; the 4-message tail is within keep_last=6
     policy = SummarizePolicy(

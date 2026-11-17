@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # pyrefly: ignore[untyped-import]  # types-PyYAML not added yet
 from pydantic import BaseModel, ConfigDict
 
 OPENROUTER_PREFIX = "openrouter/"
@@ -48,6 +48,10 @@ def candidate_keys(model: str) -> list[str]:
     Tries the name as given, with and without the ``openrouter/`` prefix,
     without the provider segment, and each with dots replaced by dashes
     (OpenRouter ``claude-sonnet-4.5`` vs litellm ``claude-sonnet-4-5``).
+
+    Caveat (review T021 m8): the bare-name key drops the provider, so another
+    provider's model with the same bare name can be priced instead. Pin exact
+    ids in ``pricing.yaml`` or user overrides when that matters.
     """
     bare = model.removeprefix(OPENROUTER_PREFIX)
     names = [model, bare, OPENROUTER_PREFIX + bare, bare.split("/", 1)[-1]]

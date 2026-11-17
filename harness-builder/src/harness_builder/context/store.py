@@ -3,11 +3,16 @@
 Content is addressed by the first 16 hex chars of its sha256, so the same
 observation always gets the same ``ref://<id>`` handle (stable traces and
 replay). Entries live in memory and, when ``run_dir`` is set, also in
-``<run_dir>/refs/<id>.txt`` (UTF-8).
+``<run_dir>/refs/<id>.txt`` (UTF-8). Disk copies pass through the optional
+``redact`` function (the builder passes ``Redactor.redact_text``), so secrets
+redacted in the trace are not written to ``refs/`` either. The in-memory copy
+stays raw for the running agent; a fresh store reading from disk sees the
+redacted text.
 """
 
 import hashlib
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 REF_SCHEME = "ref://"
@@ -22,9 +27,17 @@ def ref_for(content: str) -> str:
 class ReferenceStore:
     """Stores large texts out of context and serves them back by handle."""
 
-    def __init__(self, run_dir: Path | None = None) -> None:
-        """Keep entries in memory, and on disk under ``run_dir/refs`` if given."""
+    def __init__(
+        self,
+        run_dir: Path | None = None,
+        redact: Callable[[str], str] | None = None,
+    ) -> None:
+        """Keep entries in memory, and on disk under ``run_dir/refs`` if given.
+
+        ``redact`` is applied to the text written to disk only.
+        """
         self.refs_dir = run_dir / "refs" if run_dir is not None else None
+        self.redact = redact
         self._items: dict[str, str] = {}
 
     def put(self, content: str) -> str:
@@ -36,7 +49,8 @@ class ReferenceStore:
         self._items[ref_id] = content
         if self.refs_dir is not None:
             self.refs_dir.mkdir(parents=True, exist_ok=True)
-            (self.refs_dir / f"{ref_id}.txt").write_text(content, encoding="utf-8")
+            text = self.redact(content) if self.redact is not None else content
+            (self.refs_dir / f"{ref_id}.txt").write_text(text, encoding="utf-8")
         return ref
 
     def __contains__(self, ref: object) -> bool:

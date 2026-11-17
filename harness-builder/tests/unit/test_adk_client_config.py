@@ -89,7 +89,8 @@ def test_process_env_wins_over_dotenv(tmp_path: Path) -> None:
     )
     s = Settings.from_env(environ={"HARNESS_MODEL": "env-model"}, dotenv_path=dotenv)
     assert s.model == "env-model"
-    assert s.openrouter_api_key == "from-file"
+    assert s.openrouter_api_key is not None
+    assert s.openrouter_api_key.get_secret_value() == "from-file"
 
 
 def test_empty_values_count_as_unset(tmp_path: Path) -> None:
@@ -105,7 +106,8 @@ def test_empty_values_count_as_unset(tmp_path: Path) -> None:
 def test_from_env_does_not_mutate_os_environ(clean_env: Path) -> None:
     (clean_env / ".env").write_text("OPENROUTER_API_KEY=secret\n", encoding="utf-8")
     s = Settings.from_env()
-    assert s.openrouter_api_key == "secret"
+    assert s.openrouter_api_key is not None
+    assert s.openrouter_api_key.get_secret_value() == "secret"
     assert "OPENROUTER_API_KEY" not in os.environ
 
 

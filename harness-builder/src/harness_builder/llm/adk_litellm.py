@@ -46,11 +46,12 @@ class AdkLiteLlmClient:
 
     def __init__(self, settings: Settings | None = None) -> None:
         settings = settings if settings is not None else Settings.from_env()
-        if not settings.openrouter_api_key:
+        key = settings.openrouter_api_key
+        if key is None or not key.get_secret_value():
             raise ConfigError(MISSING_KEY)
         if not settings.model:
             raise ConfigError(MISSING_MODEL)
-        self._api_key = settings.openrouter_api_key
+        self._api_key = key.get_secret_value()
         self.model = openrouter_model(settings.model)
         self._llm: LiteLlm | None = None
 

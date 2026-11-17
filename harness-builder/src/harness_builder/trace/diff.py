@@ -22,8 +22,8 @@ from harness_builder.trace.models import (
     ToolCallEvent,
     Trace,
     TraceStep,
+    canonical_json,
 )
-from harness_builder.trace.recorder import canonical_json
 
 DivergenceField = Literal[
     "missing_step", "tool_names", "tool_args", "final", "response"

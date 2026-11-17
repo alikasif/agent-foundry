@@ -5,6 +5,8 @@ leaves only. Fields marked volatile (``json_schema_extra={"volatile": True}``)
 are ignored by replay, diff and trace-equality checks; use ``stable_dump``.
 """
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -197,3 +199,20 @@ def stable_dump(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): stable_dump(item) for key, item in value.items()}
     return _JSON.dump_python(value, mode="json")
+
+
+def canonical_json(value: Any) -> str:
+    """Canonical JSON of ``value``: volatile fields dropped, keys sorted."""
+    return json.dumps(
+        stable_dump(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+
+
+def request_fingerprint(request: LLMRequest) -> str:
+    """sha256 hex of the canonical, volatile-free JSON of an LLM request.
+
+    The single definition used by the recorder, summarize and replay. Hash the
+    **redacted** request; ``TraceRecorder.record`` recomputes the stored
+    ``LlmCallEvent.request_fingerprint`` that way.
+    """
+    return hashlib.sha256(canonical_json(request).encode("utf-8")).hexdigest()

@@ -137,7 +137,13 @@ class BudgetLedger:
         )
 
     def snapshot(self) -> BudgetSnapshot:
-        """Return the current counters and limits (``cost_usd`` None if unknown)."""
+        """Return the current counters and limits.
+
+        ``usage.cost_usd`` is the sum of the **known** call costs (None only
+        when no call had a known cost). This partial sum differs from
+        ``Trace.usage.cost_usd``, which is None as soon as any cost is unknown;
+        with a cost cap, an unknown cost stops the run anyway (review T021 m2).
+        """
         usage = Usage(
             input_tokens=self._input_tokens,
             output_tokens=self._output_tokens,

@@ -188,8 +188,8 @@ SAMPLES: dict[type[BaseModel], BaseModel] = {
     LLMRequest: REQUEST,
     LLMResponse: RESPONSE,
     Trace: _trace(),
+    # No API key: it is a SecretStr, masked in dumps by design (T021 m1).
     Settings: Settings(
-        openrouter_api_key="k",
         model="m",
         trace_dir=Path("traces"),
         skills_root=Path("skills"),
