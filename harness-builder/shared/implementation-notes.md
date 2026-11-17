@@ -871,6 +871,13 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
 - **Skipped docker/live tests.** T019 adds **no** `docker`- or `live`-marked tests; everything runs offline with `FakeLLMClient`/`FakeExecutor`. The full-suite run skipped 2 pre-existing tests: `tests/unit/test_package_import.py:22` (`docker`: "Docker not available: failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine", because Docker Desktop was stopped) and `tests/unit/test_adk_client_config.py:335` (`live`: "set HARNESS_LIVE=1 to run").
 - **Verification.** `ruff format --check tests` and `ruff check tests` are clean. `pyrefly check tests/conformance tests/integration` gives 0 errors (3 suppressed). The T019 files give 81 passed (29 conformance, 52 integration) in about 2 s (14 s while other agents were running). In the full suite, 1 test failed: `test_import_rules.py::test_source_module_follows_import_rules[harness_builder.cli.main]` (cli.main -> executor.docker_cli and others). At that point `cli/main.py` and `test_import_rules.py` had uncommitted edits by the concurrent T015/T030 work, so I attribute the failure to that in-progress work, not to T019.
 - **Source defects found:** none in the code under test.
+- **Final state (after T030 committed 22d67ab and T028 committed c2c70a4).**
+  - The import-rule failure above is gone.
+  - The full suite gives 934 passed and 4 skipped. The skips are 2 `docker` tests (test_package_import, plus T020's test_cli_m1:533) and 2 `live` tests (test_adk_client_config, plus test_cli_m1:553).
+  - One other full-suite run showed a single transient failure, which I did not identify and could not reproduce.
+  - `tests/conformance` plus `tests/integration` passed in 5 of 5 repeated runs.
+  - This T019 section was committed as part of T028's c2c70a4.
+  - The autouse `hermetic_cwd` fixture in `tests/integration/conftest.py` also changes the working directory to `tmp_path` for T020's `test_cli_m1.py`, so integration tests must not use repo-relative paths.
 
 ### T030
 - **Files.** `cli/main.py` (new `doctor` command, `DOCKER_CLI_FACTORY`, `_doctor_table`) and the `harness_builder.cli.main` entry of `CROSS_LAYER_ALLOWLIST` in `tests/unit/test_import_rules.py` (added `executor.docker_cli`, `executor.preflight`). Commit `22d67ab`. No frozen leaf, protocol or dependency changed. The transient `test_import_rules[...cli.main]` failure seen by T019 was the window between my `main.py` edit and the allowlist edit; both are in `22d67ab` and the suite passes.
