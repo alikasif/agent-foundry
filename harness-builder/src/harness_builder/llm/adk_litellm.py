@@ -87,7 +87,9 @@ def to_adk_request(req: LLMRequest, default_model: str) -> "LlmRequest":
 
     system_parts = [req.system] if req.system else []
     system_parts += [m.content for m in req.messages if m.role == "system"]
-    tools = None
+    # ToolUnion, not Tool: list is invariant and the config field is
+    # list[Tool | Callable[..., Any]].
+    tools: list[types.ToolUnion] | None = None
     if req.tools:
         declarations = [
             types.FunctionDeclaration(

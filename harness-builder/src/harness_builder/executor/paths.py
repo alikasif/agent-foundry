@@ -27,10 +27,15 @@ _MOUNT_UNSAFE = frozenset(',"\r\n')
 
 
 def mount_args(
-    workdir: PurePath, ro_mounts: Mapping[PurePath, str] | None = None
+    workdir: PurePath,
+    ro_mounts: Mapping[Path, str] | Mapping[PurePath, str] | None = None,
 ) -> list[str]:
     """Return ``--mount`` args: ``workdir`` read-write at ``/work`` plus
-    each ``ro_mounts`` host path read-only at its container path."""
+    each ``ro_mounts`` host path read-only at its container path.
+
+    Mapping keys are invariant, so both key types are listed explicitly
+    (``ExecRequest.ro_mounts`` is ``dict[Path, str]``; tests use pure paths).
+    """
     args = bind_mount(workdir, WORK_DIR)
     for src, dst in (ro_mounts or {}).items():
         args += bind_mount(src, dst, readonly=True)

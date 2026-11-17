@@ -5,15 +5,16 @@ validates the configuration (model, strategy and its required tools, visible
 tools, context policy, U10 price check, sub-agent profiles) and returns a
 ``Harness`` whose ``run(task)`` creates a fresh run id, budget ledger and trace
 recorder per run. Sub-agent child harnesses are built eagerly, one per profile
-and level, so profile errors surface in ``build()``. Executor wiring is added
-by T028.
+and level, so profile errors surface in ``build()``. ``from_spec`` delegates
+to ``spec.loader`` (imported lazily: the loader imports this module).
+Executor wiring is added by T028.
 """
 
 import dataclasses
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -69,6 +70,9 @@ from harness_builder.tools.registry import ToolRegistry
 from harness_builder.trace.models import Trace
 from harness_builder.trace.recorder import TraceRecorder, config_hash
 from harness_builder.trace.redact import Redactor
+
+if TYPE_CHECKING:
+    from harness_builder.spec.models import HarnessSpec
 
 CONTEXT_POLICIES = ("truncate", "summarize", "by_reference")
 HOOK_ORDER: tuple[HookEvent, ...] = ("on_stop", "post_tool", "pre_tool")
@@ -151,8 +155,13 @@ class Harness:
         redactor: Redactor,
         price_lookup: PriceLookup | None,
         trace_dir: Path | None,
+        spec_snapshot: dict[str, Any] | None = None,
     ) -> None:
-        """Hold the wired loop and per-run factories' inputs (use the builder)."""
+        """Hold the wired loop and per-run factories' inputs (use the builder).
+
+        ``spec_snapshot`` (spec-built harnesses) is written into top-level
+        traces, so ``harness replay`` can rebuild the harness from the trace.
+        """
         self.config = config
         self.config_hash = config_hash(config)
         self.loop = loop
@@ -160,6 +169,7 @@ class Harness:
         self.redactor = redactor
         self.price_lookup = price_lookup
         self.trace_dir = trace_dir
+        self.spec_snapshot = spec_snapshot
 
     async def run(self, task: str) -> RunResult:
         """Run ``task`` to a stop; ``trace_path`` is set when traces are written."""
@@ -219,6 +229,7 @@ class Harness:
             model=self.config.model.name,
             task=task,
             depth=depth,
+            spec_snapshot=self.spec_snapshot if parent is None else None,
             redactor=self.redactor,
             trace_dir=None if parent is not None else self.trace_dir,
         )
@@ -260,6 +271,25 @@ class HarnessBuilder:
         self._counter: TokenCounter = HeuristicCounter()
         self._subagents: tuple[int, dict[str, ChildProfile]] | None = None
         self._level = 0
+        self._spec_snapshot: dict[str, Any] | None = None
+
+    @classmethod
+    def from_spec(
+        cls,
+        source: "Path | str | HarnessSpec | Mapping[str, Any]",
+        *,
+        settings: Settings | None = None,
+    ) -> "HarnessBuilder":
+        """A builder configured from a HarnessSpec (FR-016, FR-030).
+
+        ``source`` is a spec file, a harness directory (``harness.yaml``), a
+        parsed ``HarnessSpec`` or a mapping such as ``trace.spec_snapshot``.
+        Raises ``SpecError`` with located paths for an invalid spec. Code-only
+        settings (``.llm``, ``.tools``, ``.approver``) can be chained after.
+        """
+        from harness_builder.spec.loader import load_builder
+
+        return load_builder(source, settings=settings)
 
     def model(
         self,
@@ -325,6 +355,15 @@ class HarnessBuilder:
         self._policy = policy
         if approver is not None:
             self._approver = approver
+        return self
+
+    def approver(self, approver: Approver) -> Self:
+        """Answer ``ask`` decisions with ``approver`` (for example replay's).
+
+        Independent of ``.permissions()``, which only replaces the approver
+        when it is given one, so the call order does not matter.
+        """
+        self._approver = approver
         return self
 
     def budget(
@@ -395,6 +434,14 @@ class HarnessBuilder:
         allowed by a prepended ``SPAWN_RULE`` (rule-based permissions only).
         """
         self._subagents = (max_depth, dict(profiles or {"default": ChildProfile()}))
+        return self
+
+    def spec_snapshot(self, snapshot: dict[str, Any] | None) -> Self:
+        """Record the resolved spec in top-level traces (set by the loader).
+
+        Not part of ``HarnessConfig``, so it never changes ``config_hash``.
+        """
+        self._spec_snapshot = snapshot
         return self
 
     def build(self) -> Harness:
@@ -497,6 +544,7 @@ class HarnessBuilder:
             redactor=redactor,
             price_lookup=price_lookup,
             trace_dir=trace_dir,
+            spec_snapshot=self._spec_snapshot,
         )
 
     def _resolve_model(self, settings: Settings) -> ModelConfig:

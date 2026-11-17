@@ -18,7 +18,7 @@ import os
 import re
 import sys
 import uuid
-from pathlib import Path, PurePath
+from pathlib import Path
 
 import anyio
 
@@ -138,8 +138,6 @@ class DockerExecutor:
         if bad:
             raise ConfigError(f"invalid environment variable names: {bad!r}")
         cfg = self.config
-        # Mapping keys are invariant: widen dict[Path, str] for mount_args.
-        ro_mounts: dict[PurePath, str] = {**req.ro_mounts}
         return [
             "create",
             "--name",
@@ -168,7 +166,7 @@ class DockerExecutor:
             "no-new-privileges",
             "--user",
             self.user,
-            *mount_args(req.workdir, ro_mounts),
+            *mount_args(req.workdir, req.ro_mounts),
             "-w",
             WORK_DIR,
             *[arg for key, value in env.items() for arg in ("-e", f"{key}={value}")],
