@@ -24,6 +24,7 @@ from harness_builder.core.types import (
     ToolCall,
     ToolOutcome,
 )
+from harness_builder.errors import ConfigError
 from harness_builder.executor.models import Language
 from harness_builder.llm.types import LLMRequest, LLMResponse, ToolSchema
 from harness_builder.strategies.codeact._compat import (
@@ -37,7 +38,29 @@ from harness_builder.strategies.react import ReActStrategy
 RUN_CODE = "run_code"
 SUPPORTED_LANGUAGES: tuple[str, ...] = get_args(Language)
 BLOCK_ID_PREFIX = "codeact_block_"
-UNTAGGED_LANGUAGE = "text"
+PROSE_LANGUAGES = frozenset(
+    {
+        "text",  # untagged fence (extract_code_blocks default)
+        "txt",
+        "plaintext",
+        "output",
+        "console",
+        "log",
+        "json",
+        "yaml",
+        "yml",
+        "toml",
+        "xml",
+        "html",
+        "csv",
+        "markdown",
+        "md",
+        "diff",
+    }
+)
+"""Fence tags treated as prose (answers, sample data), never executed."""
+EXTRA_ALIASES = {"python3": "python"}
+"""Aliases the sibling's ``extract_code_blocks`` does not normalize."""
 
 
 class CodeActStrategy:
@@ -52,7 +75,7 @@ class CodeActStrategy:
         It is separate from the executor's byte-level output cap (FR-042).
         """
         if output_max_chars <= 0:
-            raise ValueError(f"output_max_chars must be > 0, got {output_max_chars}")
+            raise ConfigError(f"output_max_chars must be > 0, got {output_max_chars}")
         self.output_max_chars = output_max_chars
         self._react = ReActStrategy()
 
@@ -79,16 +102,16 @@ class CodeActStrategy:
     def parse(self, response: LLMResponse) -> StepDecision:
         """Turn code blocks into ``run_code`` calls and pass native calls through.
 
-        Untagged blocks are prose (for example sample output) and are ignored.
-        Any block in an unsupported language makes the whole response a
-        ``format`` error and nothing runs. Block calls come first, then native
-        calls, each in response order.
+        Untagged and data/markup blocks (``PROSE_LANGUAGES``, e.g. json) are
+        prose and ignored. Any other block in an unsupported language makes the
+        whole response a ``format`` error and nothing runs. Block calls come
+        first, then native calls, each in response order.
         """
         text = response.text
         blocks = [
-            (lang, code)
+            (EXTRA_ALIASES.get(lang, lang), code)
             for lang, code in extract_code_blocks(text)
-            if lang != UNTAGGED_LANGUAGE
+            if lang not in PROSE_LANGUAGES
         ]
         unsupported = sorted({lang for lang, _ in blocks} - set(SUPPORTED_LANGUAGES))
         if unsupported:
