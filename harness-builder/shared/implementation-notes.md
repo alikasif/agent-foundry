@@ -509,3 +509,60 @@
 - **Pricing.** The bundled litellm price is asserted only as non-None and positive (it depends on the litellm version). `LiteLlmCounter.count` is never called (network).
 - **Coverage not measured.** `pytest-cov` is not a dev dependency, and plan rule 5 forbids `uv add` after T001.
 - No source defects found.
+
+### T011
+- **Import rules shape the loop.** `core/loop.py` may not import `trace.recorder` or `trace.redact` (another layer's concrete modules, T016 rule 2). The builder therefore injects `fingerprint: Callable[[LLMRequest], str]`, set to `request_fingerprint(redactor.redact_model(req))` per the T009 rule, plus the `ToolRunner`. The loop imports protocols, leaf models, `core.run_context` and `errors` only.
+- **API.**
+  - `StepLoop(*, llm, strategy, registry, permissions, approver, hooks, model, fingerprint, context=None, tool_runner=None, visible=None, retry_delay_s=0.5, transient=is_transient)`. `run(ctx: RunContext) -> RunResult`; the caller seeds `ctx.messages` and calls `recorder.finish(result.stop)`. `tool_runner=None` means `registry.invoke`.
+  - `RunContext` is a plain dataclass `(run_id, ledger, recorder, depth=0, workdir=None, messages=[])`; pyrefly accepts it wherever `RunContextView` is expected. `RunResult` is re-exported from `core.types`.
+  - `Harness.run(task) -> RunResult` and `Harness.run_traced(task, *, ledger=None, depth=0, parent: TraceRecorder | None = None) -> (RunResult, Trace)`. Each run gets a uuid4-hex run id, a fresh `BudgetLedger.from_limits(config.budget, price_lookup)` and a fresh recorder. `RunResult.stop` is the redacted `trace.stop`; `trace_path` is set when a trace dir is configured.
+  - `HarnessBuilder(name, settings=None)` with `.model(name, temperature=, max_output_tokens=)`, `.strategy(name | instance, **options)`, `.system_prompt(text)`, `.tools(*tools)`, `.visible_tools(names)`, `.context(instance | "truncate" | "summarize" | "by_reference", **options)`, `.permissions(rules=(), default="deny", policy=None, approver=None)`, `.budget(max_steps=10, max_input_tokens, max_output_tokens, max_cost_usd)`, `.pricing(lookup)`, `.hook(event, fn, priority=0, name=None)`, `.llm(client, retry_delay_s=0.5)`, `.tool_runner(runner)`, `.trace_dir(path | None)`, `.token_counter(counter)`, `.build()`. `Harness` and `HarnessBuilder` are added to the lazy package exports.
+- **Defaults (decisions not in the spec).** No context policy means the full history is sent (no `context` event). designs.md lists `TruncatePolicy` as the default impl, but it has no default `max_tokens`. With no `.permissions()` call every tool call is denied (deny-unlisted, OQ-22). The model comes from `HARNESS_MODEL` when `.model()` is not called; with neither set, `build()` raises `ConfigError`. The approver is `default_approver()`. The LLM is `AdkLiteLlmClient(settings)`, imported lazily inside `build()`. The trace dir is `Settings.trace_dir` unless `.trace_dir()` is called (None writes nothing).
+- **HarnessConfig and config_hash (for T014).** `HarnessConfig(name, model, strategy, strategy_options, system_prompt (base, not resolved), tools: list[ToolSchema], visible_tools, context, permissions, budget, hooks)` is hashed with `trace.recorder.config_hash`.
+  - `context` is `{"policy": policy.name, "options": describe(policy)}`. `describe` keeps the public scalar and pydantic attributes of the **constructed** object, so a named policy and an equal instance hash the same (defaults included); the store, counter and LLM are left out.
+  - `permissions` is `{"default", "rules": [dataclasses.asdict(rule)]}`, or `{"policy": <qualname>}` for a custom policy. The approver is excluded, because TTY detection would otherwise change the hash between environments.
+  - `hooks` is `{event: HookManager.names(event)}` in execution order.
+  - Runtime objects (LLM client, approver, tool runner, trace dir, price lookup) are not hashed. T014 must give the spec path the same values, including the same tool objects (schemas are hashed), and should add `spec_snapshot` to the recorder; `Harness._recorder` does not set it yet.
+- **Loop semantics.**
+  - `check_before_step` runs before `recorder.start_step(i)`, so a budget stop opens no empty step. Its `step_index` is the loop's step `i`, which is the number of steps that ran.
+  - **Budget recheck after `context.apply` (review T021 M4).** `SummarizePolicy` charges the ledger and drops the `StopInfo`, so the loop checks the snapshot's token and cost limits (no step counted) and stops with `budget` before the step call. Only this ledger's limits are checked here; ancestors are caught by the next `check_before_step`.
+  - Step `record_llm` exhausted means stop `budget` right away and the response is not parsed, as in designs.md 5 (a final answer in that response is lost). One `LlmCallEvent` (cost = ledger delta, latency volatile) plus one `BudgetEvent` is recorded per step call. Context and hook events are recorded by their layers only, never again by the loop.
+  - **Retries.** There are 2 retries with backoff `retry_delay_s * 2**attempt`. `is_transient` treats `HarnessError` (ConfigError, FakeScriptExhaustedError, LLMCallError) as never transient. `TimeoutError`, `ConnectionError`, class names such as `RateLimitError`, `APIConnectionError`, `InternalServerError`, `ServiceUnavailableError`, and a `status_code` in {408, 429, 5xx} are transient. litellm is never imported. Exhausted or fatal errors stop with `error`.
+  - **parse_error** is fed back as a `user` message `Error (format): <message>\nHint: <hint>` after the call-free assistant message.
+  - **Per call:**
+    - a visible-set check runs first and reports `unknown_tool` (review T021 M4: `schemas(visible)` only hides tools);
+    - then `registry.validate`;
+    - then `permissions.decide` on the **normalized** args (`vcall.call` with `args=vcall.args`); `ask` goes to the approver, and every decision gets a `PermissionEvent`;
+    - then `pre_tool`. `block` maps to `hook_blocked`. `stop` ends the run with `veto` at once. **`modify` re-validates and re-runs the permission check** (decide plus approver on `ask`) on the modified args, so a hook cannot widen what was allowed. This is my decision; designs.md only asked for re-validation.
+    - then invoke through the runner, then `post_tool`.
+  - **tool_result events (for T013).** Every call gets exactly one `ToolResultEvent` keyed by `call_id`. For invoked calls it holds the runner's **raw** observation (before `post_tool`, `duration_ms` volatile, `nondeterministic` from the tool). Otherwise it holds the error observation. `ReplayToolRunner` should look up by `call_id` and return the recorded observation; it is only asked for calls that pass validate, permission and pre_tool, and `post_tool` hooks run again on replay.
+  - **FINAL mid-step (T029 request).** Execution stops at the first `Observation.final`. Later calls are not executed and get an error observation `tool_exception` "not executed: an earlier call in this step set the final answer". `ErrorType` has no `skipped` value and the frozen leaf was not changed. That observation is recorded as a `tool_result` and passed to `render_observations`, so no tool call is left without a response if a veto continues the run.
+  - **on_stop veto cap.** The first 3 vetoes are fed back as a `user` message "Your final answer was rejected: <reason>. Continue working on the task." The 4th veto ends the run with `veto`, and `answer` is kept as the last proposed answer. `on_stop` receives a `RunResult` with `trace_path=None`.
+  - **error.** Any other exception escaping a step (an internal invariant break, for example `DockerUnavailableError` mid-run) ends the run with `error`; `detail` holds `<ExcType>: <msg>`. Only `Exception` is caught, so cancellation propagates.
+- **Builder validation.**
+  - `ConfigError` is raised for: an unknown strategy (from the registry); an unknown context name or bad options (`TypeError`/`ValueError` converted); a duplicate tool (from the registry); visible names that are not registered; `strategy.required_tools` not registered (or not visible); an invalid hook event; a missing key or model on the default LLM.
+  - It is also raised for an unknown price while `max_cost_usd` is set (U10). The lookup is `PriceTable().price` unless `.pricing()` is called.
+  - `by_reference` auto-registers `DerefTool(policy.store)`, the same store instance, unless a `deref` tool exists, and adds it to `visible_tools` when a visible set is used. A named `by_reference` accepts `run_dir`. The default store is in memory and shared across the runs of one harness, which is safe because handles are content-addressed.
+  - **Counter injection.** Named policies get the builder counter (`HeuristicCounter` by default). A policy instance whose `counter` is None gets it set in place (mutation of the user object, documented). A named `summarize` uses the harness LLM and model unless `model=` names another.
+- **Review notes not acted on here.** `context.summarize` computes its fingerprint on the raw request, not the redacted one. The concurrent trace-contract fix (recorder recomputing `request_fingerprint` from the redacted request, `SecretStr` key) needs no change in core: the loop passes the injected fingerprint, and `Redactor.from_settings` and `AdkLiteLlmClient` take `Settings` as is.
+- **For T012.** Call `child_harness.run_traced(task, ledger=ctx.ledger.child(fraction), depth=ctx.depth + 1, parent=<parent TraceRecorder>)`, then record `SubagentEvent(call_id, child=trace)` on the parent recorder. The tool gets `ctx` (a `RunContext`); the parent recorder is `ctx.recorder`. For narrowing, see the T005 note about default-deny children.
+- **For T028.** `RunContext.workdir` exists (default None). Set it in `Harness.run_traced` and clean it up after `finish`.
+- **Verification.** No test files were added, because T019 owns the loop and integration tests. A scratchpad script with `FakeLLMClient` checked the following:
+  - `done`;
+  - all six error kinds (validation, unknown_tool, tool_exception, timeout, permission_denied via default deny and via an approver "no", hook_blocked), with the run continuing;
+  - parse_error feedback;
+  - `budget` (max_steps 3, giving step_index 3);
+  - `veto` from the on_stop cap (answer kept) and from a pre_tool stop;
+  - `error` on script exhaustion (one request, no retry);
+  - two transient `ConnectionError`s retried;
+  - a ToolResult final with the following call skipped;
+  - a modify re-validation failure;
+  - an injected ToolRunner;
+  - by_reference with an auto-visible deref and one context event per step;
+  - summarize, where `usage.llm_calls` equals the number of LlmCallEvents;
+  - five builder `ConfigError`s;
+  - a written trace file with a stable config_hash;
+  - that the API key is absent from the trace;
+  - about 3 ms per step over 100 steps.
+
+  `ruff format --check`, `ruff check` and `pyrefly check` are clean, and `pytest` gives 795 passed, 2 skipped, 1 xfailed.

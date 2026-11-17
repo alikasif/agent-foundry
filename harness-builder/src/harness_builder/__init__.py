@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from harness_builder.config import Settings
+    from harness_builder.core.builder import Harness, HarnessBuilder
     from harness_builder.core.types import (
         ApprovalRequest,
         BudgetLimits,
@@ -48,6 +49,8 @@ __all__ = [
     "ErrorObservation",
     "ExecRequest",
     "ExecResult",
+    "Harness",
+    "HarnessBuilder",
     "HarnessError",
     "HookOutcome",
     "LLMRequest",
@@ -80,6 +83,7 @@ _MODULES = (
     "harness_builder.executor.models",
     "harness_builder.trace.models",
     "harness_builder.config",
+    "harness_builder.core.builder",
 )
 
 
