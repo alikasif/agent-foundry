@@ -2,14 +2,16 @@
 
 This is the only core module that imports concrete layer classes. ``build()``
 validates the configuration (model, strategy and its required tools, visible
-tools, context policy, U10 price check) and returns a ``Harness`` whose
-``run(task)`` creates a fresh run id, budget ledger and trace recorder per run.
-Executor and sub-agent wiring is added by later tasks (T012, T028).
+tools, context policy, U10 price check, sub-agent profiles) and returns a
+``Harness`` whose ``run(task)`` creates a fresh run id, budget ledger and trace
+recorder per run. Sub-agent child harnesses are built eagerly, one per profile
+and level, so profile errors surface in ``build()``. Executor wiring is added
+by T028.
 """
 
 import dataclasses
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Self
 
@@ -32,6 +34,7 @@ from harness_builder.core.protocols import (
     TokenCounter,
     ToolDefinition,
     ToolRunner,
+    TraceSink,
 )
 from harness_builder.core.run_context import RunContext
 from harness_builder.core.types import (
@@ -48,9 +51,20 @@ from harness_builder.llm.pricing import PriceTable
 from harness_builder.llm.tokens import HeuristicCounter
 from harness_builder.llm.types import ToolSchema
 from harness_builder.permissions.approvers import default_approver
-from harness_builder.permissions.policy import Rule, RulePermissionPolicy
+from harness_builder.permissions.policy import (
+    NarrowedPolicy,
+    Rule,
+    RulePermissionPolicy,
+)
 from harness_builder.strategies.registry import get_strategy
 from harness_builder.tools.builtin.deref import DerefTool
+from harness_builder.tools.builtin.spawn import (
+    DEFAULT_MAX_DEPTH,
+    SPAWN_TOOL_NAME,
+    Child,
+    SpawnAgentTool,
+    SubagentRunner,
+)
 from harness_builder.tools.registry import ToolRegistry
 from harness_builder.trace.models import Trace
 from harness_builder.trace.recorder import TraceRecorder, config_hash
@@ -61,6 +75,31 @@ HOOK_ORDER: tuple[HookEvent, ...] = ("on_stop", "post_tool", "pre_tool")
 _UNSET: Any = object()
 DEREF_RULE = Rule("deref", "allow", rule_id="builtin:deref")
 """Prepended when ``deref`` is auto-registered; reads only the run's own refs."""
+SPAWN_RULE = Rule(SPAWN_TOOL_NAME, "allow", rule_id="builtin:spawn_agent")
+"""Prepended by ``.subagents()`` unless a rule names ``spawn_agent`` exactly."""
+
+
+class ChildProfile(BaseModel):
+    """A sub-agent profile (designs.md 4.4 ``ChildProfile``).
+
+    Unset fields inherit from the parent harness. ``tools`` must be a subset
+    of the parent's visible tools (``spawn_agent`` included); the child only
+    registers those. ``permissions`` rules narrow the parent's policy through
+    ``NarrowedPolicy`` (child side default ``allow``, so an unlisted call keeps
+    the parent's decision and nothing is ever loosened). ``budget_fraction``
+    is the share of the parent's remaining budget (0.5 ASSUMED).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    description: str = ""
+    model: str | None = None
+    strategy: str | None = None
+    strategy_options: dict[str, Any] = Field(default_factory=dict)
+    system_prompt: str | None = None
+    tools: list[str] | None = None
+    budget_fraction: float = Field(default=0.5, gt=0, le=1)
+    permissions: list[Rule] = Field(default_factory=list)
 
 
 class HarnessConfig(BaseModel):
@@ -84,6 +123,7 @@ class HarnessConfig(BaseModel):
     permissions: dict[str, Any] = Field(default_factory=dict)
     budget: BudgetLimits = Field(default_factory=BudgetLimits)
     hooks: dict[str, list[str]] = Field(default_factory=dict)
+    subagents: dict[str, Any] | None = None
 
 
 def describe(obj: object) -> dict[str, Any]:
@@ -132,12 +172,12 @@ class Harness:
         *,
         ledger: Budget | None = None,
         depth: int = 0,
-        parent: TraceRecorder | None = None,
+        parent: TraceSink | None = None,
     ) -> tuple[RunResult, Trace]:
         """Run ``task`` and also return the finished trace.
 
         Sub-agents pass the parent's child ``ledger``, their ``depth`` and the
-        parent ``recorder``; the child trace is then not written to disk and
+        parent's trace sink; the child trace is then not written to disk and
         is returned for embedding as a ``SubagentEvent``.
         """
         run_id = uuid.uuid4().hex
@@ -160,9 +200,9 @@ class Harness:
         return result.model_copy(update={"stop": trace.stop, "trace_path": path}), trace
 
     def _recorder(
-        self, run_id: str, task: str, depth: int, parent: TraceRecorder | None
+        self, run_id: str, task: str, depth: int, parent: TraceSink | None
     ) -> TraceRecorder:
-        if parent is not None:
+        if isinstance(parent, TraceRecorder):
             return parent.child(
                 run_id=run_id,
                 task=task,
@@ -180,7 +220,7 @@ class Harness:
             task=task,
             depth=depth,
             redactor=self.redactor,
-            trace_dir=self.trace_dir,
+            trace_dir=None if parent is not None else self.trace_dir,
         )
 
 
@@ -218,6 +258,8 @@ class HarnessBuilder:
         self._runner: ToolRunner | None = None
         self._trace_dir: Path | None = _UNSET
         self._counter: TokenCounter = HeuristicCounter()
+        self._subagents: tuple[int, dict[str, ChildProfile]] | None = None
+        self._level = 0
 
     def model(
         self,
@@ -341,13 +383,28 @@ class HarnessBuilder:
         self._counter = counter
         return self
 
+    def subagents(
+        self,
+        max_depth: int = DEFAULT_MAX_DEPTH,
+        profiles: Mapping[str, ChildProfile] | None = None,
+    ) -> Self:
+        """Register the ``spawn_agent`` tool with these child ``profiles``.
+
+        Without profiles a single ``default`` profile inherits everything.
+        ``spawn_agent`` is made visible and, unless a rule names it exactly,
+        allowed by a prepended ``SPAWN_RULE`` (rule-based permissions only).
+        """
+        self._subagents = (max_depth, dict(profiles or {"default": ChildProfile()}))
+        return self
+
     def build(self) -> Harness:
         """Validate the configuration and return a ``Harness``.
 
         Raises ``ConfigError`` for a missing model, unknown strategy or
         context policy, duplicate tools, unknown visible tools, missing
         strategy-required tools, invalid hooks, a missing API key (default
-        LLM) or an unknown model price while ``max_cost_usd`` is set (U10).
+        LLM), an unknown model price while ``max_cost_usd`` is set (U10) or an
+        invalid sub-agent configuration (child errors name the profile path).
         """
         settings = self._settings or Settings.from_env()
         model = self._resolve_model(settings)
@@ -363,7 +420,11 @@ class HarnessBuilder:
             rules.insert(0, DEREF_RULE)  # first match: before any "*" deny
             if visible is not None and "deref" not in visible:
                 visible.append("deref")
-        self._check_tools(registry, visible, strategy)
+        if self._subagents is not None:
+            if not any(rule.tool == SPAWN_TOOL_NAME for rule in rules):
+                rules.insert(0, SPAWN_RULE)  # exact-name rules opt out
+            if visible is not None and SPAWN_TOOL_NAME not in visible:
+                visible.append(SPAWN_TOOL_NAME)
 
         price_lookup = self._price_lookup or PriceTable().price
         priced = [model.name]
@@ -377,16 +438,38 @@ class HarnessBuilder:
             )
         hooks = self._resolve_hooks()
         permissions = self._policy or RulePermissionPolicy(rules, self._default)
+        approver = self._approver or default_approver()
+        runner = self._runner
+        if self._subagents is not None:
+            parent_tools = [
+                n for n in registry.names() if visible is None or n in visible
+            ]
+            spawn = SpawnAgentTool(
+                self._subagents[0],
+                self._build_children(
+                    [*parent_tools, SPAWN_TOOL_NAME],
+                    settings,
+                    model,
+                    llm,
+                    permissions,
+                    approver,
+                    price_lookup,
+                ),
+            )
+            registry.register(spawn)
+            if runner is None:  # a custom runner (replay) receives spawn calls
+                runner = SubagentRunner(spawn, registry)
+        self._check_tools(registry, visible, strategy)
         loop = StepLoop(
             llm=llm,
             strategy=strategy,
             registry=registry,
             permissions=permissions,
-            approver=self._approver or default_approver(),
+            approver=approver,
             hooks=hooks,
             model=model,
             context=context,
-            tool_runner=self._runner,
+            tool_runner=runner,
             visible=None if visible is None else frozenset(visible),
             retry_delay_s=self._retry_delay_s,
         )
@@ -402,6 +485,7 @@ class HarnessBuilder:
             permissions=self._describe_permissions(rules),
             budget=self._limits,
             hooks={e: hooks.names(e) for e in HOOK_ORDER if hooks.names(e)},
+            subagents=self._describe_subagents(),
         )
         trace_dir = settings.trace_dir if self._trace_dir is _UNSET else self._trace_dir
         return Harness(
@@ -485,6 +569,107 @@ class HarnessBuilder:
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
         return manager
+
+    def _build_children(
+        self,
+        available: list[str],
+        settings: Settings,
+        model: ModelConfig,
+        llm: LLMClient,
+        permissions: PermissionPolicy,
+        approver: Approver,
+        price_lookup: PriceLookup,
+    ) -> dict[str, Child]:
+        """Build one child harness per profile (none at the deepest level).
+
+        ``available`` is what this harness may hand down: its visible tools
+        plus ``spawn_agent``. Grandchildren are built by the children's own
+        ``build()``, from the child's narrowed policy and tool subset, so a
+        chain of profiles can only narrow.
+        """
+        assert self._subagents is not None
+        max_depth, profiles = self._subagents
+        if max_depth < 1:
+            raise ConfigError(f"subagents max_depth must be >= 1, got {max_depth}")
+        children: dict[str, Child] = {}
+        for name, profile in profiles.items():
+            harness = None
+            if self._level < max_depth:
+                child = HarnessBuilder(f"{self._name}/{name}", settings)
+                child._level = self._level + 1
+                child._model = model.model_copy(
+                    update={"name": profile.model or model.name}
+                )
+                if profile.strategy is not None:
+                    child._strategy = profile.strategy
+                    child._strategy_options = profile.strategy_options
+                else:
+                    child._strategy = self._strategy
+                    child._strategy_options = self._strategy_options
+                if profile.system_prompt is None:
+                    child._system_prompt = self._system_prompt
+                else:
+                    child._system_prompt = profile.system_prompt
+                allowed = self._child_tools(name, profile, available)
+                child._tools = [t for t in self._tools if t.name in allowed]
+                child._context = self._context
+                child._context_options = self._context_options
+                child._policy = permissions
+                if profile.permissions:
+                    narrowing = RulePermissionPolicy(profile.permissions, "allow")
+                    child._policy = NarrowedPolicy(permissions, narrowing)
+                child._approver = approver
+                child._limits = self._limits  # keeps the U10 check for a model
+                child._price_lookup = price_lookup
+                child._hooks = list(self._hooks)
+                child._llm = llm
+                child._retry_delay_s = self._retry_delay_s
+                child._runner = self._runner
+                child._trace_dir = None
+                child._counter = self._counter
+                if SPAWN_TOOL_NAME in allowed:
+                    child._subagents = self._subagents
+                try:
+                    harness = child.build()
+                except ConfigError as exc:
+                    raise ConfigError(
+                        f"sub-agent profile {child._name!r}: {exc}"
+                    ) from exc
+            children[name] = Child(
+                profile.description, profile.budget_fraction, harness
+            )
+        return children
+
+    def _child_tools(
+        self, name: str, profile: ChildProfile, available: list[str]
+    ) -> list[str]:
+        """Tool names a child of ``profile`` gets: its subset of ``available``.
+
+        At the top level a name outside ``available`` is a ``ConfigError``
+        (it would widen). Deeper, the subset is intersected with what the
+        spawning child has, so a chain of profiles can only narrow.
+        """
+        if profile.tools is None:
+            return list(available)
+        unknown = sorted(set(profile.tools) - set(available))
+        if unknown and self._level == 0:
+            raise ConfigError(
+                f"sub-agent profile {name!r} lists tools the parent cannot give "
+                f"(not registered or not visible): {unknown}"
+            )
+        return [tool for tool in profile.tools if tool in available]
+
+    def _describe_subagents(self) -> dict[str, Any] | None:
+        if self._subagents is None:
+            return None
+        max_depth, profiles = self._subagents
+        return {
+            "max_depth": max_depth,
+            "profiles": {
+                name: profile.model_dump(mode="json")
+                for name, profile in profiles.items()
+            },
+        }
 
     def _describe_permissions(self, rules: list[Rule]) -> dict[str, Any]:
         if self._policy is not None:

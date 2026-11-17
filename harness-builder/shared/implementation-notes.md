@@ -655,3 +655,74 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
   - a pre_tool `modify` recording, with two `ToolCallEvent`s for one call_id, matches when the hook is kept, and gives `tool_call` at step 1 when the hook is dropped.
 
   `ruff format --check .` and `ruff check .` are clean repo-wide, and pyrefly is clean on `replay.py`. Repo-wide, pyrefly reports 1 error, in `tools/builtin/spawn.py:86` (T012, in progress). pytest: 821 passed, 2 skipped.
+
+### T012
+- **API.**
+  - `HarnessBuilder.subagents(max_depth=2, profiles=None)`. With no profiles there is one `"default": ChildProfile()`, which inherits everything (designs.md 11.1 `.subagents(max_depth=2)` builds). `max_depth < 1` raises `ConfigError` in `build()`.
+  - `ChildProfile` (in `core/builder.py`, frozen pydantic, `extra="forbid"`) has these fields:
+    - `description=""`;
+    - `model: str | None` (overrides only the name, so temperature and max tokens are kept);
+    - `strategy: str | None` and `strategy_options`;
+    - `system_prompt: str | None`;
+    - `tools: list[str] | None`;
+    - `budget_fraction=0.5` (ASSUMED, in (0, 1]);
+    - `permissions: list[Rule]`.
+
+    Every field that is None inherits from the parent. `model` is an addition beyond designs.md 4.4, so a cheaper model can be used for sub-agents.
+  - `tools/builtin/spawn.py` has the following:
+    - `SpawnAgentTool(max_depth, children: Mapping[str, Child])`;
+    - `Child(description, budget_fraction, harness | None)`;
+    - `SubagentRunner(spawn, inner)`;
+    - `ChildHarness` (a protocol with `run_traced`);
+    - `SPAWN_TOOL_NAME = "spawn_agent"` and `DEFAULT_MAX_DEPTH = 2`.
+
+    The args are `task: str` (min length 1) and `profile: Literal[<profile names>]`, which defaults to the first profile. The model sees an enum, and an unknown profile is a `validation` observation. `nondeterministic=True`.
+- **Why a runner (decision not in the spec).** A tool body never sees the call id, and `SubagentEvent(call_id, child)` needs it. `SpawnAgentTool` is therefore registered normally, so it is advertised, validated, permission-checked and hooked. Its calls are executed by `SubagentRunner`, which the builder wraps around the registry. `SpawnAgentTool.fn` raises `RuntimeError`, which becomes a `tool_exception` if anything reaches it through `ToolRegistry.invoke`.
+- **Custom runner contract (for T013/T019).** When `.tool_runner(...)` is set, the builder does **not** wrap it, so the custom runner receives the `spawn_agent` calls itself. Under replay, this means:
+  - the recorded observation is returned;
+  - no child runs, so no child LLM calls reach the replay client;
+  - the replayed parent trace has **no** `SubagentEvent`.
+
+  T013 already excludes subagent events from comparison. A custom runner that delegates spawn calls to `registry.invoke` gets a `tool_exception`.
+- **Child construction.**
+  - Children are built eagerly in `build()`: one harness per profile per level, at levels 1..max_depth. The deepest level's `spawn_agent` (when it is in that child's tools) has `Child.harness=None` and always answers `depth_exceeded`. The `ctx.depth + 1 > max_depth` check runs first, so the cap holds even if a harness were run at an unexpected depth. Cost: sum of p^L harnesses (3 profiles, depth 2: 13); build is cheap and no LLM is called.
+  - Each child is built from the **spawning** harness's resolved state, so a chain of profiles can only narrow (a grandchild narrows its parent child, not the root). Shared objects:
+    - the LLM client, the resolved approver and the price lookup;
+    - the hooks, re-registered from the same callables;
+    - the context setting (a named policy gives a fresh instance; a user instance is shared, which is safe because policies keep no run state, only `__init__` writes);
+    - a strategy instance (a name gives a fresh one);
+    - the token counter, the settings and the custom runner.
+
+    `trace_dir` is None. The `_limits` are copied, so the U10 price check still covers a profile `model`. The ledger passed at run time sets the actual child limits.
+  - **Tools (review T021 M4).** The child registry contains **only** the allowed tools, rather than all tools with a hidden subset, so a hidden tool is `unknown_tool` at both the loop's visible check and registry validation.
+    - With `tools=None` the child gets the parent's visible tools plus `spawn_agent`.
+    - At the top level, a profile name outside that set (unregistered, or hidden by `visible_tools`) is a `ConfigError`, because it would widen.
+    - Deeper down the subset is **intersected** with what the spawning child has, with no error. This is my decision; the alternative errors on legitimate configs such as a reader profile spawning a writer profile.
+    - `deref` is auto-registered per child as usual. Grandchildren exist only if `spawn_agent` is in the child's tools.
+  - **Permissions.**
+    - A profile without rules gets the parent's policy object unchanged. Otherwise it gets `NarrowedPolicy(parent_policy, RulePermissionPolicy(profile.permissions, default="allow"))`. The child side defaults to `allow`, which avoids the T005 default-deny collapse, and the parent wins ties, so nothing loosens.
+    - The child's `HarnessConfig.permissions` is `{"policy": "NarrowedPolicy"}` or the parent qualname. The profile rules are hashed in the parent's `subagents` instead.
+  - **Auto-allow (reviewer decision).** With rule-based permissions, `.subagents()` prepends `SPAWN_RULE = Rule("spawn_agent", "allow", rule_id="builtin:spawn_agent")` unless a user rule's `tool` is **exactly** `"spawn_agent"`. A glob such as `"*"` does not count, so the designs.md sketch `[Rule("run_code","allow"), Rule("*","deny")]` can spawn. A custom `policy=` gets nothing injected, as with deref. Spawning is bounded by depth and budget, and children can only narrow. A reviewer may prefer explicit opt-in under default-deny. `spawn_agent` is also auto-appended to a `visible_tools` set.
+  - The child harness name is `<parent>/<profile>`, for example `p/default/default` for a grandchild. A child `ConfigError` is re-raised as `sub-agent profile '<path>': ...`.
+- **Run semantics.**
+  - A spawn calls `child.run_traced(task, ledger=ctx.ledger.child(fraction), depth=ctx.depth + 1, parent=ctx.recorder)`, then records `SubagentEvent(call_id, child=trace)` on `ctx.recorder`. The event order in the step is `tool_call`, `permission`, `hook`, `subagent`, `tool_result`.
+  - The returned observation depends on the child's stop:
+    - `done`: `ok=True` with `content=answer`;
+    - any other stop: a `tool_exception` with the message "sub-agent stopped with '<reason>': <detail>. Last answer: ..." (`ErrorType` has no sub-agent value, and the frozen leaf was not changed).
+
+    The child's tokens, cost and llm_calls propagate up through the ledger chain, and `Trace.usage` sums them. If the child exhausts an ancestor limit, the parent stops `budget` at its next check.
+  - `Harness.run_traced(parent=...)` is widened to `TraceSink | None`, because the tool only sees `RunContextView.recorder`. A `TraceRecorder` parent uses `parent.child(...)`. Any other sink gets a standalone recorder with no trace dir.
+- **HarnessConfig (for T014).** There is a new field `subagents: dict | None`, which is None without `.subagents()`. Otherwise it is `{"max_depth": int, "profiles": {name: ChildProfile.model_dump(mode="json")}}`, where each rule dumps as `{"tool", "decision", "args", "rule_id"}`. The `spawn_agent` schema (with its profile enum and descriptions) is in `tools`, and `SPAWN_RULE` is in `permissions.rules`. The spec path must call `.subagents(max_depth, {name: ChildProfile(...)})` with the same values. Adding the field changes every config hash (`"subagents": null`); no test pins a literal hash.
+- **Not done here.** `ChildProfile` is not added to the package lazy exports (`__init__.py` is not in output_files); import it from `harness_builder.core.builder`. A per-profile step cap (`ledger.child(fraction, limits)`) is not exposed, because the fraction already bounds steps.
+- **Verification.** No test files were added, because T019 owns the tests. Scratchpad scripts with a routing `FakeLLMClient` checked the following:
+  - **Depth.** With `max_depth=1`, the child's spawn gets `depth_exceeded`. The negative control, `max_depth=2`, nests a grandchild with depth 2.
+  - **Event embedding.** The `call_id` matches, the event order is as above, `child.depth == 1`, `parent_run_id` is the parent's run id, and parent `Trace.usage` includes the child calls.
+  - **Narrowing.** A profile allow on a parent-denied tool is still `permission_denied`. A profile with no rules keeps the parent's allow. A profile deny narrows.
+  - **Visibility.** A subset child calling a parent tool gets `unknown_tool`. A profile naming an unregistered or hidden tool raises `ConfigError`.
+  - **Budget.** Child limits are `max_steps` 4 = floor(0.5 * 9) and `max_input_tokens` 49 950 = floor(0.5 * 99 900). When a child exhausts the parent's input-token cap, the parent stops `budget`.
+  - **Opt-out.** An exact `Rule("spawn_agent", "deny")` opts out.
+  - **Config hash.** It is stable, and differs by `max_depth`. `max_depth=0` raises `ConfigError`.
+  - **Custom runner.** A custom runner that delegates to the registry gives a `tool_exception` with no subagent event.
+  - **Trace JSON.** The nested trace round-trips through JSON.
+
+  `ruff format --check`, `ruff check` and `pyrefly check` (0 errors) are clean, and pytest gives 821 passed, 2 skipped.
