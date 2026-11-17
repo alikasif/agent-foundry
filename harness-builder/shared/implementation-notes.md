@@ -598,3 +598,58 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
   - **Accepted tradeoff:** a free-form key that is exactly a schema field name is left unchanged even if a secret occurs inside it, because it is a public field-name word.
   - 4 regression tests (25 in the file).
 - Tests: new `tests/unit/test_review_t021_fixes.py` (21 tests). I edited only the tests my change broke: test_adk_client_config (SecretStr), test_redact (SecretStr, hermetic dotenv_path), test_models_roundtrip (Settings sample) and test_context_policies (xfail removed).
+
+### T013
+- **File.** `trace/replay.py` only. No changes to the loop, the builder or the frozen leaves. No dependency was added.
+- **Import rule.** The trace layer may not import `core.builder`, `core.loop` or `core.run_context`, even under `TYPE_CHECKING`. The harness is therefore typed structurally: `Replayable` is a local Protocol, `run_traced(task) -> Awaitable[tuple[RunResult, Trace]]`, and pyrefly accepts `core.builder.Harness` for it.
+- **API (decision: the factory gets a session, not `(llm, runner)`).**
+  - `replay(trace, harness_factory, *, redactor=None) -> ReplayReport` is async.
+  - `harness_factory: HarnessFactory = Callable[[ReplaySession], Replayable]`.
+  - `ReplaySession.create(trace, redactor=)` holds `llm`, `tool_runner` and `approver`, which share one `ReplayState`.
+  - The factory wires them like this: `.llm(session.llm, retry_delay_s=0).tool_runner(session.tool_runner)`, plus `.permissions(rules, ..., approver=session.approver)` when a rule can answer `ask`.
+  - `ReplayReport(divergence: ReplayDivergence | None, trace: Trace, result: RunResult)` has a `matched` property. `trace` is the replayed trace, so T015 can diff it.
+  - `ReplayDivergence` is the existing `errors.py` exception, with `step_index`, `kind`, `expected` and `actual`.
+  - The components and `first_divergence(expected, actual, online=None)` are public, so they can be used on their own.
+- **Why shared state.** The loop turns any exception from `llm.complete` or `tool_runner.invoke` into an `error` stop. A raised `ReplayDivergence` therefore never reaches `replay()`.
+  - Each component stores the **first** divergence on `ReplayState` and then raises to halt the run. `ReplayDivergence` is a `HarnessError`, so it is never retried.
+  - `replay()` merges that stored divergence with a post-run comparison of the two traces.
+- **ReplayLLMClient.**
+  - It serves every top-level `LlmCallEvent` in step order, for all purposes (summarize calls come before the step call within a step). Child traces are not descended into.
+  - It checks `request_fingerprint(redactor.redact_model(req))` against the stored fingerprint, which the recorder computes from the redacted request.
+  - `redactor` defaults to `Redactor.from_settings(Settings.from_env())`, the recorder's default. Pass the recording's redactor when secrets come from elsewhere.
+  - A mismatch is a `request` divergence at the recorded step.
+  - A call made after the recording is exhausted is a `request` divergence with `expected=None`, at the last served step + 1.
+  - Serving a call sets `state.step_index`, which the runner and approver use.
+- **ReplayToolRunner (T011 contract).**
+  - Keyed by `(step index, call_id)`, because `call_<i>` ids repeat in every step (T021 m9).
+  - It serves only calls the recording **invoked**. **Decision:** an invoked call is a `ToolResultEvent` with `duration_ms` set. The loop sets it only around `tool_runner.invoke`; guard failures and calls skipped after a FINAL have None. The field is volatile, but it is present in loaded traces.
+  - The name and normalized args must equal the **last** `ToolCallEvent` for that key, because a pre_tool modify records two. Args are compared as canonical JSON, so `1` and `true` differ.
+  - A missing key, for example a call the recording denied, or a mismatch is a `tool_call` divergence.
+  - It returns the raw observation; `post_tool` hooks run again.
+- **ReplayApprover (not in the spec).** The approver still runs on replay, so a TTY would prompt a human and a non-TTY would auto-deny a call the recording approved. This class answers `ask` decisions from the recorded `PermissionEvent.approver_result`, keyed by `(step, call_id)`, in order. An `ask` that was not recorded is a `tool_call` divergence.
+- **Post-run comparison (`first_divergence`).**
+  - Steps are aligned by index, and the earliest step wins.
+  - Within a step the order is:
+    - an online `request` divergence;
+    - a missing LLM call: the replay made fewer `llm_call`s than the recording in that step. **Decision:** this is reported as kind `request`, with the expected fingerprint and `actual=None`;
+    - `DecisionEvent`s (stable dump);
+    - any other online divergence;
+    - `ToolCallEvent`s (call_id, name, args, validation).
+  - `stop` (stable dump of `StopInfo`) is compared last.
+  - Permission, hook, context, budget and subagent events are not compared. A changed permission outcome shows up as a `request` divergence in the next step, because the rendered observation differs.
+- **Limitations (for T015/T019/T022).**
+  - The factory must rebuild the same harness: strategy, prompt, tools, rules, hooks, budget and context policy. It must also route every LLM call through `session.llm`. A `SummarizePolicy` instance with its own client would call a real model. The named `"summarize"` policy uses the harness LLM, so it is fine.
+  - Sub-agent tools are not invoked on replay (the runner returns the recorded observation), so child traces are not replayed and `SubagentEvent`s are not compared.
+  - A recording that ended with an LLM-call `error` has no `LlmCallEvent` for the failed call. Its replay reports an extra-call `request` divergence instead of matching.
+  - Redaction is a substring replacement. A secret that only appears across message boundaries, or JSON-escaped inside rendered content, could give a false `request` divergence.
+  - Future executor preflight (T028) must not run in a replay factory; replay should need no Docker.
+- **Verification.** No test files were added, because T019 owns the tests. A scratchpad script recorded a 3-step `FakeLLMClient` ReAct run. It used empty call ids (so `call_0` repeats) and had the API key in the task. It then checked:
+  - the replay matched, with the tool body executed 0 times;
+  - a changed step-0 observation gives `request` at step 1;
+  - changed recorded args at step 1 give `tool_call` at step 1;
+  - a replay harness that denies the tool diverges at step 1;
+  - a truncated recording gives an extra-call `request` at step 2;
+  - an `ask`-approved recording replays as matched through `ReplayApprover`;
+  - pyrefly accepts `Harness` as `Replayable`.
+
+  `ruff format --check`, `ruff check` and pyrefly are clean on `replay.py`. Repo-wide, pyrefly reports 1 error, in `tools/builtin/spawn.py:86` (T012, in progress). pytest: 821 passed, 2 skipped.
