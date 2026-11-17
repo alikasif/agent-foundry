@@ -33,12 +33,16 @@ from harness_builder.spec.models import (
     RuleSpec,
 )
 from harness_builder.strategies.registry import strategy_names
+from harness_builder.tools.builtin.run_code import RUN_CODE_TOOL_NAME, run_code
 
-BUILTIN_TOOLS: dict[str, Callable[..., ToolDefinition]] = {}
+BUILTIN_TOOLS: dict[str, Callable[..., ToolDefinition]] = {
+    RUN_CODE_TOOL_NAME: run_code,
+}
 """Builtin tool name -> factory called with the ref's ``options``.
 
-Empty in M1: ``deref`` and ``spawn_agent`` are implied by the ``context`` and
-``subagents`` sections; T028 adds ``run_code``.
+``run_code`` takes ``timeout_s`` and ``network``; its executor is bound by
+``HarnessBuilder.build()``, never by the factory. ``deref`` and
+``spawn_agent`` are implied by the ``context`` and ``subagents`` sections.
 """
 
 BUILTIN_HOOKS: dict[str, Callable[..., Callable[..., Any]]] = {}

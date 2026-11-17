@@ -7,15 +7,25 @@ tools, context policy, U10 price check, sub-agent profiles) and returns a
 recorder per run. Sub-agent child harnesses are built eagerly, one per profile
 and level, so profile errors surface in ``build()``. ``from_spec`` delegates
 to ``spec.loader`` (imported lazily: the loader imports this module).
-Executor wiring is added by T028.
+
+Executor wiring (T028): when any tool needs the Executor (``ExecutorTool``,
+for example ``run_code``), ``build()`` binds the harness executor (default
+``DockerExecutor(image=Settings.docker_image)``) to the unbound ones and runs
+Docker preflight once, at the top level, unless a custom tool runner is set
+(replay) or preflight was disabled. Each run of such a harness gets a fresh
+host workdir, removed when the run ends.
 """
 
 import dataclasses
+import shutil
+import tempfile
 import uuid
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field
 
 from harness_builder.budget.ledger import BudgetLedger, PriceLookup
@@ -29,6 +39,7 @@ from harness_builder.core.protocols import (
     Approver,
     Budget,
     ContextPolicy,
+    Executor,
     LLMClient,
     PermissionPolicy,
     Strategy,
@@ -47,6 +58,7 @@ from harness_builder.core.types import (
     RunResult,
 )
 from harness_builder.errors import ConfigError
+from harness_builder.executor.docker import DockerExecutor
 from harness_builder.hooks.manager import HookManager
 from harness_builder.llm.pricing import PriceTable
 from harness_builder.llm.tokens import HeuristicCounter
@@ -59,6 +71,7 @@ from harness_builder.permissions.policy import (
 )
 from harness_builder.strategies.registry import get_strategy
 from harness_builder.tools.builtin.deref import DerefTool
+from harness_builder.tools.builtin.run_code import ExecutorTool
 from harness_builder.tools.builtin.spawn import (
     DEFAULT_MAX_DEPTH,
     SPAWN_TOOL_NAME,
@@ -156,11 +169,14 @@ class Harness:
         price_lookup: PriceLookup | None,
         trace_dir: Path | None,
         spec_snapshot: dict[str, Any] | None = None,
+        uses_workdir: bool = False,
     ) -> None:
         """Hold the wired loop and per-run factories' inputs (use the builder).
 
         ``spec_snapshot`` (spec-built harnesses) is written into top-level
         traces, so ``harness replay`` can rebuild the harness from the trace.
+        ``uses_workdir`` (a tool needs the Executor) gives every run a fresh
+        host temp dir as ``RunContext.workdir``.
         """
         self.config = config
         self.config_hash = config_hash(config)
@@ -170,6 +186,7 @@ class Harness:
         self.price_lookup = price_lookup
         self.trace_dir = trace_dir
         self.spec_snapshot = spec_snapshot
+        self.uses_workdir = uses_workdir
 
     async def run(self, task: str) -> RunResult:
         """Run ``task`` to a stop; ``trace_path`` is set when traces are written."""
@@ -188,7 +205,9 @@ class Harness:
 
         Sub-agents pass the parent's child ``ledger``, their ``depth`` and the
         parent's trace sink; the child trace is then not written to disk and
-        is returned for embedding as a ``SubagentEvent``.
+        is returned for embedding as a ``SubagentEvent``. With an executor,
+        the run's workdir is removed after the trace is finished, also when
+        the run fails or is cancelled.
         """
         run_id = uuid.uuid4().hex
         if ledger is None:
@@ -197,15 +216,23 @@ class Harness:
         messages = [Message(role="user", content=task)]
         if self.system_prompt:
             messages.insert(0, Message(role="system", content=self.system_prompt))
+        workdir = None
+        if self.uses_workdir:
+            workdir = Path(tempfile.mkdtemp(prefix=f"hb-{run_id[:12]}-")).resolve()
         ctx = RunContext(
             run_id=run_id,
             ledger=ledger,
             recorder=recorder,
             depth=depth,
+            workdir=workdir,
             messages=messages,
         )
-        result = await self.loop.run(ctx)
-        trace = recorder.finish(result.stop)
+        try:
+            result = await self.loop.run(ctx)
+            trace = recorder.finish(result.stop)
+        finally:
+            if workdir is not None:
+                shutil.rmtree(workdir, ignore_errors=True)
         path = str(recorder.path) if recorder.path is not None else None
         return result.model_copy(update={"stop": trace.stop, "trace_path": path}), trace
 
@@ -272,6 +299,8 @@ class HarnessBuilder:
         self._subagents: tuple[int, dict[str, ChildProfile]] | None = None
         self._level = 0
         self._spec_snapshot: dict[str, Any] | None = None
+        self._executor: Executor | None = None
+        self._preflight = True
 
     @classmethod
     def from_spec(
@@ -412,6 +441,20 @@ class HarnessBuilder:
         self._runner = runner
         return self
 
+    def executor(
+        self, executor: Executor | None = None, *, preflight: bool = True
+    ) -> Self:
+        """Run executor-backed tools (``run_code``) with ``executor``.
+
+        Without this call such tools get ``DockerExecutor`` with the image
+        from ``Settings.docker_image``. ``build()`` runs the executor's
+        preflight (``DockerUnavailableError`` fails fast) unless
+        ``preflight=False`` or a custom tool runner is set (replay).
+        """
+        self._executor = executor
+        self._preflight = preflight
+        return self
+
     def trace_dir(self, path: Path | str | None) -> Self:
         """Write traces under ``path``; None keeps them in memory only."""
         self._trace_dir = None if path is None else Path(path)
@@ -452,12 +495,15 @@ class HarnessBuilder:
         strategy-required tools, invalid hooks, a missing API key (default
         LLM), an unknown model price while ``max_cost_usd`` is set (U10) or an
         invalid sub-agent configuration (child errors name the profile path).
+        Raises ``DockerUnavailableError`` when a tool needs the Executor and
+        its preflight fails (nothing is executed).
         """
         settings = self._settings or Settings.from_env()
         model = self._resolve_model(settings)
         strategy = self._resolve_strategy()
         llm = self._llm or _default_llm(settings)
-        registry = ToolRegistry(self._tools)
+        executor, tools = self._bind_executor(settings)
+        registry = ToolRegistry(tools)
         redactor = Redactor.from_settings(settings)
         context = self._resolve_context(llm, model, redactor)
         visible = None if self._visible is None else list(self._visible)
@@ -501,6 +547,7 @@ class HarnessBuilder:
                     permissions,
                     approver,
                     price_lookup,
+                    executor,
                 ),
             )
             registry.register(spawn)
@@ -535,6 +582,14 @@ class HarnessBuilder:
             subagents=self._describe_subagents(),
         )
         trace_dir = settings.trace_dir if self._trace_dir is _UNSET else self._trace_dir
+        if self._level == 0 and self._preflight and self._runner is None:
+            executors = {
+                id(t.executor): t.executor
+                for t in tools
+                if isinstance(t, ExecutorTool) and t.executor is not None
+            }
+            for bound in executors.values():
+                _preflight(bound)
         return Harness(
             config=config,
             loop=loop,
@@ -545,7 +600,28 @@ class HarnessBuilder:
             price_lookup=price_lookup,
             trace_dir=trace_dir,
             spec_snapshot=self._spec_snapshot,
+            uses_workdir=executor is not None,
         )
+
+    def _bind_executor(
+        self, settings: Settings
+    ) -> tuple[Executor | None, list[ToolDefinition]]:
+        """The harness executor and the tools with unbound executor tools bound.
+
+        None when no tool needs the Executor. A tool already bound to its own
+        executor keeps it (and is preflighted too). Bound copies are made, so
+        the user's tool objects are not changed.
+        """
+        if not any(isinstance(t, ExecutorTool) for t in self._tools):
+            return None, list(self._tools)
+        executor = self._executor or DockerExecutor(image=settings.docker_image)
+        tools = [
+            t.with_executor(executor)
+            if isinstance(t, ExecutorTool) and t.executor is None
+            else t
+            for t in self._tools
+        ]
+        return executor, tools
 
     def _resolve_model(self, settings: Settings) -> ModelConfig:
         if self._model is not None:
@@ -627,13 +703,15 @@ class HarnessBuilder:
         permissions: PermissionPolicy,
         approver: Approver,
         price_lookup: PriceLookup,
+        executor: Executor | None,
     ) -> dict[str, Child]:
         """Build one child harness per profile (none at the deepest level).
 
         ``available`` is what this harness may hand down: its visible tools
         plus ``spawn_agent``. Grandchildren are built by the children's own
         ``build()``, from the child's narrowed policy and tool subset, so a
-        chain of profiles can only narrow.
+        chain of profiles can only narrow. Children share the parent's
+        ``executor`` and never preflight (``build()`` does it once on top).
         """
         assert self._subagents is not None
         max_depth, profiles = self._subagents
@@ -675,6 +753,7 @@ class HarnessBuilder:
                 child._runner = self._runner
                 child._trace_dir = None
                 child._counter = self._counter
+                child._executor = executor
                 if SPAWN_TOOL_NAME in allowed:
                     child._subagents = self._subagents
                 try:
@@ -731,6 +810,16 @@ class HarnessBuilder:
 def _describe_context(policy: ContextPolicy) -> dict[str, Any]:
     name = getattr(policy, "name", type(policy).__qualname__)
     return {"policy": name, "options": describe(policy)}
+
+
+def _preflight(executor: Executor) -> None:
+    """Run the async ``executor.preflight()`` from the sync ``build()``.
+
+    A one-off worker thread with its own event loop works both with and
+    without a running loop (CLI, anyio tests); its exception is re-raised.
+    """
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(anyio.run, executor.preflight).result()
 
 
 def _default_llm(settings: Settings) -> LLMClient:
