@@ -224,6 +224,10 @@ it compares, in this order, `tool_names`, `tool_args`, `final` and `response`
 divergence; `missing_step` is reported when one trace has a step the other lacks.
 Call ids and volatile fields never take part.
 
+In a `response` divergence, `a` and `b` are lists of sha256 hashes of the response
+texts, not the texts themselves; open the traces (`harness trace show`) to read
+them. For `tool_names`, `tool_args` and `final` the values are shown as is.
+
 Below the divergence it prints deltas (`b - a`) for steps, input tokens, output
 tokens and cost, a per-tool call count, and the stop reasons.
 
