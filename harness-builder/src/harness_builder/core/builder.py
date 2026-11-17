@@ -53,11 +53,7 @@ from harness_builder.strategies.registry import get_strategy
 from harness_builder.tools.builtin.deref import DerefTool
 from harness_builder.tools.registry import ToolRegistry
 from harness_builder.trace.models import Trace
-from harness_builder.trace.recorder import (
-    TraceRecorder,
-    config_hash,
-    request_fingerprint,
-)
+from harness_builder.trace.recorder import TraceRecorder, config_hash
 from harness_builder.trace.redact import Redactor
 
 CONTEXT_POLICIES = ("truncate", "summarize", "by_reference")
@@ -358,7 +354,8 @@ class HarnessBuilder:
         strategy = self._resolve_strategy()
         llm = self._llm or _default_llm(settings)
         registry = ToolRegistry(self._tools)
-        context = self._resolve_context(llm, model)
+        redactor = Redactor.from_settings(settings)
+        context = self._resolve_context(llm, model, redactor)
         visible = None if self._visible is None else list(self._visible)
         rules = list(self._rules)
         if isinstance(context, ByReferencePolicy) and registry.get("deref") is None:
@@ -380,7 +377,6 @@ class HarnessBuilder:
             )
         hooks = self._resolve_hooks()
         permissions = self._policy or RulePermissionPolicy(rules, self._default)
-        redactor = Redactor.from_settings(settings)
         loop = StepLoop(
             llm=llm,
             strategy=strategy,
@@ -389,7 +385,6 @@ class HarnessBuilder:
             approver=self._approver or default_approver(),
             hooks=hooks,
             model=model,
-            fingerprint=lambda req: request_fingerprint(redactor.redact_model(req)),
             context=context,
             tool_runner=self._runner,
             visible=None if visible is None else frozenset(visible),
@@ -433,7 +428,7 @@ class HarnessBuilder:
         return self._strategy
 
     def _resolve_context(
-        self, llm: LLMClient, model: ModelConfig
+        self, llm: LLMClient, model: ModelConfig, redactor: Redactor
     ) -> ContextPolicy | None:
         policy = self._context
         if policy is None:
@@ -456,7 +451,10 @@ class HarnessBuilder:
                 )
             if policy == "by_reference":
                 run_dir = options.pop("run_dir", None)
-                store = ReferenceStore(None if run_dir is None else Path(run_dir))
+                store = ReferenceStore(
+                    None if run_dir is None else Path(run_dir),
+                    redact=redactor.redact_text,
+                )
                 return ByReferencePolicy(store, counter=self._counter, **options)
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid options for context {policy!r}: {exc}") from exc

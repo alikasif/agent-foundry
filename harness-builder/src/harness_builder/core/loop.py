@@ -5,8 +5,7 @@ returned. Tool, permission and hook failures become observations that are fed
 back to the model; only failures that cannot be observations (the LLM failing
 after retries, an internal error) end the run with ``error``. Every decision is
 traced. The loop imports protocols and leaf models only: the builder injects
-the concrete layers, the ``ToolRunner`` (replay swaps it) and the request
-fingerprint function.
+the concrete layers and the ``ToolRunner`` (replay swaps it).
 """
 
 import time
@@ -47,6 +46,7 @@ from harness_builder.trace.models import (
     PermissionEvent,
     ToolCallEvent,
     ToolResultEvent,
+    request_fingerprint,
 )
 
 MAX_VETOES = 3
@@ -66,8 +66,6 @@ TRANSIENT_NAMES = frozenset(
     }
 )
 TRANSIENT_STATUS = frozenset({408, 429, 500, 502, 503, 504})
-
-Fingerprint = Callable[[LLMRequest], str]
 
 
 def is_transient(exc: Exception) -> bool:
@@ -134,8 +132,8 @@ class StepLoop:
 
     ``tool_runner`` defaults to ``registry`` (its ``invoke``); replay injects
     a recorded-output runner. ``visible`` limits the tools the model may call
-    (others are ``unknown_tool``). ``fingerprint`` must be applied to the
-    redacted request (T009 rule) so replay compares like with like.
+    (others are ``unknown_tool``). ``TraceRecorder`` recomputes the
+    ``llm_call`` fingerprint from the redacted request (T009 rule).
     """
 
     def __init__(
@@ -148,7 +146,6 @@ class StepLoop:
         approver: Approver,
         hooks: HookManager,
         model: ModelConfig,
-        fingerprint: Fingerprint,
         context: ContextPolicy | None = None,
         tool_runner: ToolRunner | None = None,
         visible: frozenset[str] | None = None,
@@ -163,7 +160,6 @@ class StepLoop:
         self.approver = approver
         self.hooks = hooks
         self.model = model
-        self.fingerprint = fingerprint
         self.context = context
         self.tool_runner: ToolRunner = tool_runner or registry
         self.visible = visible
@@ -307,7 +303,7 @@ class StepLoop:
         ctx.recorder.record(
             LlmCallEvent(
                 purpose=request.purpose,
-                request_fingerprint=self.fingerprint(request),
+                request_fingerprint=request_fingerprint(request),
                 request=request,
                 response=response,
                 usage=response.usage,
