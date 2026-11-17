@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from harness_builder.core.protocols import Executor, RunContextView, ToolDefinition
 from harness_builder.core.types import ErrorObservation, Observation, ToolRisk
 from harness_builder.errors import ConfigError, DockerUnavailableError
-from harness_builder.executor.models import ExecRequest, Language
+from harness_builder.executor.models import ExecRequest, Language, SandboxConfig
 
 RUN_CODE_TOOL_NAME = "run_code"
 DEFAULT_TIMEOUT_S = 30.0
@@ -94,24 +94,34 @@ class RunCodeTool:
     def __init__(
         self,
         *,
-        timeout_s: float = DEFAULT_TIMEOUT_S,
-        network: bool = False,
+        timeout_s: float | None = None,
+        network: bool | None = None,
         executor: Executor | None = None,
     ) -> None:
         """Configure the per-execution ``timeout_s`` and ``network`` opt-in.
 
-        Raises ``TypeError``/``ValueError`` for bad options (a located
-        ``SpecError`` when they come from a spec).
+        An unset option falls back to the executor's ``SandboxConfig`` (the
+        T027 contract: its ``timeout_s``/``network`` are request defaults),
+        then to 30 s and no network. Raises ``TypeError``/``ValueError`` for
+        bad options (a located ``SpecError`` when they come from a spec).
         """
-        if isinstance(timeout_s, bool) or not isinstance(timeout_s, int | float):
-            raise TypeError(f"timeout_s must be a number, got {timeout_s!r}")
-        if timeout_s <= 0:
-            raise ValueError(f"timeout_s must be > 0, got {timeout_s}")
-        if not isinstance(network, bool):
+        if timeout_s is not None:
+            if isinstance(timeout_s, bool) or not isinstance(timeout_s, int | float):
+                raise TypeError(f"timeout_s must be a number, got {timeout_s!r}")
+            if timeout_s <= 0:
+                raise ValueError(f"timeout_s must be > 0, got {timeout_s}")
+        if network is not None and not isinstance(network, bool):
             raise TypeError(f"network must be true or false, got {network!r}")
-        self.exec_timeout_s = float(timeout_s)
-        self.network = network
+        self.timeout_option = timeout_s
+        self.network_option = network
         self._executor = executor
+        config = getattr(executor, "config", None)
+        if not isinstance(config, SandboxConfig):
+            config = SandboxConfig(timeout_s=DEFAULT_TIMEOUT_S)
+        self.exec_timeout_s = float(
+            config.timeout_s if timeout_s is None else timeout_s
+        )
+        self.network = config.network if network is None else network
 
     @property
     def executor(self) -> Executor | None:
@@ -121,7 +131,9 @@ class RunCodeTool:
     def with_executor(self, executor: Executor) -> "RunCodeTool":
         """A copy with the same options bound to ``executor``."""
         return RunCodeTool(
-            timeout_s=self.exec_timeout_s, network=self.network, executor=executor
+            timeout_s=self.timeout_option,
+            network=self.network_option,
+            executor=executor,
         )
 
     async def fn(
@@ -161,13 +173,14 @@ class RunCodeTool:
 
 
 def run_code(
-    *, timeout_s: float = DEFAULT_TIMEOUT_S, network: bool = False
+    *, timeout_s: float | None = None, network: bool | None = None
 ) -> RunCodeTool:
     """An unbound ``run_code`` tool (``loader.BUILTIN_TOOLS["run_code"]``).
 
     ``timeout_s`` is the per-execution timeout and ``network`` opts the
-    containers into networking (off by default, FR-043). The builder binds
-    the harness executor in ``build()``.
+    containers into networking (off by default, FR-043); unset, both come
+    from the executor's ``SandboxConfig``. The builder binds the harness
+    executor in ``build()``.
     """
     return RunCodeTool(timeout_s=timeout_s, network=network)
 
