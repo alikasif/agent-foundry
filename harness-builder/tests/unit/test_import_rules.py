@@ -55,7 +55,21 @@ COMPOSITION_ROOTS: frozenset[str] = frozenset(
     {f"{PKG}.core.builder", f"{PKG}.spec.loader"}
 )
 
-CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {}
+CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
+    # T015: the CLI wires spec, builder, LLM and trace layers (lazily).
+    f"{PKG}.cli.main": frozenset(
+        {
+            f"{PKG}.core.builder",
+            f"{PKG}.llm.adk_litellm",
+            f"{PKG}.llm.fake",
+            f"{PKG}.spec.io",
+            f"{PKG}.spec.loader",
+            f"{PKG}.trace.diff",
+            f"{PKG}.trace.recorder",
+            f"{PKG}.trace.replay",
+        }
+    ),
+}
 """Explicit, reviewed exceptions: importing module -> allowed target modules.
 
 Later tasks (for example ``cli/main.py`` importing ``core.builder``) add their
