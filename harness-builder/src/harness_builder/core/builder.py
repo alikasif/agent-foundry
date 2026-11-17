@@ -63,6 +63,8 @@ from harness_builder.trace.redact import Redactor
 CONTEXT_POLICIES = ("truncate", "summarize", "by_reference")
 HOOK_ORDER: tuple[HookEvent, ...] = ("on_stop", "post_tool", "pre_tool")
 _UNSET: Any = object()
+DEREF_RULE = Rule("deref", "allow", rule_id="builtin:deref")
+"""Prepended when ``deref`` is auto-registered; reads only the run's own refs."""
 
 
 class HarnessConfig(BaseModel):
@@ -358,20 +360,26 @@ class HarnessBuilder:
         registry = ToolRegistry(self._tools)
         context = self._resolve_context(llm, model)
         visible = None if self._visible is None else list(self._visible)
+        rules = list(self._rules)
         if isinstance(context, ByReferencePolicy) and registry.get("deref") is None:
             registry.register(DerefTool(context.store))
+            rules.insert(0, DEREF_RULE)  # first match: before any "*" deny
             if visible is not None and "deref" not in visible:
                 visible.append("deref")
         self._check_tools(registry, visible, strategy)
 
         price_lookup = self._price_lookup or PriceTable().price
-        if self._limits.max_cost_usd is not None and price_lookup(model.name) is None:
+        priced = [model.name]
+        if isinstance(context, SummarizePolicy):
+            priced.append(context.model.name)
+        unpriced = [name for name in priced if price_lookup(name) is None]
+        if self._limits.max_cost_usd is not None and unpriced:
             raise ConfigError(
-                f"no price known for model {model.name!r} but max_cost_usd is set; "
+                f"no price known for model {unpriced[0]!r} but max_cost_usd is set; "
                 "add a price override or remove the cost cap"
             )
         hooks = self._resolve_hooks()
-        permissions = self._policy or RulePermissionPolicy(self._rules, self._default)
+        permissions = self._policy or RulePermissionPolicy(rules, self._default)
         redactor = Redactor.from_settings(settings)
         loop = StepLoop(
             llm=llm,
@@ -396,7 +404,7 @@ class HarnessBuilder:
             tools=registry.schemas(),
             visible_tools=visible,
             context=None if context is None else _describe_context(context),
-            permissions=self._describe_permissions(),
+            permissions=self._describe_permissions(rules),
             budget=self._limits,
             hooks={e: hooks.names(e) for e in HOOK_ORDER if hooks.names(e)},
         )
@@ -480,12 +488,12 @@ class HarnessBuilder:
                 raise ConfigError(str(exc)) from exc
         return manager
 
-    def _describe_permissions(self) -> dict[str, Any]:
+    def _describe_permissions(self, rules: list[Rule]) -> dict[str, Any]:
         if self._policy is not None:
             return {"policy": type(self._policy).__qualname__}
         return {
             "default": self._default,
-            "rules": [dataclasses.asdict(rule) for rule in self._rules],
+            "rules": [dataclasses.asdict(rule) for rule in rules],
         }
 
 
