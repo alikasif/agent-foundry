@@ -726,3 +726,64 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
   - **Trace JSON.** The nested trace round-trips through JSON.
 
   `ruff format --check`, `ruff check` and `pyrefly check` (0 errors) are clean, and pytest gives 821 passed, 2 skipped.
+
+### RALPH baseline after T013 (2026-11-17)
+- Reconciled: T012 agent stalled after committing e62eb12 (notes present); marked done. T001-T013, T016-T018, T021, T025-T027, T029, T037 done.
+- Baseline: `uv run pytest` 821 passed, 2 skipped (docker dummy + live LLM test; Docker daemon not running); ruff check clean; pyrefly 0 errors (29 suppressed).
+- No real-Docker test has run so far (Docker Desktop stopped); no live LLM call made.
+
+### T014
+- **Files.** `spec/models.py`, `spec/io.py`, `spec/loader.py` and `core/builder.py`. Two editor type fixes (`llm/adk_litellm.py`, `executor/paths.py` plus `executor/docker.py`) were requested by RALPH in the same pass. No frozen leaf was edited, no dependency was added, and `spec/__init__.py` stays import-free (LIGHT_INITS).
+- **Leaf rule shapes the models.** `spec.models` may import only the five leaves and pydantic, so it cannot use `permissions.policy.Rule`, `core.builder.ChildProfile` or `errors.SpecError`. It mirrors them as `RuleSpec` and `ChildProfileSpec`, and the loader converts them. It reuses the leaves `ModelConfig` (for `model`), `BudgetLimits` (for `budget`) and `HookEvent`. Every model is frozen with `extra="forbid"`, so a typo becomes a located error.
+- **Schema (M1).** The fields:
+  - `schema_version: Literal[1]`, **required**;
+  - `name` (min length 1) and `description`;
+  - `model: ModelConfig | None`; None means `HARNESS_MODEL`;
+  - `strategy {name="react", options}`;
+  - `prompts.system: str | {file}`;
+  - `tools: list[BuiltinToolRef{builtin, options}]`;
+  - `context {policy, max_tokens, keep_last?, ref_threshold_chars?, preview_chars?, model?} | None`;
+  - `permissions {default="deny", rules: [{tool, decision, args?, rule_id?}]}`;
+  - `budget: BudgetLimits`;
+  - `hooks: list[BuiltinHookRef{builtin, event, priority=0, options}]`;
+  - `subagents {max_depth=2 (>=1), profiles: {name: ChildProfileSpec}} | None`.
+
+  T040 adds ModuleToolRef, ModuleHookRef, sandbox, skills and evals, and the version stays 1. `ChildProfileSpec` mirrors T012's `ChildProfile`, including `model`, `system_prompt` and `strategy_options`, which are beyond designs.md 4.4.
+- **Equal config_hash (FR-016), decisions.**
+  - The loader makes exactly the builder calls a code-built harness makes. An absent section makes **no** call. For example, a missing `subagents` must not call `.subagents()`, because that registers `spawn_agent` and changes the hash.
+  - The context options default to None and are passed with `exclude_none`, so the policy constructors keep their own defaults. Those defaults differ: `keep_last` is 6 for summarize and 12 for the others. An option that does not apply to the chosen policy, such as `preview_chars` under truncate, is a located `SpecError`; it is not left to fail later as a build-time `ConfigError`.
+  - `spec_snapshot` is **not** part of `HarnessConfig`, so it never changes the hash.
+  - **Tool order is part of the hash**, because registry schemas follow registration order. Spec builtins are registered first and tools chained later with `.tools()` come after them.
+- **Builtin registries (decision).** `loader.BUILTIN_TOOLS: dict[str, factory(**options) -> ToolDefinition]` and `loader.BUILTIN_HOOKS: dict[str, factory(**options) -> hook callable]`. Both are **empty in M1**: `deref` and `spawn_agent` are implied by `context.policy: by_reference` and by `subagents`, and naming either one explicitly gives a located error with a hint. T028 adds `run_code`. Tests can `monkeypatch.setitem(loader.BUILTIN_TOOLS, ...)`. A hook is registered with `name=None`, the same as a code-built `.hook(event, fn, priority)`.
+- **spec_snapshot (decision).** It is the *resolved* spec: `prompts.system` holds the file text inlined, read as UTF-8, so CRLF becomes LF. It is dumped with `model_dump(mode="json")` and stored through the new `HarnessBuilder.spec_snapshot(dict | None)`, then passed through `Harness(spec_snapshot=)` to `TraceRecorder` for **top-level runs only** (`parent is None`). Child traces do not carry it. The recorder redacts it at `finish`. A run can therefore be rebuilt from its trace alone with `HarnessBuilder.from_spec(trace.spec_snapshot)`.
+- **API.**
+  - `HarnessBuilder.from_spec(source, *, settings=None)` is a classmethod. It lazily imports `spec.loader.load_builder`, because the loader imports `core.builder`; both are composition roots, so no allowlist entry was needed. `source` can be a file, a harness directory (`harness.yaml`, `harness.yml`, `harness.json`, in that order), a parsed `HarnessSpec`, or a `Mapping` such as a snapshot. It returns an **unbuilt** builder, so `.llm()`, `.tools()`, `.approver()` and `.trace_dir()` chain after it.
+  - `HarnessBuilder.approver(a)` is new (T013 request). `.permissions()` only replaces the approver when it is given one, so call order does not matter.
+  - `spec.io` provides `load_spec(path)`, `parse_spec(data, source)`, `read_spec_data(file)`, `find_spec_file(path)`, `write_spec(spec, path)` (`.json` writes JSON, anything else YAML; defaults are excluded), `dump_spec`, `located_path` and `spec_error(source, path, msg)`.
+  - `spec.loader` provides `load_builder(source, settings=)` and `builder_from_spec(spec, base_dir=, source=, settings=)`.
+- **Located errors.** Lines read `harness.yaml: tools[2].builtin: Field required`. With several errors there is one line per error, deduplicated. The pydantic `loc` is walked over the input data, and segments that are not in the data are union tags (`str`, `PromptFile`), so they are dropped; the exception is the last segment of a `missing` error. Parse errors read `harness.yaml:3:6: <problem>` (YAML `problem_mark`) or `h.json:1:31: <msg>`. **schema_version is checked before validation**, so a v2 spec gives `schema_version: unsupported 2; expected one of [1]`, and a spec without it gives `missing; ...`. The source is the file **name** only, not the full path.
+- **Semantic checks at load (located `SpecError`).**
+  - An unregistered strategy, including a profile's strategy (`subagents.profiles.<n>.strategy`). Strategies are named only (designs.md 4.4).
+  - An unknown builtin tool or hook.
+  - Factory `TypeError`/`ValueError` (`tools[i].options`).
+  - A prompt file that is absolute, has a drive or root, or contains `..`.
+  - A prompt file with no `base_dir`, for example a mapping source.
+  - A prompt file that cannot be read.
+
+  The remaining `ConfigError`s still come from `build()`, for example a missing model or key, an unknown price with `max_cost_usd`, or a profile tool not visible.
+- **Diagnostics fixes.**
+  - In `adk_litellm.py`, `tools` is annotated `list[types.ToolUnion] | None`, because `GenerateContentConfig.tools` is `list[Tool | Callable]` and list is invariant. Local annotations are never evaluated, so the lazy genai import stays lazy.
+  - `paths.mount_args` now accepts `Mapping[Path, str] | Mapping[PurePath, str] | None`. `docker.py` passes `req.ro_mounts` directly, and the T027 `{**d}` widening and the `PurePath` import are removed.
+  - The pyrefly CLI already reported 0 diagnostics at `--min-severity=warn` before the change; it still does (30 suppressed). The editor-side fix is therefore reasoned from the genai and typing rules, not reproduced in the CLI.
+- **For T019 (equal traces).** The spec-built trace carries `spec_snapshot` and the code-built one has None. That field is not volatile, so compare `diff_traces(a, b).identical` and the stable dumps **without** `run_id`, `created_at`, `env`, `spec_snapshot`, `latency_ms` and `duration_ms`. `config_hash` must be equal. Register a test tool with `monkeypatch.setitem(loader.BUILTIN_TOOLS, "add", lambda: add_tool)` and pass `settings=Settings(model=...)` to stay hermetic. Alternatively, chain `.tools(t)` after `from_spec` and add the same tool in code; registration order matters.
+- **For T015 (CLI).** `harness run <dir|spec>` is `HarnessBuilder.from_spec(path).llm(LLM_FACTORY(settings))...build()`. Map `SpecError` to exit 2. `replay` is `from_spec(trace.spec_snapshot)` with `.llm(session.llm, retry_delay_s=0).tool_runner(session.tool_runner).approver(session.approver).trace_dir(None)`. When `spec_snapshot is None`, exit 2 with "trace was not built from a spec". The snapshot is redacted, so a secret embedded in the spec itself would not survive (rare).
+- **For T028.** Add `loader.BUILTIN_TOOLS["run_code"] = <factory(**options)>`. Executor preflight belongs in `build()`, and a replay factory built from a snapshot must not hit Docker (T013 note).
+- **Verification.** No test files were added, because T019 owns the tests. A scratchpad script checked the following:
+  - **Code vs spec.** A code-built harness and a spec-built one were compared: model with temperature, a file prompt with CRLF on disk, a builtin tool, truncate with only `max_tokens`, a rule with `args`, budget with `max_cost_usd`, and `subagents` with a profile that has tools, a fraction and `ask` rules. They gave an equal `HarnessConfig` and `config_hash`, `diff_traces(...).identical`, and equal stable dumps (minus the fields above).
+  - **Snapshot.** It is present only on the spec trace, with the prompt inlined.
+  - **Replay.** `from_spec(snapshot)` gives the same hash, and `replay()` with `.approver(session.approver)` matches.
+  - **Negative control.** Changing `max_steps` changes the hash.
+  - **I/O.** A JSON and YAML write/load round trip passes.
+  - **Errors.** 18 invalid specs give the expected located messages.
+
+  `ruff format --check`, `ruff check` and `pyrefly check --min-severity=warn` (0) are clean, and `pytest` gives 821 passed, 2 skipped (import rules included).
