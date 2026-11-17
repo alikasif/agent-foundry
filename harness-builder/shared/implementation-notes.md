@@ -650,6 +650,8 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
   - a replay harness that denies the tool diverges at step 1;
   - a truncated recording gives an extra-call `request` at step 2;
   - an `ask`-approved recording replays as matched through `ReplayApprover`;
-  - pyrefly accepts `Harness` as `Replayable`.
+  - pyrefly accepts `Harness` as `Replayable`;
+  - the default-redactor path (no `redactor=`) matches;
+  - a pre_tool `modify` recording, with two `ToolCallEvent`s for one call_id, matches when the hook is kept, and gives `tool_call` at step 1 when the hook is dropped.
 
-  `ruff format --check`, `ruff check` and pyrefly are clean on `replay.py`. Repo-wide, pyrefly reports 1 error, in `tools/builtin/spawn.py:86` (T012, in progress). pytest: 821 passed, 2 skipped.
+  `ruff format --check .` and `ruff check .` are clean repo-wide, and pyrefly is clean on `replay.py`. Repo-wide, pyrefly reports 1 error, in `tools/builtin/spawn.py:86` (T012, in progress). pytest: 821 passed, 2 skipped.
