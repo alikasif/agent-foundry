@@ -60,6 +60,9 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
     f"{PKG}.cli.main": frozenset(
         {
             f"{PKG}.core.builder",
+            # T030: `harness doctor` runs the Docker preflight checks.
+            f"{PKG}.executor.docker_cli",
+            f"{PKG}.executor.preflight",
             f"{PKG}.llm.adk_litellm",
             f"{PKG}.llm.fake",
             f"{PKG}.spec.io",

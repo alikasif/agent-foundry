@@ -6,7 +6,8 @@ Exit codes: 0 ok; 1 run failed (or replay diverged); 2 usage or config error;
 
 Tests inject an LLM by monkeypatching ``LLM_FACTORY`` or, for subprocess
 tests, with the hidden ``--fake-llm PATH`` option (a JSON list of scripted
-``LLMResponse`` objects).
+``LLMResponse`` objects). ``harness doctor`` builds its Docker CLI through
+``DOCKER_CLI_FACTORY``, which tests monkeypatch with a ``FakeDockerCli``.
 """
 
 from __future__ import annotations
@@ -20,9 +21,13 @@ from typing import TYPE_CHECKING, Any
 import click
 
 if TYPE_CHECKING:
+    from rich.table import Table
+
     from harness_builder.config import Settings
     from harness_builder.core.builder import Harness, HarnessBuilder
     from harness_builder.core.protocols import LLMClient
+    from harness_builder.executor.docker_cli import DockerCli
+    from harness_builder.executor.preflight import DoctorReport
     from harness_builder.trace.models import Trace
     from harness_builder.trace.replay import ReplaySession
 
@@ -43,6 +48,17 @@ def _default_llm(settings: Settings) -> LLMClient:
 
 LLM_FACTORY: Callable[[Settings], LLMClient] = _default_llm
 """Builds the LLM client for ``harness run``; tests monkeypatch it."""
+
+
+def _default_docker_cli() -> DockerCli:
+    """``SubprocessDockerCli`` over the ``docker`` binary on PATH."""
+    from harness_builder.executor.docker_cli import SubprocessDockerCli
+
+    return SubprocessDockerCli()
+
+
+DOCKER_CLI_FACTORY: Callable[[], DockerCli] = _default_docker_cli
+"""Builds the Docker CLI for ``harness doctor``; tests monkeypatch it."""
 
 
 def _fail(message: str, code: int) -> click.exceptions.Exit:
@@ -255,6 +271,65 @@ def trace_show(trace_file: str) -> None:
     with _exit_codes():
         loaded = _load(trace_file)
     Console().print(render_trace(loaded))
+
+
+@main.command()
+@click.option(
+    "--clean",
+    is_flag=True,
+    help="Also remove leftover containers labelled harness-builder=1.",
+)
+def doctor(clean: bool) -> None:
+    """Check the Docker CLI, daemon and sandbox image; exit 3 if one fails.
+
+    The checks share a 5 s deadline. The image is ``HARNESS_DOCKER_IMAGE`` or
+    the bundled content-hash tag; the command that builds it is always shown.
+    """
+    import anyio
+    from rich.console import Console
+
+    from harness_builder.config import Settings
+    from harness_builder.executor.preflight import clean as clean_containers
+    from harness_builder.executor.preflight import doctor as run_doctor
+
+    with _exit_codes():
+        image = Settings.from_env().docker_image
+        report = anyio.run(run_doctor, DOCKER_CLI_FACTORY(), image)
+    Console().print(_doctor_table(report))
+    click.echo(f"image: {report.image}")
+    click.echo(f"build: {report.build_command}")
+    if clean:
+        status = {check.name: check.status for check in report.checks}
+        if status["cli"] == "ok" and status["daemon"] == "ok":
+            with _exit_codes():
+                removed = anyio.run(clean_containers, DOCKER_CLI_FACTORY())
+            click.echo(f"clean: removed {len(removed)} container(s)")
+        else:
+            click.echo("clean: skipped, Docker is not reachable", err=True)
+    failure = report.failure
+    if failure is not None:
+        raise _fail(failure.detail, EXIT_DOCKER)
+
+
+def _doctor_table(report: DoctorReport) -> Table:
+    """Rich table of the doctor checks; a failure's detail goes to stderr."""
+    from rich.table import Table
+    from rich.text import Text
+
+    styles = {"ok": "green", "fail": "bold red", "skipped": "yellow"}
+    table = Table(title="harness doctor")
+    for column in ("check", "status", "detail"):
+        table.add_column(column)
+    for check in report.checks:
+        detail = check.detail or "-"
+        if check.status == "fail":
+            detail = "see error below"
+        elif check.status == "skipped":
+            detail = "not run after an earlier failure"
+        table.add_row(
+            check.name, Text(check.status, style=styles[check.status]), Text(detail)
+        )
+    return table
 
 
 def _load(path: str) -> Trace:
