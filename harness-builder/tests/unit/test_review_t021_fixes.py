@@ -138,6 +138,39 @@ def test_record_does_not_raise_on_secret_named_env_collision() -> None:
     assert trace.steps[0].events[0].kind == "tool_result"
 
 
+# --- R2-M1: field-name keys are not rewritten; free-form keys still are -------
+
+
+def test_secret_equal_to_field_name_keeps_decision_event() -> None:
+    event = DecisionEvent(final="x")
+    assert Redactor(environ={"MY_KEY": "parse_error"}).redact_model(event) == event
+
+
+def test_secret_equal_to_field_name_keeps_tool_call_event() -> None:
+    redactor = Redactor(environ={"X_TOKEN": "validation"})
+    event = ToolCallEvent(call_id="c", name="n", args={"a": 1})
+    assert redactor.redact_model(event) == event
+
+
+def test_free_form_dict_key_with_secret_is_still_redacted() -> None:
+    redactor = Redactor(secrets={"S": SECRET}, environ={})
+    event = ToolCallEvent(call_id="c", name="n", args={SECRET: "v"})
+    out = redactor.redact_model(event)
+    assert out.args == {"[REDACTED:S]": "v"}
+    assert SECRET not in out.model_dump_json()
+
+
+def test_recorder_survives_field_name_secret_in_nested_trace() -> None:
+    rec = recorder(Redactor(environ={"MY_KEY": "observation"}))
+    rec.record(
+        ToolResultEvent(call_id="c", observation=Observation(call_id="c", ok=True))
+    )
+    trace = rec.finish(StopInfo(reason="done"))
+    event = trace.steps[0].events[0]
+    assert isinstance(event, ToolResultEvent)
+    assert event.observation.ok
+
+
 # --- M3 / m1: default redactor covers .env secrets; key is a SecretStr --------
 
 

@@ -43,19 +43,36 @@ def is_secret_name(name: str) -> bool:
     return any(part in upper for part in SECRET_NAME_PARTS)
 
 
-@functools.cache
 def literal_fields(model_type: type[BaseModel]) -> LiteralFields:
     """``(field name, constant)`` pairs of every Literal/enum field in the schema.
 
     Collected from ``model_json_schema()`` at any depth (nested models, unions,
     ``$defs``). A model without a JSON schema yields no pairs.
     """
+    return _schema_info(model_type)[0]
+
+
+def field_names(model_type: type[BaseModel]) -> frozenset[str]:
+    """Property names of the model and every nested model in its schema.
+
+    Dict keys equal to one of these are public field names, never secrets, so
+    ``redact_model`` leaves them unchanged (review T021 R2-M1).
+    """
+    return _schema_info(model_type)[1]
+
+
+@functools.cache
+def _schema_info(
+    model_type: type[BaseModel],
+) -> tuple[LiteralFields, frozenset[str]]:
+    """One cached schema walk: Literal ``(field, constant)`` pairs and names."""
     try:
         schema = model_type.model_json_schema()
     except PydanticUserError:
-        return frozenset()
+        return frozenset(), frozenset()
     defs = schema.get("$defs", {})
     pairs: set[tuple[str, str]] = set()
+    names: set[str] = set()
 
     def walk(node: Any) -> None:
         if isinstance(node, list):
@@ -66,13 +83,14 @@ def literal_fields(model_type: type[BaseModel]) -> LiteralFields:
             return
         properties = node.get("properties")
         if isinstance(properties, dict):
+            names.update(properties)
             for name, prop in properties.items():
                 pairs.update((name, value) for value in _constants(prop, defs))
         for item in node.values():
             walk(item)
 
     walk(schema)
-    return frozenset(pairs)
+    return frozenset(pairs), frozenset(names)
 
 
 def _constants(prop: Any, defs: dict[str, Any]) -> list[str]:
@@ -152,25 +170,31 @@ class Redactor:
             text = text.replace(value, marker)
         return text
 
-    def redact(self, value: Any, keep: LiteralFields = frozenset()) -> Any:
+    def redact(
+        self,
+        value: Any,
+        keep: LiteralFields = frozenset(),
+        names: frozenset[str] = frozenset(),
+    ) -> Any:
         """Redact strings inside a JSON-compatible value (keys included).
 
         A string stored under key ``k`` is left as is when ``(k, string)`` is
-        in ``keep`` (see ``literal_fields``).
+        in ``keep`` (see ``literal_fields``); a key in ``names`` (see
+        ``field_names``) is left as is. Other keys are redacted.
         """
         if isinstance(value, str):
             return self.redact_text(value)
         if isinstance(value, dict):
             return {
-                self.redact_text(str(key)): (
+                (key if key in names else self.redact_text(str(key))): (
                     item
                     if isinstance(item, str) and (key, item) in keep
-                    else self.redact(item, keep)
+                    else self.redact(item, keep, names)
                 )
                 for key, item in value.items()
             }
         if isinstance(value, list | tuple):
-            return [self.redact(item, keep) for item in value]
+            return [self.redact(item, keep, names) for item in value]
         return value
 
     def redact_model(self, model: M) -> M:
@@ -178,15 +202,20 @@ class Redactor:
 
         The model is dumped to JSON-compatible data, redacted and re-validated,
         so secrets containing JSON escape characters are still matched. Literal
-        fields keep their schema constants. If a typed scalar field (such as a
-        datetime) no longer validates because a secret occurred inside it, that
-        one field keeps its original value; it cannot hold free text. Anything
+        fields keep their schema constants, and keys that are schema field
+        names are not rewritten; keys of free-form dicts are. If a typed scalar
+        field (such as a datetime) no longer validates because a secret occurred
+        inside it, that one field keeps its original value; it cannot hold free
+        text. Anything
         else raises ``RedactionError``: the unredacted model is never returned.
         """
         if not self._pairs:
             return model
         data = model.model_dump(mode="json")
-        redacted = self.redact(data, literal_fields(type(model)))
+        model_type = type(model)
+        redacted = self.redact(
+            data, literal_fields(model_type), field_names(model_type)
+        )
         try:
             return model.model_validate(redacted)
         except ValidationError as exc:

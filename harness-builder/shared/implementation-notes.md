@@ -592,4 +592,9 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
 - **m5:** `ToolRegistry.validate` dumps with `by_alias=True`. **m8:** a caveat comment on `candidate_keys` about bare-name provider collisions. **m6:** not done (not trivial without risk); the builder or T004 could check `args_model` fields against `fn` parameters later.
 - **m10:** the unnecessary `int()` is removed from tokens.py. The `yaml` import has `# pyrefly: ignore[untyped-import]`. `types-PyYAML` was not added: it needs a planning task, as pyproject is shared. pyrefly: 0 diagnostics at warn level.
 - **Not done here:** M4 (tool visibility) and M5 (loop contracts) belong to T011/T012.
+- **R2-M1 (round 2): dict keys that are field names are not rewritten.** `redact()` rewrote every dict key, including the field names of the model dump, so a secret equal to a field name (`MY_KEY=parse_error`, `X_TOKEN=validation`) made `record()` raise `RedactionError`. The fix:
+  - One cached schema walk (`_schema_info`) now also collects every property name of the model and its nested models, through the new `field_names(model_type)`.
+  - `redact(value, keep, names)` leaves a key in `names` unchanged. Other keys in free-form dicts (`args`, `content`, `spec_snapshot`) are still redacted.
+  - **Accepted tradeoff:** a free-form key that is exactly a schema field name is left unchanged even if a secret occurs inside it, because it is a public field-name word.
+  - 4 regression tests (25 in the file).
 - Tests: new `tests/unit/test_review_t021_fixes.py` (21 tests). I edited only the tests my change broke: test_adk_client_config (SecretStr), test_redact (SecretStr, hermetic dotenv_path), test_models_roundtrip (Settings sample) and test_context_policies (xfail removed).
