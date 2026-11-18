@@ -787,6 +787,39 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
   - **Errors.** 18 invalid specs give the expected located messages.
 
   `ruff format --check`, `ruff check` and `pyrefly check --min-severity=warn` (0) are clean, and `pytest` gives 821 passed, 2 skipped (import rules included).
+- **T022 review round 1 fixes (commit 8aa3d60).**
+  - **B1, path confinement.** `spec.loader.resolve_inside(base_dir, rel_path, source, where) -> Path` keeps the lexical check (absolute paths, drive, root and `..`), then resolves `base_dir / rel` and requires `target.is_relative_to(base_dir.resolve())`. `resolve()` follows symlinks and junctions. A failure is the located error `<where>: must resolve inside the harness directory (a link leaves it)`. `_system_prompt` reads through this helper, and **T040 must use it for every other spec file reference**: module tools and hooks, and eval files. Tests cover a Windows junction made with `mklink /J`, which passed here. The `os.symlink` test skips without the privilege (WinError 1314 on this machine).
+  - **M1, located `SpecError`s at load.** They are raised before any builder call by `_check_tool_needs`, `_strategy` and `_check_required`. **Available tools** below means the declared builtins plus the implied `deref` (with `by_reference`) and `spawn_agent` (with `subagents`).
+
+    | Problem | Location | Check |
+    |---|---|---|
+    | Strategy options | `strategy.options` / `subagents.profiles.<n>.strategy_options` | `get_strategy(name, options)` runs once at load, and its `ConfigError`, `TypeError` or `ValueError` is re-raised located |
+    | Duplicate builtin | `tools[i].builtin`, with "also tools[j]" | |
+    | Strategy `required_tools` not available | `strategy.name` | checked against the available tools |
+    | Profile tools not available | `subagents.profiles.<n>.tools` | top level |
+    | Profile strategy's `required_tools` | `subagents.profiles.<n>.strategy` | checked against the profile's tool set |
+    | Inherited strategy's `required_tools` missing from the profile's tool subset | `subagents.profiles.<n>.tools` | |
+
+    **Consequence:** a spec must declare what its strategy requires. A codeact spec that relied on chaining `.tools(run_code)` in code now fails at load; no test or doc did that. The strategy object built for the check is discarded, and `build()` constructs it again. `ConfigError` or `DockerUnavailableError` at `build()` remains for environment-dependent problems: a missing model or key, an unknown price under a cost cap, and Docker.
+  - **m3.** There is a new spec model, `BudgetSpec`: `max_steps >= 1` (default `BudgetLimits().max_steps`), token limits `>= 1`, `max_cost_usd >= 0`. The frozen leaf `BudgetLimits` is unchanged, so code-built limits are still unbounded; a leaf `ge=1` remains a reviewer option. `spec_snapshot` has the same keys as before. `keep_last > max_tokens` is still accepted (m3 second half, not done).
+  - **m1 (core/loop.py).** A pre_tool `stop` now records a `ToolResultEvent` with a `hook_blocked` observation (the hook's reason) before `_VetoStopError`, so every `tool_call` is paired. `duration_ms` is None, so replay does not treat the call as invoked. Replay does not compare `tool_result` events.
+  - **m9 (cli/main.py), deviation.** `_exit_codes` now maps any other `HarnessError` to **exit 1** with `error: <Type>: <msg>`, and `OSError` to exit 2. The `--trace` write moved inside the context manager. RALPH's message asked for exit 2 for other `HarnessError`s. I followed the reviewer and the exit-code table ("1 run failed"), because these errors (for example a `RedactionError` in `finish`) happen during a run, not in usage or config. Flip `EXIT_FAILED` to `EXIT_USAGE` in that one clause if RALPH prefers 2. T030's `doctor` hunks were kept.
+  - **Accepted or deferred, no code change:**
+    - m2: an ancestor-aware budget recheck needs a protocol change; optional, deferred.
+    - m4: the nested child-error prefix is cosmetic. It is mostly moot for spec users, because the M1 pre-checks now catch profile errors at load.
+    - m5: the `SubagentRunner` exception wrap belongs to T012 follow-up and was not done here.
+    - m6: no `spawn_agent` wall-clock timeout; recorded for the M2 latency work.
+    - m7: replay redactor env dependence, noted in T013. A docstring and `--help` mention remain to do.
+    - m8: unasked recorded invoked calls are not reported as leftovers; deferred to the T013 owner.
+  - **Tests.** `tests/unit/test_spec_loader_review.py` has 21 tests, one of which skips (the symlink test). They cover:
+    - the junction and symlink cases;
+    - lexical escapes, `base_dir=None` and the resolved target;
+    - 8 located-error cases, the five from the review plus the profile `strategy_options`, an inherited codeact strategy missing from a profile subset, and `max_steps: 0`;
+    - two positive controls: implied tools in profile subsets, and codeact with a declared `run_code`;
+    - the paired `tool_result` after a pre_tool stop;
+    - the CLI `--trace` write failure (exit 2) and a generic `HarnessError` (exit 1), with no traceback in either.
+
+    `ruff check .` is clean. `ruff format --check` flags only other agents' in-progress files: `docs/extending.md`, `docs/layers.md` and `tests/unit/test_docker_executor.py`. `pyrefly --min-severity=warn` reports 0, and `pytest` gives 1126 passed, 31 skipped.
 
 ### T015
 - **Files.** `cli/main.py` (group and commands), new `cli/trace_view.py` (`render_trace(trace) -> RenderableType` for `trace show`). Minimal wiring: one `CROSS_LAYER_ALLOWLIST` entry for `harness_builder.cli.main` in `tests/unit/test_import_rules.py` (core.builder, llm.adk_litellm, llm.fake, spec.io, spec.loader, trace.diff, trace.recorder, trace.replay); the rule-2 check rejects even lazy cross-layer imports. No frozen leaf, no dependency, `cli/__init__.py` untouched.
