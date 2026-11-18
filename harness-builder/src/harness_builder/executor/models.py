@@ -20,7 +20,7 @@ class ExecRequest(BaseModel):
     language: Language
     code: str
     workdir: Path
-    timeout_s: float = 30.0
+    timeout_s: float = Field(default=30.0, gt=0, allow_inf_nan=False)
     network: bool = False
     env: dict[str, str] = Field(default_factory=dict)
     ro_mounts: dict[Path, str] = Field(default_factory=dict)
@@ -56,10 +56,11 @@ class SandboxConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     image: str | None = None
-    timeout_s: float = 30.0
-    output_cap_bytes: int = 65536
-    memory_mb: int = 512
-    cpus: float = 1.0
-    pids: int = 128
+    # Limits must be positive: pids <= 0 would disable the fork-bomb cap.
+    timeout_s: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+    output_cap_bytes: int = Field(default=65536, gt=0)
+    memory_mb: int = Field(default=512, gt=0)
+    cpus: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    pids: int = Field(default=128, gt=0)
     network: bool = False
     state_mode: Literal["stateless", "session"] = "stateless"

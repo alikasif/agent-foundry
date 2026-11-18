@@ -175,6 +175,7 @@ async def _check(
 
 
 def _advice(name: CheckName, reason: str, tag: str, build: str) -> str:
+    reason = reason.rstrip(".")  # stderr often ends with "."; avoid "..".
     if name == "cli":
         return (
             f"Docker CLI is not usable: {reason}. Install or repair Docker Desktop "

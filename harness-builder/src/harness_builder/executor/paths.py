@@ -7,20 +7,36 @@ separators. Host paths keep their native form (``C:\\work`` on Windows,
 
 The Docker socket is never mounted: the socket itself, the Windows named pipe,
 and any POSIX directory that contains the socket (``/``, ``/var``, ``/run``,
-``/var/run``) are rejected with ``ConfigError``.
+``/var/run``) are rejected with ``ConfigError``. The same holds for podman and
+containerd sockets, macOS ``/private/var/run``, and, for host sources on POSIX,
+the per-user sockets from ``$HOME``, ``$XDG_RUNTIME_DIR`` and ``$DOCKER_HOST``.
 """
 
-from collections.abc import Mapping
+import os
+from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 from harness_builder.errors import ConfigError
 
 WORK_DIR = "/work"
-SOCKET_NAMES = frozenset({"docker.sock", "docker_engine"})
+SOCKET_NAMES = frozenset(
+    {
+        "docker.sock",
+        "docker.sock.raw",
+        "docker_engine",
+        "podman.sock",
+        "containerd.sock",
+    }
+)
 POSIX_SOCKET_PATHS = (
     PurePosixPath("/var/run/docker.sock"),
     PurePosixPath("/run/docker.sock"),
+    PurePosixPath("/private/var/run/docker.sock"),  # macOS: /var -> /private/var
+    PurePosixPath("/run/podman/podman.sock"),
+    PurePosixPath("/run/containerd/containerd.sock"),
 )
+# Per-user sockets under $HOME (Docker Desktop for Mac/Linux).
+HOME_SOCKET_PATHS = (".docker/run/docker.sock", ".docker/desktop/docker.sock")
 WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\"
 # Characters that would break the CSV value parsed by `docker --mount`.
 _MOUNT_UNSAFE = frozenset(',"\r\n')
@@ -66,7 +82,8 @@ def host_path(path: PurePath) -> str:
         raise ConfigError(f"bind mount source must be absolute: {path}")
     text = str(resolved)
     _check_mount_chars(text, "source")
-    if is_docker_socket_path(resolved):
+    extra = host_socket_paths(os.environ) if os.name != "nt" else ()
+    if is_docker_socket_path(resolved, extra):
         raise ConfigError(f"refusing to mount the Docker socket: {path}")
     return text
 
@@ -83,14 +100,39 @@ def container_path(dst: str) -> str:
     return text
 
 
-def is_docker_socket_path(path: PurePath) -> bool:
-    """True if mounting ``path`` would expose the Docker socket or named pipe."""
+def is_docker_socket_path(
+    path: PurePath, extra_sockets: Iterable[PurePosixPath] = ()
+) -> bool:
+    """True if mounting ``path`` would expose a container-engine socket or pipe.
+
+    ``path`` is rejected when its name is a known socket name or when it is
+    (or contains) a known POSIX socket path. ``extra_sockets`` adds
+    host-specific socket paths (see ``host_socket_paths``). This is a
+    denylist; a source-root allowlist would be stricter.
+    """
     if path.name.lower() in SOCKET_NAMES:
         return True
     if isinstance(path, PureWindowsPath):
         return str(path).lower().startswith(WINDOWS_PIPE_PREFIX)
     posix = PurePosixPath(path)
-    return any(sock.is_relative_to(posix) for sock in POSIX_SOCKET_PATHS)
+    sockets = (*POSIX_SOCKET_PATHS, *extra_sockets)
+    return any(sock.is_relative_to(posix) for sock in sockets)
+
+
+def host_socket_paths(env: Mapping[str, str]) -> tuple[PurePosixPath, ...]:
+    """Socket paths that depend on the host user: ``$HOME`` Docker Desktop
+    sockets, rootless ``$XDG_RUNTIME_DIR/docker.sock`` and a ``unix://``
+    ``$DOCKER_HOST``. Relative values (e.g. a Windows ``HOME``) are ignored.
+    """
+    candidates: list[str] = []
+    if home := env.get("HOME"):
+        candidates += [f"{home}/{rel}" for rel in HOME_SOCKET_PATHS]
+    if runtime := env.get("XDG_RUNTIME_DIR"):
+        candidates.append(f"{runtime}/docker.sock")
+    if (host := env.get("DOCKER_HOST", "")).startswith("unix://"):
+        candidates.append(host.removeprefix("unix://"))
+    paths = (PurePosixPath(c) for c in candidates)
+    return tuple(p for p in paths if p.is_absolute())
 
 
 def _check_mount_chars(text: str, role: str) -> None:

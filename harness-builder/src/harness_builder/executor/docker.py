@@ -3,8 +3,11 @@
 Lifecycle (U8): stage the code under ``<workdir>/.hb/``, ``docker create``
 with the isolation flags, ``docker start -a`` under the request timeout with a
 per-stream output cap, ``docker kill`` on timeout, ``docker inspect`` for the
-exit code and OOM flag, read the FINAL file, and always ``docker rm -f`` in
-``finally`` (shielded from cancellation). Containers are stateless (U1): only
+exit code and OOM flag, then ``docker rm -f`` (shielded from cancellation, and
+always run, also from ``finally``). The FINAL file is read only after a
+successful ``rm -f`` and only if ``.hb`` is still a real directory, so a
+still-running container cannot race the host-side read. Containers are
+stateless (U1): only
 files in the per-harness-run ``/work`` survive between executions.
 
 The container environment is an explicit allowlist; ``os.environ`` is never
@@ -16,6 +19,7 @@ import json
 import logging
 import os
 import re
+import stat
 import sys
 import uuid
 from pathlib import Path
@@ -43,6 +47,10 @@ KILL_TIMEOUT_S = 10.0
 RM_TIMEOUT_S = 15.0
 _NAME_UNSAFE = re.compile(r"[^a-zA-Z0-9_.-]")
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# POSIX-only open flags (0 on Windows): never follow a final-component link,
+# never block on a FIFO swapped in for the FINAL file.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +118,25 @@ class DockerExecutor:
         hb_dir = _hb_dir(req.workdir)
         code_file, final_file = hb_dir / code_name, hb_dir / final_name
         started = anyio.current_time()
+        staged = (code_file, final_file)
         try:
             final_file.unlink(missing_ok=True)
             _stage(code_file, req.code)
-            return await self._lifecycle(req, name, args, final_file, started)
-        finally:
-            with anyio.CancelScope(shield=True):
-                await self._remove(name)
-            code_file.unlink(missing_ok=True)
-            final_file.unlink(missing_ok=True)
+            result = await self._lifecycle(req, name, args, started)
+        except BaseException:
+            if await self._remove(name):
+                _discard(hb_dir, staged)
+            raise
+        # FINAL is read only once the container is gone: a live container
+        # could otherwise swap the file or `.hb` for a link to a host path.
+        if not await self._remove(name) or not _is_real_dir(hb_dir):
+            logger.warning("FINAL of %s ignored: container or .hb unsafe", name)
+            return result
+        final = read_final(final_file, self.config.output_cap_bytes)
+        _discard(hb_dir, staged)
+        return result.model_copy(
+            update={"final_set": final is not None, "final_value": final}
+        )
 
     def create_args(
         self,
@@ -184,9 +202,9 @@ class DockerExecutor:
         req: ExecRequest,
         name: str,
         create_args: list[str],
-        final_file: Path,
         started: float,
     ) -> ExecResult:
+        """Create, start, kill on timeout and inspect; FINAL is left unset."""
         created = await self.cli.run(create_args, timeout_s=CREATE_TIMEOUT_S)
         if not created.ok:
             raise DockerUnavailableError(
@@ -202,18 +220,14 @@ class DockerExecutor:
             )
         except TimeoutError:
             await self._kill(name)
-            final = read_final(final_file, cap)
             return ExecResult(
                 exit_code=None,
                 timed_out=True,
                 duration_s=anyio.current_time() - started,
-                final_set=final is not None,
-                final_value=final,
                 container_name=name,
                 image=self.image,
             )
         exit_code, oom_killed = await self._inspect(name, output.exit_code)
-        final = read_final(final_file, cap)
         return ExecResult(
             exit_code=exit_code,
             stdout=output.stdout,
@@ -221,8 +235,6 @@ class DockerExecutor:
             truncated=output.truncated,
             oom_killed=oom_killed,
             duration_s=anyio.current_time() - started,
-            final_set=final is not None,
-            final_value=final,
             container_name=name,
             image=self.image,
         )
@@ -250,27 +262,43 @@ class DockerExecutor:
         except (TimeoutError, DockerUnavailableError) as exc:
             logger.warning("docker kill %s failed: %r", name, exc)
 
-    async def _remove(self, name: str) -> None:
-        """``docker rm -f``; failures are logged, never raised over the result."""
-        try:
-            result = await self.cli.run(["rm", "-f", name], timeout_s=RM_TIMEOUT_S)
-        except (TimeoutError, DockerUnavailableError) as exc:
-            logger.warning("docker rm -f %s failed: %r", name, exc)
-            return
+    async def _remove(self, name: str) -> bool:
+        """Shielded ``docker rm -f``; True only when it exited 0.
+
+        Failures are logged, never raised over the result.
+        """
+        with anyio.CancelScope(shield=True):
+            try:
+                result = await self.cli.run(["rm", "-f", name], timeout_s=RM_TIMEOUT_S)
+            except (TimeoutError, DockerUnavailableError) as exc:
+                logger.warning("docker rm -f %s failed: %r", name, exc)
+                return False
         if not result.ok:
-            logger.debug("docker rm -f %s: %s", name, _first_line(result.stderr))
+            logger.warning("docker rm -f %s: %s", name, _first_line(result.stderr))
+        return result.ok
 
 
 def read_final(path: Path, cap_bytes: int) -> str | None:
-    """The FINAL answer in ``path``, or None when the file is absent.
+    """The FINAL answer in ``path``, or None when absent or not a regular file.
 
-    The file is written by untrusted code, so a symlink is ignored and at most
-    ``cap_bytes`` are read. A JSON string is decoded; anything else is returned
-    as raw text.
+    The file is written by untrusted code, so the open never follows a link
+    (``O_NOFOLLOW`` on POSIX; on Windows the opened file must be the one
+    ``lstat`` saw) and at most ``cap_bytes`` are read. A JSON string is
+    decoded; anything else is returned as raw text.
     """
-    if path.is_symlink() or not path.is_file():
+    flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | getattr(os, "O_BINARY", 0)
+    try:
+        seen = os.lstat(path)
+        if not stat.S_ISREG(seen.st_mode) or _is_reparse_point(seen):
+            return None
+        fd = os.open(path, flags)
+    except OSError:
         return None
-    with path.open("rb") as handle:
+    with os.fdopen(fd, "rb") as handle:
+        opened = os.fstat(fd)
+        same = (opened.st_dev, opened.st_ino) == (seen.st_dev, seen.st_ino)
+        if not stat.S_ISREG(opened.st_mode) or not same:
+            return None
         text = handle.read(cap_bytes).decode("utf-8", errors="replace")
     try:
         value = json.loads(text)
@@ -282,10 +310,33 @@ def read_final(path: Path, cap_bytes: int) -> str | None:
 def _hb_dir(workdir: Path) -> Path:
     """Create ``<workdir>/.hb``, refusing a symlink or non-directory there."""
     hb_dir = workdir / HB_DIR
-    if hb_dir.is_symlink() or (hb_dir.exists() and not hb_dir.is_dir()):
+    if hb_dir.is_symlink() or (hb_dir.exists() and not _is_real_dir(hb_dir)):
         raise ConfigError(f"{hb_dir} must be a real directory, not a link or file")
     hb_dir.mkdir(parents=True, exist_ok=True)
     return hb_dir
+
+
+def _discard(hb_dir: Path, files: tuple[Path, ...]) -> None:
+    """Unlink the staged ``files``, only while ``hb_dir`` is a real directory."""
+    if not _is_real_dir(hb_dir):
+        return
+    for path in files:
+        path.unlink(missing_ok=True)
+
+
+def _is_real_dir(path: Path) -> bool:
+    """True for a directory that is not a symlink, junction or other reparse point."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and not _is_reparse_point(info)
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    """True for a Windows reparse point (junction, symlink); always False on POSIX."""
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _stage(path: Path, code: str) -> None:
