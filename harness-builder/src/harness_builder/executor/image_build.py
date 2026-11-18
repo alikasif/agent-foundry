@@ -1,7 +1,8 @@
 """Sandbox image tag and build command.
 
 The tag is ``harness-builder-sandbox:<hash>``, where the hash covers the files
-that define the image, so a changed Dockerfile or entry script gets a new tag.
+that define the image, so a changed Dockerfile, entry script or pinned
+requirements file gets a new tag.
 """
 
 import hashlib
@@ -10,7 +11,7 @@ from pathlib import Path
 IMAGE_DIR = Path(__file__).parent / "image"
 IMAGE_REPO = "harness-builder-sandbox"
 # Files that define the image. Add new image inputs here.
-IMAGE_FILES = ("Dockerfile", "hb_entry.py")
+IMAGE_FILES = ("Dockerfile", "hb_entry.py", "requirements.txt")
 TAG_HASH_LEN = 12
 
 

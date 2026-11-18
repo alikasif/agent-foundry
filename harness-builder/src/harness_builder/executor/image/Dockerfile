@@ -7,8 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Curated package set (OQ-6 ASSUMED); versions match the host uv.lock.
-RUN pip install --no-cache-dir "pydantic==2.14.3" "pyyaml==6.0.3"
+# Curated package set (OQ-6 ASSUMED): every package, transitive ones included,
+# pinned with sha256 hashes in requirements.txt (versions match the host
+# uv.lock). Wheels only, so no sdist build can pull unhashed build deps.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: \
+        -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
 
 # Non-root user. POSIX hosts override it with --user $(id -u):$(id -g).
 RUN useradd --uid 10001 --user-group --no-create-home --home-dir /tmp \
