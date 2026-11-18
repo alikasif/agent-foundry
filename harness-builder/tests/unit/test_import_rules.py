@@ -319,6 +319,58 @@ def all_violations(module: str, edges: list[Edge]) -> list[str]:
     return [problem for check in CHECKS for problem in check(module, edges)]
 
 
+def import_graph(
+    edges_by_module: dict[str, list[Edge]],
+) -> dict[str, set[str]]:
+    """Internal module graph: lazy edges count, ``TYPE_CHECKING`` ones do not."""
+    return {
+        module: {
+            edge.target
+            for edge in edges
+            if not edge.type_only
+            and edge.target in edges_by_module
+            and edge.target != module
+        }
+        for module, edges in edges_by_module.items()
+    }
+
+
+def cycles(graph: dict[str, set[str]]) -> list[list[str]]:
+    """Strongly connected components with more than one module (Tarjan)."""
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    found: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        index[node] = low[node] = len(index)
+        stack.append(node)
+        on_stack.add(node)
+        for target in sorted(graph[node]):
+            if target not in index:
+                visit(target)
+                low[node] = min(low[node], low[target])
+            elif target in on_stack:
+                low[node] = min(low[node], index[target])
+        if low[node] != index[node]:
+            return
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.discard(member)
+            component.append(member)
+            if member == node:
+                break
+        if len(component) > 1:
+            found.append(sorted(component))
+
+    for node in sorted(graph):
+        if node not in index:
+            visit(node)
+    return found
+
+
 # --- the real source tree -------------------------------------------------
 
 
@@ -345,6 +397,12 @@ def test_walk_marks_lazy_and_type_checking_imports() -> None:
 @pytest.mark.parametrize("module", sorted(MODULES))
 def test_source_module_follows_import_rules(module: str) -> None:
     assert all_violations(module, _edges_of(module)) == []
+
+
+def test_source_tree_has_no_import_cycle() -> None:
+    """T024 B1: no cycle, counting lazy imports (``TYPE_CHECKING`` excluded)."""
+    graph = import_graph({module: _edges_of(module) for module in MODULES})
+    assert cycles(graph) == []
 
 
 @pytest.mark.parametrize("module", sorted(LEAVES | {ERRORS}))
@@ -519,6 +577,37 @@ def test_heavy_import_at_module_level_is_rejected(src: str) -> None:
 )
 def test_heavy_import_lazy_or_type_only_is_allowed(src: str) -> None:
     assert _violations(f"{PKG}.llm.tokens", src) == []
+
+
+CYCLE_A = f"{PKG}.layer_a.mod"
+CYCLE_B = f"{PKG}.layer_b.mod"
+CYCLE_KNOWN = frozenset({CYCLE_A, CYCLE_B})
+
+
+def _synthetic_graph(source_a: str, source_b: str) -> dict[str, set[str]]:
+    return import_graph(
+        {
+            CYCLE_A: collect_edges(CYCLE_A, source_a, known=CYCLE_KNOWN),
+            CYCLE_B: collect_edges(CYCLE_B, source_b, known=CYCLE_KNOWN),
+        }
+    )
+
+
+def test_lazy_import_cycle_is_detected() -> None:
+    graph = _synthetic_graph(
+        "def f():\n    from harness_builder.layer_b.mod import B\n",
+        "from harness_builder.layer_a.mod import A\n",
+    )
+    assert cycles(graph) == [[CYCLE_A, CYCLE_B]]
+
+
+def test_type_checking_back_edge_is_not_a_cycle() -> None:
+    graph = _synthetic_graph(
+        "def f():\n    from harness_builder.layer_b.mod import B\n",
+        "if TYPE_CHECKING:\n    from harness_builder.layer_a.mod import A\n",
+    )
+    assert graph[CYCLE_A] == {CYCLE_B}
+    assert cycles(graph) == []
 
 
 def test_eager_reexport_in_leaf_package_init_is_rejected() -> None:

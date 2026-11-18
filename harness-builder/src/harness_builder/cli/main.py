@@ -162,6 +162,7 @@ def _spec_builder(
     A ``--strategy`` override is applied to the spec itself, so the trace's
     ``spec_snapshot`` names the strategy that ran and replay matches.
     """
+    from harness_builder.core.builder import HarnessBuilder
     from harness_builder.spec.io import find_spec_file, parse_spec, read_spec_data
     from harness_builder.spec.loader import builder_from_spec
     from harness_builder.spec.models import StrategySpec
@@ -171,7 +172,10 @@ def _spec_builder(
     if strategy is not None and strategy != spec.strategy.name:
         spec = spec.model_copy(update={"strategy": StrategySpec(name=strategy)})
     builder = builder_from_spec(
-        spec, base_dir=file.parent, source=file.name, settings=settings
+        spec,
+        builder=HarnessBuilder(spec.name, settings),
+        base_dir=file.parent,
+        source=file.name,
     )
     return builder, spec.model.name if spec.model is not None else None
 

@@ -6,53 +6,22 @@ a parent and a child policy so that a sub-agent can only be stricter than its
 parent: deny > ask > allow.
 
 Globs use ``fnmatch.fnmatchcase`` (case-sensitive on every platform). ``*``
-also matches ``/`` and ``..``, so an arg glob is not a path guard.
+also matches ``/`` and ``..``, so an arg glob is not a path guard. ``Rule``
+is defined in the ``core.types`` leaf (T024 B1) and re-exported here.
 """
 
-import json
 from collections.abc import Sequence
-from fnmatch import fnmatchcase
-from typing import Any
-
-from pydantic.dataclasses import dataclass
 
 from harness_builder.core.protocols import PermissionPolicy
-from harness_builder.core.types import PermissionDecision, PermissionValue, ToolCall
+from harness_builder.core.types import (
+    PermissionDecision,
+    PermissionValue,
+    Rule,
+    ToolCall,
+)
 
 STRICTNESS: dict[PermissionValue, int] = {"allow": 0, "ask": 1, "deny": 2}
-
-
-@dataclass(frozen=True)
-class Rule:
-    """One permission rule: ``Rule("run_code", "allow")``.
-
-    ``tool`` is a glob over the tool name. ``args`` maps arg names to globs;
-    every listed arg must be present and match. Non-string arg values are
-    matched as their ``json.dumps`` text. ``rule_id`` defaults to
-    ``rules[<index>]`` inside a policy.
-    """
-
-    tool: str
-    decision: PermissionValue
-    args: dict[str, str] | None = None
-    rule_id: str | None = None
-
-    def matches(self, call: ToolCall) -> bool:
-        """Return True when ``call`` matches the tool glob and all arg globs."""
-        if not fnmatchcase(call.name, self.tool):
-            return False
-        for name, pattern in (self.args or {}).items():
-            if name not in call.args:
-                return False
-            if not fnmatchcase(_arg_text(call.args[name]), pattern):
-                return False
-        return True
-
-
-def _arg_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, sort_keys=True)
+"""Rank of a decision; ``NarrowedPolicy`` keeps the higher one."""
 
 
 class RulePermissionPolicy:

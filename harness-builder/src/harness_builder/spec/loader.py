@@ -13,17 +13,20 @@ or ``DockerUnavailableError`` from ``build()``.
 The resolved spec (prompt files inlined) is stored on the builder and written
 to the trace as ``spec_snapshot``, so a run can be rebuilt from its trace
 alone: ``HarnessBuilder.from_spec(trace.spec_snapshot)``.
+
+The loader configures a builder it is given (typed by ``BuilderLike``) and
+never imports ``core.builder``, so the two composition roots stay acyclic
+(T024 B1): ``HarnessBuilder.from_spec`` imports this module lazily and passes
+``cls(spec.name, settings)`` in.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
-from harness_builder.config import Settings
-from harness_builder.core.builder import ChildProfile, HarnessBuilder
 from harness_builder.core.protocols import Strategy, ToolDefinition
+from harness_builder.core.types import ChildProfile, HookEvent, PermissionValue, Rule
 from harness_builder.errors import ConfigError
-from harness_builder.permissions.policy import Rule
 from harness_builder.spec.io import (
     find_spec_file,
     parse_spec,
@@ -68,45 +71,110 @@ CONTEXT_OPTIONS: dict[str, frozenset[str]] = {
 }
 
 
-def load_builder(
-    source: Path | str | HarnessSpec | Mapping[str, Any],
-    *,
-    settings: Settings | None = None,
-) -> HarnessBuilder:
-    """A builder for a spec file, harness directory, parsed spec or mapping.
+class BuilderLike(Protocol):
+    """The fluent ``HarnessBuilder`` methods the loader calls.
 
-    A mapping (for example ``trace.spec_snapshot``) is validated first. Only
-    a file or directory source can resolve ``prompts.system.file``.
+    Return values are ignored, so any fluent or non-fluent builder fits.
+    """
+
+    def model(
+        self,
+        name: str,
+        *,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> object:
+        """Set the model id and sampling parameters."""
+        ...
+
+    def strategy(self, strategy: str, **options: Any) -> object:
+        """Use a registered strategy by name with options."""
+        ...
+
+    def system_prompt(self, text: str) -> object:
+        """Set the base system prompt."""
+        ...
+
+    def tools(self, *tools: ToolDefinition) -> object:
+        """Register tools."""
+        ...
+
+    def context(self, policy: str, **options: Any) -> object:
+        """Set a named context policy with options."""
+        ...
+
+    def permissions(
+        self, rules: Iterable[Rule] = (), *, default: PermissionValue = "deny"
+    ) -> object:
+        """Set first-match rules with a default."""
+        ...
+
+    def budget(
+        self,
+        max_steps: int = 10,
+        max_input_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        max_cost_usd: float | None = None,
+    ) -> object:
+        """Set the run limits."""
+        ...
+
+    def hook(
+        self, event: HookEvent, fn: Callable[..., Any], priority: int = 0
+    ) -> object:
+        """Register a hook."""
+        ...
+
+    def subagents(
+        self, max_depth: int, profiles: Mapping[str, ChildProfile] | None = None
+    ) -> object:
+        """Register ``spawn_agent`` with child profiles."""
+        ...
+
+    def spec_snapshot(self, snapshot: dict[str, Any] | None) -> object:
+        """Record the resolved spec in top-level traces."""
+        ...
+
+
+B = TypeVar("B", bound=BuilderLike)
+
+
+def load_spec(
+    source: Path | str | HarnessSpec | Mapping[str, Any],
+) -> tuple[HarnessSpec, Path | None, str]:
+    """The parsed spec, its base directory and its name for error messages.
+
+    ``source`` is a spec file, a harness directory, a parsed spec or a mapping
+    (for example ``trace.spec_snapshot``, validated first). Only a file or
+    directory source has a base directory, so only it can resolve
+    ``prompts.system.file``.
     """
     if isinstance(source, HarnessSpec):
-        return builder_from_spec(source, settings=settings)
+        return source, None, "<spec>"
     if isinstance(source, Mapping):
-        return builder_from_spec(parse_spec(dict(source)), settings=settings)
+        return parse_spec(dict(source)), None, "<spec>"
     file = find_spec_file(Path(source))
-    spec = parse_spec(read_spec_data(file), file.name)
-    return builder_from_spec(
-        spec, base_dir=file.parent, source=file.name, settings=settings
-    )
+    return parse_spec(read_spec_data(file), file.name), file.parent, file.name
 
 
 def builder_from_spec(
     spec: HarnessSpec,
     *,
+    builder: B,
     base_dir: Path | None = None,
     source: str = "<spec>",
-    settings: Settings | None = None,
-) -> HarnessBuilder:
-    """Configure a ``HarnessBuilder`` from ``spec`` (``build()`` not called).
+) -> B:
+    """Configure ``builder`` from ``spec`` and return it (``build()`` not called).
 
-    ``base_dir`` resolves a prompt file; ``source`` names the spec in errors.
-    Further code-only settings (``.llm``, ``.tools``, ``.approver``) can be
-    chained on the result.
+    ``builder`` is a fresh builder for ``spec.name`` (for example
+    ``HarnessBuilder(spec.name, settings)``). ``base_dir`` resolves a prompt
+    file; ``source`` names the spec in errors. Further code-only settings
+    (``.llm``, ``.tools``, ``.approver``) can be chained on the result.
     """
     system = _system_prompt(spec.prompts, base_dir, source)
     _check_strategies(spec, source)
     tools = _tools(spec, source)
     _check_tool_needs(spec, [tool.name for tool in tools], source)
-    builder = HarnessBuilder(spec.name, settings)
     if spec.model is not None:
         builder.model(
             spec.model.name,
@@ -144,7 +212,8 @@ def builder_from_spec(
         }
         builder.subagents(spec.subagents.max_depth, profiles or None)
     resolved = spec.model_copy(update={"prompts": PromptsSpec(system=system)})
-    return builder.spec_snapshot(resolved.model_dump(mode="json"))
+    builder.spec_snapshot(resolved.model_dump(mode="json"))
+    return builder
 
 
 def _system_prompt(prompts: PromptsSpec, base_dir: Path | None, source: str) -> str:

@@ -6,7 +6,8 @@ tools, context policy, U10 price check, sub-agent profiles) and returns a
 ``Harness`` whose ``run(task)`` creates a fresh run id, budget ledger and trace
 recorder per run. Sub-agent child harnesses are built eagerly, one per profile
 and level, so profile errors surface in ``build()``. ``from_spec`` delegates
-to ``spec.loader`` (imported lazily: the loader imports this module).
+to ``spec.loader`` (imported lazily), passing in a fresh builder; the loader
+never imports this module, so the composition roots stay acyclic (T024 B1).
 
 Executor wiring (T028): when any tool needs the Executor (``ExecutorTool``,
 for example ``run_code``), ``build()`` binds the harness executor (default
@@ -51,6 +52,7 @@ from harness_builder.core.protocols import (
 from harness_builder.core.run_context import RunContext
 from harness_builder.core.types import (
     BudgetLimits,
+    ChildProfile,
     HookEvent,
     Message,
     ModelConfig,
@@ -94,29 +96,6 @@ DEREF_RULE = Rule("deref", "allow", rule_id="builtin:deref")
 """Prepended when ``deref`` is auto-registered; reads only the run's own refs."""
 SPAWN_RULE = Rule(SPAWN_TOOL_NAME, "allow", rule_id="builtin:spawn_agent")
 """Prepended by ``.subagents()`` unless a rule names ``spawn_agent`` exactly."""
-
-
-class ChildProfile(BaseModel):
-    """A sub-agent profile (designs.md 4.4 ``ChildProfile``).
-
-    Unset fields inherit from the parent harness. ``tools`` must be a subset
-    of the parent's visible tools (``spawn_agent`` included); the child only
-    registers those. ``permissions`` rules narrow the parent's policy through
-    ``NarrowedPolicy`` (child side default ``allow``, so an unlisted call keeps
-    the parent's decision and nothing is ever loosened). ``budget_fraction``
-    is the share of the parent's remaining budget (0.5 ASSUMED).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    description: str = ""
-    model: str | None = None
-    strategy: str | None = None
-    strategy_options: dict[str, Any] = Field(default_factory=dict)
-    system_prompt: str | None = None
-    tools: list[str] | None = None
-    budget_fraction: float = Field(default=0.5, gt=0, le=1)
-    permissions: list[Rule] = Field(default_factory=list)
 
 
 class HarnessConfig(BaseModel):
@@ -308,7 +287,7 @@ class HarnessBuilder:
         source: "Path | str | HarnessSpec | Mapping[str, Any]",
         *,
         settings: Settings | None = None,
-    ) -> "HarnessBuilder":
+    ) -> Self:
         """A builder configured from a HarnessSpec (FR-016, FR-030).
 
         ``source`` is a spec file, a harness directory (``harness.yaml``), a
@@ -316,9 +295,12 @@ class HarnessBuilder:
         Raises ``SpecError`` with located paths for an invalid spec. Code-only
         settings (``.llm``, ``.tools``, ``.approver``) can be chained after.
         """
-        from harness_builder.spec.loader import load_builder
+        from harness_builder.spec.loader import builder_from_spec, load_spec
 
-        return load_builder(source, settings=settings)
+        spec, base_dir, name = load_spec(source)
+        return builder_from_spec(
+            spec, builder=cls(spec.name, settings), base_dir=base_dir, source=name
+        )
 
     def model(
         self,

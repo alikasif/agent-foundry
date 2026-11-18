@@ -4,9 +4,12 @@ Leaf module: imports stdlib, pydantic and the ``executor.models`` leaf only.
 All models are frozen; build modified copies with ``model_copy(update=...)``.
 """
 
+import json
+from fnmatch import fnmatchcase
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.dataclasses import dataclass
 
 from harness_builder.executor.models import ExecResult
 
@@ -164,6 +167,64 @@ class HookOutcome(_Frozen):
     action: HookAction = "allow"
     args: dict[str, Any] | None = None
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class Rule:
+    """One permission rule: ``Rule("run_code", "allow")``.
+
+    ``tool`` is a glob over the tool name. ``args`` maps arg names to globs;
+    every listed arg must be present and match. Non-string arg values are
+    matched as their ``json.dumps`` text. ``rule_id`` defaults to
+    ``rules[<index>]`` inside a policy. Globs use ``fnmatch.fnmatchcase``
+    (case-sensitive on every platform); ``*`` also matches ``/`` and ``..``.
+    Lives in this leaf (T024 B1) so ``ChildProfile`` can; re-exported by
+    ``permissions.policy``.
+    """
+
+    tool: str
+    decision: PermissionValue
+    args: dict[str, str] | None = None
+    rule_id: str | None = None
+
+    def matches(self, call: ToolCall) -> bool:
+        """Return True when ``call`` matches the tool glob and all arg globs."""
+        if not fnmatchcase(call.name, self.tool):
+            return False
+        for name, pattern in (self.args or {}).items():
+            if name not in call.args:
+                return False
+            if not fnmatchcase(_arg_text(call.args[name]), pattern):
+                return False
+        return True
+
+
+def _arg_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+class ChildProfile(_Frozen):
+    """A sub-agent profile (designs.md 4.4 ``ChildProfile``).
+
+    Unset fields inherit from the parent harness. ``tools`` must be a subset
+    of the parent's visible tools (``spawn_agent`` included); the child only
+    registers those. ``permissions`` rules narrow the parent's policy through
+    ``NarrowedPolicy`` (child side default ``allow``, so an unlisted call keeps
+    the parent's decision and nothing is ever loosened). ``budget_fraction``
+    is the share of the parent's remaining budget (0.5 ASSUMED). Lives in
+    this leaf (T024 B1) so ``spec.loader`` need not import ``core.builder``.
+    """
+
+    description: str = ""
+    model: str | None = None
+    strategy: str | None = None
+    strategy_options: dict[str, Any] = Field(default_factory=dict)
+    system_prompt: str | None = None
+    tools: list[str] | None = None
+    budget_fraction: float = Field(default=0.5, gt=0, le=1)
+    permissions: list[Rule] = Field(default_factory=list)
 
 
 class BudgetLimits(_Frozen):
