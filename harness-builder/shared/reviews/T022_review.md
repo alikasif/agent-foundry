@@ -271,3 +271,56 @@ amend the AC text explicitly. That is not the coder's call to make.
 - The CLI is properly lazy, and `LLM_FACTORY` plus `--fake-llm` make it
   testable.
 - The implementation notes are thorough and flag every deviation.
+
+---
+
+## Round 2 (2026-11-18): verification of 8aa3d60 and a147008
+
+### Final verdict: APPROVED
+
+B1 and M1 are fixed, and so are minors m1, m3 and m9. T014 is now
+**APPROVED**. T011, T012, T013 and T015 stay APPROVED. Every T022 task is
+approved.
+
+Checks, run on a `git archive` of HEAD `a147008` in a scratchpad:
+- `ruff check .` passes.
+- `ruff format --check src tests` passes (131 files).
+- `pyrefly check --min-severity=warn` reports 0 diagnostics.
+- `pytest -q` gives 1047 passed and 31 skipped. The skips are Docker suites.
+- `ruff format --check .` fails, but only on two code blocks in
+  `docs/extending.md:163` and `docs/layers.md:124`. Those are T035 docs and
+  are outside this review; I am reporting them to RALPH.
+
+| Item | Status | Evidence (probe output against the real modules) |
+|---|---|---|
+| B1 prompt file escape through a link | **Fixed** | `spec/loader.py` `resolve_inside` keeps the lexical check, then `resolve()` plus `is_relative_to(base_dir.resolve())`. The round-1 junction now fails: `harness.json: prompts.system.file: must resolve inside the harness directory (a link leaves it)`. Negative controls: a nested in-dir file (`prompts/sub/system.md`) loads, and a cwd-relative spec path also loads. The helper is public and documented for T040. |
+| M1 located SpecErrors | **Fixed** | `strategy.options: invalid options for strategy 'react' ...`; `tools[1].builtin: duplicate tool 'run_code' (also tools[0])`; `subagents.profiles.r.tools: not tools of this harness: ['nope']`; `strategy.name: strategy 'codeact' requires tools ['run_code']`; `subagents.profiles.r.strategy: strategy 'codeact' requires tools ['run_code']`. Implied `deref`/`spawn_agent` are counted. A missing price under a cost cap is still a `ConfigError` at build, as agreed. |
+| m1 pre_tool stop leaves an unpaired tool_call | **Fixed** | The step's events are `tool_call c1, permission c1, hook, tool_result c1` (`hook_blocked: halt`), and the stop is `veto`. `duration_ms` is None, so `ReplayToolRunner` does not treat the call as invoked. |
+| m3 `max_steps` lower bound | **Fixed (spec level)** | `BudgetSpec` gives `budget.max_steps: Input should be greater than or equal to 1`. Token and cost limits are bounded too. The `BudgetLimits` leaf is unchanged, so the code path still accepts 0 or less, which is acceptable. |
+| m9 CLI tracebacks | **Fixed** | A factory that raises a `HarnessError` subclass gives exit 1 with `error: Boom: kaboom`. A `--trace` write under a file path gives exit 2 with `error: [WinError 183] ...`. The `--trace` write now runs inside `_exit_codes`. |
+
+Rerunning the round-1 probes gives unchanged, passing results: the modify
+re-permission check, the depth cap, narrowing, the profile price check and
+redaction of the snapshot and child traces.
+
+**New observations (minor, no action needed for approval):**
+- `_check_tool_needs` checks required tools against the spec's tools only, so
+  a codeact spec that expects tools chained later with `.tools()` now fails
+  at load. This is documented in the docstring and implementation notes, and
+  it is the right trade for located errors.
+- `except OSError` in `_exit_codes` also maps an `OSError` raised during
+  `build()` or the run (for example a workdir `mkdtemp` failure) to exit 2
+  rather than 1. This is acceptable: such failures are environment problems,
+  not run failures.
+- When writing `--trace` fails, the answer is no longer printed, because the
+  exit happens before the echo. This is acceptable.
+- `context: {policy: truncate, max_tokens: 1, keep_last: 99}` still builds
+  silently. This was a minor in round 1 and is optional.
+
+Still open from round 1, all optional or to be handled in later tasks:
+- m2: the budget re-check after `apply` covers only the run's own ledger;
+- m4: error prefixes repeat for nested profiles;
+- m5: an exception from a child run becomes an `error` stop on the parent;
+- m6: `spawn_agent` has no timeout;
+- m7: the replay redactor uses the replaying machine's environment;
+- m8: leftover recorded calls are not reported.
