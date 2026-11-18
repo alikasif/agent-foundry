@@ -61,7 +61,10 @@ strategies (registry, react), spec, cli
 - Minors m1 to m10 follow.
 
 **Cross-module Impact:**
-- B1 touches `core/builder.py`, `spec/loader.py`, `tests/unit/test_import_rules.py`, and `core/types.py` if option (a) is chosen. It is a prerequisite for **T040**, which edits both composition roots.
+- B1 touches `core/builder.py`, `spec/loader.py`, `tests/unit/test_import_rules.py`, and `core/types.py` if option (a) is chosen.
+  - It also touches `cli/main.py`, which calls `spec.loader.builder_from_spec` directly. Under option (a) that call must pass a builder in.
+  - No test calls `builder_from_spec` or `load_builder` directly; tests go through `HarnessBuilder.from_spec`.
+  - It is a prerequisite for **T040**, which edits both composition roots.
 - B2 touches `core/protocols.py` and `tools/builtin/run_code.py` (the `ExecutorTool` definition moves out). Its consumers are `core/builder.py`, `tools/registry.py`, **T039/T040** (`ContainerTool`, an executor-backed tool) and **T051** (skills tools `activate_skill`, `run_skill_script`).
 - MJ1 to MJ3 belong to **T040**. MJ3 also feeds **T051** (`SkillsExtension`) and **T013/replay**.
 
