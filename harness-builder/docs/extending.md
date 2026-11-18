@@ -5,7 +5,7 @@ Every snippet was run against the implemented API.
 
 **M1 limit: extensions are code-only.** The spec (`harness.yaml`) can only name
 built-in tools and hooks, and in M1 the built-in hook registry is empty and the
-only built-in tool is `run_code` (an M2 feature). A custom tool, hook, context
+only built-in tool is `run_code` ([strategies.md](strategies.md#the-run_code-tool)). A custom tool, hook, context
 policy or approver therefore has to be attached in Python, either on a fresh
 `HarnessBuilder` or chained after `HarnessBuilder.from_spec(...)`. The `harness
 run` command cannot load custom code yet (that is planned work), so use the Python

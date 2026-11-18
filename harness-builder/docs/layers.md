@@ -86,7 +86,7 @@ executed and get a "not executed" error observation.
 | `Approver` | `CliApprover` on a TTY, else `AutoDenyApprover` (`default_approver()`) | `StaticApprover`, `trace.replay.ReplayApprover` |
 | `HookManager` | `hooks.manager.HookManager` | none needed |
 | `TokenCounter` | `llm.tokens.HeuristicCounter` (chars / 4) | `LiteLlmCounter` is the real tokenizer |
-| `Executor` | `executor.docker.DockerExecutor` (M2, not documented here) | `executor.fake.FakeExecutor` |
+| `Executor` | `executor.docker.DockerExecutor` ([docker.md](docker.md), [isolation.md](isolation.md)) | `executor.fake.FakeExecutor` |
 | `Retriever` | not implemented in M1 (the `skills/` modules are stubs) | - |
 
 ## Layer details
@@ -138,8 +138,7 @@ parse error that the loop feeds back. It requires no tools.
 `strategies.registry` maps names to factories: `register_strategy(name, factory,
 replace=False)`, `get_strategy(name, options)` and `strategy_names()`. A factory
 is a callable that takes the options as keyword arguments, or a lazy
-`"package.module:attribute"` string. `"codeact"` is registered lazily; it is an M2
-feature and not covered here. See [extending.md](extending.md#writing-a-strategy).
+`"package.module:attribute"` string. `"codeact"` is registered lazily (see [strategies.md](strategies.md)). See [extending.md](extending.md#writing-a-strategy).
 
 ### Budget
 
@@ -281,7 +280,8 @@ All numbers below are design placeholders (**ASSUMED**) unless stated otherwise.
   `FakeLLMClient` and replay. `AdkLiteLlmClient` is covered by unit tests with a
   stubbed ADK, not by a real call.
 - The Docker executor, `run_code`, the CodeAct strategy and `harness doctor` are
-  M2 features and are documented later. Docker has not been exercised end to end
-  for this documentation.
+  M2 features, documented in [docker.md](docker.md), [isolation.md](isolation.md)
+  and [strategies.md](strategies.md). Docker has not been exercised against a
+  real daemon yet.
 - The skills layer (`Retriever`, skill store, promotion), the generator and the
   eval runner are stubs.

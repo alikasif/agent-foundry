@@ -257,6 +257,7 @@ harness run TARGET TASK [--strategy NAME] [--trace FILE]
 harness replay TRACE_FILE [--json]
 harness diff A B [--json]
 harness trace show TRACE_FILE
+harness doctor [--clean]
 ```
 
 - `run` runs `TASK` with the harness spec at `TARGET` (a spec file or a directory
@@ -268,6 +269,8 @@ harness trace show TRACE_FILE
   matches.
 - `replay --json` prints `{"matched", "stop", ...}` plus `step_index`, `kind`,
   `expected` and `actual` on divergence.
+- `doctor` checks the Docker CLI, daemon and sandbox image and exits 3 on failure;
+  see [docker.md](docker.md#harness-doctor).
 - `trace show` renders a header table (harness, run id, model, strategy, task,
   config hash, whether a spec snapshot exists, usage, stop) and a tree of steps
   and events, with sub-agent steps nested.
@@ -277,7 +280,7 @@ harness trace show TRACE_FILE
 | 0 | Success (`run` stopped `done`; `replay` matched; `diff` and `trace show` finished). |
 | 1 | `run` stopped for any reason other than `done`; `replay` diverged. |
 | 2 | Usage or configuration error: invalid spec, unknown strategy, missing API key or model, unreadable or invalid trace file, a trace without a spec snapshot. |
-| 3 | Docker unavailable (only for harnesses with executor-backed tools; M2 feature, not covered here). |
+| 3 | Docker unavailable (only for harnesses with executor-backed tools, and `harness doctor`; see [docker.md](docker.md)). |
 
 `diff` always exits 0 when both files load, even when the traces differ. Use
 `--json` and check `first_divergence` in scripts.
@@ -289,5 +292,7 @@ harness trace show TRACE_FILE
   observation of the call.
 - `harness replay` needs a spec snapshot; code-built harnesses replay through the
   Python API.
-- Replay of a run that used Docker or `run_code` has not been exercised yet
-  (Docker is M2).
+- Replay of a `run_code` or CodeAct run skips Docker preflight and serves the
+  recorded results (`run_code` is nondeterministic), so it needs no Docker. This
+  was checked offline with scripted fakes only; no trace from a real container run
+  exists yet.

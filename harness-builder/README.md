@@ -4,10 +4,12 @@ A layered agent-harness framework in Python. You compose a harness from small,
 swappable layers (LLM client, strategy, tools, permissions, hooks, context policy,
 budget, trace), run it, and get a complete, replayable trace of what it did.
 
-Status: milestone M1 (framework core, spec loader, trace replay and diff). The
-Docker sandbox, `run_code`, CodeAct, skills and the harness generator are later
-milestones and are not documented here yet. **No live LLM run has been made yet**;
-everything below was exercised offline with a scripted fake model.
+Status: milestone M2 (M1 framework core, spec loader, trace replay and diff, plus
+the Docker sandbox, the `run_code` tool, the CodeAct strategy and `harness
+doctor`). Skills and the harness generator are later milestones and are not
+documented here yet. **No live LLM run has been made yet, and the Docker sandbox
+has not been run against a real Docker daemon yet**; everything below was
+exercised offline with a scripted fake model and a fake Docker CLI.
 
 ## Install
 
@@ -20,6 +22,23 @@ uv sync
 The package depends on two sibling projects through editable path dependencies
 (`../skillful_agent` and `../codeact_agent`), so they must exist next to this
 directory.
+
+### Prerequisite for code execution: Docker
+
+Everything except `run_code` and the `codeact` strategy works without Docker. To
+let a model run code you need Docker (Docker Desktop on Windows and macOS, with
+Linux containers; Docker Engine on Linux) and the sandbox image:
+
+```text
+uv run harness doctor
+```
+
+`doctor` checks the `docker` CLI, the daemon and the image within 5 s, prints the
+exact `docker build` command for the image if it is missing, and exits 3 if
+anything fails. There is no fallback to running code on the host. The container is
+a best-effort sandbox on a shared kernel, **not yet exercised against a real
+daemon**; read [docs/isolation.md](docs/isolation.md) before relying on it. Setup
+details: [docs/docker.md](docs/docker.md).
 
 ## Configure
 
@@ -35,7 +54,7 @@ cp .env.example .env
 | `HARNESS_MODEL` | Default OpenRouter model id, for example `openai/gpt-4o-mini`. A spec's own `model` wins. |
 | `HARNESS_TRACE_DIR` | Where traces are written. Default `.harness/traces`. |
 | `HARNESS_SKILLS_ROOT` | Reserved for the skills layer (later milestone). |
-| `HARNESS_DOCKER_IMAGE` | Reserved for the Docker sandbox (M2). |
+| `HARNESS_DOCKER_IMAGE` | Sandbox image tag. Default: the content-hash tag `harness-builder-sandbox:<hash>` that `harness doctor` prints. |
 
 Real environment variables take precedence over `.env`. The file is read from the
 current working directory, is never copied into `os.environ`, and empty values
@@ -141,16 +160,26 @@ Spec fields in M1: `schema_version` (required, `1`), `name`, `description`,
   or a strategy; what affects the config hash.
 - [docs/traces.md](docs/traces.md): trace schema v1, redaction, replay, diff and
   the CLI.
+- [docs/docker.md](docs/docker.md): Docker prerequisite, `harness doctor`, building
+  the image, configuration, cleanup.
+- [docs/isolation.md](docs/isolation.md): what the sandbox blocks and what it does
+  not, Windows notes, latency.
+- [docs/strategies.md](docs/strategies.md): ReAct vs CodeAct, `run_code`,
+  stateless execution, `FINAL`, `spawn_agent`.
 
-## Known limitations (M1)
+## Known limitations (M1 and M2)
 
 - No live OpenRouter run has been made; `AdkLiteLlmClient` is tested against a
   stubbed ADK only.
 - Custom tools, hooks and approvers are code-only. A spec can name only built-in
   tools and hooks, and there are no built-in hooks yet, so `harness run` cannot
   load custom code.
-- Docker has not been exercised yet; the sandbox, `run_code`, CodeAct and
-  `harness doctor` belong to M2.
+- Docker has not been exercised against a real daemon: the sandbox, `run_code`
+  and CodeAct are tested with fakes only, and the real-Docker isolation tests
+  (`tests/docker`, 25 tests) exist but have never run (all skipped). Isolation is best effort
+  ([docs/isolation.md](docs/isolation.md)).
+- `/work/context.txt`, mentioned in the CodeAct prompt for large inputs, is not
+  written by anything yet.
 - Defaults marked **ASSUMED** in the docs (for example `max_steps=10`,
   deny-unlisted permissions, sub-agent depth 2) are design placeholders awaiting
   user confirmation.
