@@ -11,7 +11,10 @@
 `tests/conformance`). The CodeAct strategy, the Docker executor and
 `tools/builtin/run_code.py` are looked at only where M1 code depends on them.
 
-## Verdict: CHANGES_REQUESTED
+## Verdict: CHANGES_REQUESTED (round 1); superseded by round 2 below
+
+> **Round 2 (2026-11-18): APPROVED.** B1 and B2 are fixed and were verified at
+> `661da25`. M3 interface stability is now GO. See "Round 2" at the end.
 
 **Status:** NEEDS_RESTRUCTURING (= CHANGES_REQUESTED)
 
@@ -515,3 +518,107 @@ I did not edit `plan.md` or `task_list.json`, as instructed. Proposed text:
 6. External dependencies injected: yes. These are the LLM client, executor,
    approver, tool runner, price lookup, token counter, settings and redactor.
 7. Duplicated logic: MJ2 (mirrored models) and m10 (fallback token counter).
+
+---
+
+## Round 2 (2026-11-18): verification of 75358e3, 11fbacf and 661da25
+
+## Architectural Review: M1 framework core, round 2
+
+**Status:** APPROVED
+**Module:** core (types, protocols, builder), spec.loader, permissions.policy,
+tools (registry, builtin/run_code), cli.main, package `__init__`, and
+tests/unit (import rules, tool contract, models round-trip)
+
+**Issues Found:** None blocking. The open items are listed below and are owned
+by other tasks.
+
+**Cross-module Impact:**
+- T040 inherits MJ1-MJ3.
+- T039 and T051 must implement `core.protocols.ExecutorTool` for every
+  executor-backed tool.
+- The next backend review must accept two frozen-leaf changes under plan.md
+  section 0.6. This review judges both sound (see below):
+  - `ToolDefinition.fn`, and `ExecutorTool` moving into `core/protocols.py`;
+  - `ChildProfile` and `Rule` moving into `core/types.py`.
+
+### Checks run (on a `git archive` of HEAD `661da25`, siblings included)
+- `pytest -q`: **1311 passed, 36 skipped**. The skips are the same Docker,
+  live, symlink and POSIX-socket skips as in round 1.
+- `ruff check .` passes. `ruff format --check src tests` passes (140 files).
+- `pyrefly check --min-severity=warn` reports 0 diagnostics (39 suppressed).
+- **SCC pass over the whole tree** with the new `import_graph` and `cycles`
+  helpers: `cycles: []`. At `251acec` the round-1 script found
+  `[core.builder, spec.loader]`.
+- **Identity:** `permissions.policy.Rule is core.types.Rule` is `True`, and
+  `core.builder.ChildProfile is core.types.ChildProfile` is `True`.
+- **The leaf stays light.** Importing `harness_builder.core.types` in a fresh
+  interpreter loads no `harness_builder` module beyond `core.types`,
+  `executor.models` and their package inits.
+- **No behaviour drift.** The `config_hash` of the FR-016 `code_builder()`
+  harness is `2420861a6898...fbb0` at both `251acec` and `661da25`. That
+  harness includes a sub-agent profile with a `Rule`, so the move changes no
+  hash, trace or spec format.
+
+| Item | Status | Evidence |
+|---|---|---|
+| **B1 import cycle** | **Fixed** | Option (a). `spec/loader.py` no longer imports `core.builder`; it imports only `core.protocols`, `core.types`, `errors`, `spec.*`, `strategies.registry` and `tools.builtin.*`. `load_spec(source)` returns `(spec, base_dir, name)`. `builder_from_spec(spec, *, builder: B, ...)` takes a builder, with `B` bound to the `BuilderLike` Protocol. `HarnessBuilder.from_spec` passes `cls(spec.name, settings)` in and now returns `Self`. `cli/main._spec_builder`, the caller named in round 1, passes `HarnessBuilder(spec.name, settings)`. `load_builder` has no remaining references in src, tests or docs. |
+| B1 acyclicity test | **Done** | `test_source_tree_has_no_import_cycle`. Negative controls: an eager back-edge and a both-lazy pair (the exact round-1 shape) are both detected as cycles; a `TYPE_CHECKING` back-edge is not. According to the notes, the test failed on the old tree with exactly `[core.builder, spec.loader]`. |
+| **B2 tool contract** | **Fixed** | `ToolDefinition.fn` is a read-only property. `ExecutorTool` is `@runtime_checkable` in `core/protocols.py`; `run_code.py` re-exports the same object, and `core/builder.py` imports it from protocols. `ToolRegistry.register` reads `tool.fn` and still raises a clear `ConfigError` for an untyped non-tool. `tests/unit/test_tool_contract.py` uses annotated module-level assignments that pyrefly checks: `DerefTool`, `SpawnAgentTool`, `run_code()` and a `@tool` are `ToolDefinition`, and `RunCodeTool` is an `ExecutorTool`. The notes record a pyrefly negative control: a class without `fn` gives `bad-assignment`. |
+| m1 root-package loophole | **Fixed** | The root package was removed from `SHARED`, with a negative control. The intra-layer rule was not added. That is acceptable, because the SCC test covers the dangerous case: `core.loop -> core.builder` would form a cycle. |
+| m6 public API | **Fixed** | The root package lazily exports `tool`, `Tool`, `Rule`, `ChildProfile`, `replay` and `diff_traces`, with an identity test. The light-import tests still pass. |
+
+### Judgement: moving `Rule` into the `core/types.py` leaf
+
+**Accepted.** My round-1 B1(a) wording called `ChildProfile` "a pure pydantic
+model" and missed that `ChildProfile.permissions` is `list[Rule]`. Moving
+`Rule` along with it is the correct consequence. It is better than both
+alternatives: typing the field as a dict would lose validation, and a
+leaf-local duplicate of `Rule` would break DRY.
+
+Why the move is sound:
+1. **Leaf rule 1 holds.** The new imports are stdlib `json` and `fnmatch` plus
+   `pydantic.dataclasses`, and the import-rule test enforces this.
+2. **`Rule` is a value type.** `matches()` is a pure, deterministic predicate
+   with no I/O. It is the same kind of leaf-resident pure helper as
+   `trace.models.request_fingerprint`.
+3. **Policy behaviour stays in the permissions layer.** First-match order,
+   defaults, `STRICTNESS` and `NarrowedPolicy` remain in
+   `permissions/policy.py`; only the rule value moved.
+4. **Backward compatible.** Every old import path resolves to the same object,
+   and `config_hash` is unchanged (verified above).
+
+Caveats (none blocking):
+- `Rule` is a pydantic **dataclass**, so unlike the leaf's `_Frozen` models it
+  does not forbid extra constructor keys. That is the stated reason
+  `ChildProfileSpec` and `RuleSpec` are kept, and I accept it: typos stay as
+  located `SpecError`s.
+- The MJ2 drift test is therefore still owed: `ChildProfileSpec` against
+  `ChildProfile`, and `RuleSpec` against `Rule`. T040 owns it, and it is
+  recorded in the plan.md Architectural Decisions.
+
+### Still open (owned elsewhere; not M1-gate items)
+- **T040:** MJ1, MJ2, MJ3, m2 (split `build()`) and m3 (`TraceSink.child`).
+- **Docs:**
+  - m4: a custom permission policy is hashed by qualname only.
+  - m5: `on_stop` runs only on a proposed final answer. This is now recorded in
+    the plan.md Architectural Decisions; designs.md 1.1 and 5 still need the
+    update.
+- **Decision pending:** m7, `ErrorType` values for skipped calls and failed
+  sub-agents.
+- **Unchanged:** m8 (eager `executor.docker` import), m9 (T022 carry-overs)
+  and m10 (fallback token counter).
+- **Not verified, unchanged from round 1:** no live LLM run, no Docker (29
+  `docker` tests skipped), no symlink tests, no POSIX run.
+
+### Final verdict: APPROVED
+
+**M3 interface stability: GO.** As of `661da25`, the frozen set is fit to
+freeze: `core/protocols.py`, `core/types.py`, `llm/types.py`,
+`executor/models.py` (as committed), `trace/models.py` and `errors.py`. The
+two frozen-leaf changes still go through the next backend review under
+plan.md section 0.6; from the architecture side they are approved here.
+
+The Architectural Decisions note is appended to `shared/plan.md`. It includes
+the amendment that the protocol listings in plan.md section 5 and designs.md
+section 3 now include `ToolDefinition.fn` and `ExecutorTool`.

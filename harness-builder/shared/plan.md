@@ -325,3 +325,26 @@ Other PRD items that remain **ASSUMED** (baked in at these defaults):
 - **Library docs.** Check current library APIs (google-adk `LiteLlm`, litellm, click, anyio) with the ctx7 CLI before coding against them.
 - **Commits.** Local commits on `feat/harness-builder` only, using conventional commit messages. No push and no remote operations.
 - **Notes.** Every coding and test task appends to `shared/implementation-notes.md` and reads and updates `shared/learnings.md` as ralph instructs.
+
+## Architectural Decisions
+
+### 2026-11-18 - T024 (M1 exit gate), recorded by the architecture reviewer
+- **The composition roots are acyclic.** `spec.loader` never imports `core.builder`.
+  - `spec.loader.load_spec(source)` returns `(spec, base_dir, name)`.
+  - `builder_from_spec(spec, *, builder, ...)` configures a builder that is passed in, typed by the `BuilderLike` Protocol.
+  - `HarnessBuilder.from_spec` passes `cls(spec.name, settings)` in.
+  - `ChildProfile` and `Rule` now live in the `core/types.py` leaf. `core.builder.ChildProfile` and `permissions.policy.Rule` stay as re-exports.
+  - `tests/unit/test_import_rules.py::test_source_tree_has_no_import_cycle` enforces this with an SCC check. Lazy imports count; `TYPE_CHECKING` imports do not.
+  - Layer modules may not import the root package `harness_builder`.
+- **The tool contract is part of the frozen protocols.**
+  - `ToolDefinition` declares `fn`, the tool body.
+  - `ExecutorTool` (`executor`, `with_executor`, runtime-checkable) lives in `core/protocols.py`.
+  - Executor-backed tools such as `ContainerTool` (T039) and the skills script tools (T051) must implement `ExecutorTool`, so that executor binding and Docker preflight apply to them.
+  - `tests/unit/test_tool_contract.py` pins built-in conformance under pyrefly.
+  - **Section 5 of this plan and designs.md section 3 are amended by this note.** Read their protocol listings as including `ToolDefinition.fn`, `ExecutorTool` and `ToolRegistry.get`/`HookManager.register`/`TraceSink.start_step` (T002).
+- **Required in T040** (T024 MJ1-MJ3):
+  - Spec built-ins (tools, hooks) are registered through public `register_builtin_tool` and `register_builtin_hook` functions, never by mutating loader dicts. Context policies stay a closed set in v1.
+  - A drift test pins `ChildProfileSpec` against `ChildProfile` and `RuleSpec` against `Rule`. The spec mirror is kept deliberately, so typos stay located `SpecError`s.
+  - The extension hook point is a per-run `PromptContributor` protocol in `core/protocols.py`. Its output enters the step-0 messages, so replay fingerprints cover it, and its identity enters `HarnessConfig`.
+- **`on_stop` hooks run only on a proposed final answer**, not on `budget`, `error` or pre_tool `veto` stops. designs.md 1.1 and 5 should be updated to match.
+- **M3 interface stability: GO** after T024 round 2 (B1 and B2 verified at `661da25`).
