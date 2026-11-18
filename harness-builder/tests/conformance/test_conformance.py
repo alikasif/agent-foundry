@@ -2,7 +2,9 @@
 
 Every case runs once per adapter in ``STRATEGY_FACTORIES``. Only the strategy
 name and the native encoding of the scripted model output change between
-runs; the tools, rules, hooks and budget stay the same.
+runs; the tools, rules, hooks and budget stay the same. Calls an adapter adds
+on its own (``adapter.scaffold``, e.g. CodeAct's ``FINAL()`` block) are left
+out of the per-call assertions.
 """
 
 from collections.abc import Sequence
@@ -30,6 +32,7 @@ from harness_builder.trace.replay import Replayable, ReplaySession, replay
 from .adapters import (  # pyrefly: ignore[missing-import]
     STRATEGY_FACTORIES,
     CallTool,
+    CodeActAdapter,
     Finish,
     Garbage,
     Intent,
@@ -81,18 +84,25 @@ def make_builder(
     rules: Sequence[Rule] = ALLOW_ALL,
     approver: Approver | None = None,
     max_steps: int = 10,
+    toolset: StrategyAdapter | None = None,
 ) -> HarnessBuilder:
-    """Return the shared conformance builder (no LLM yet) for ``adapter``."""
+    """Return the shared conformance builder (no LLM yet) for ``adapter``.
+
+    ``toolset`` is the adapter whose ``extra_rules`` and ``configure`` are
+    applied (default ``adapter``); the FR-002 swap test passes one adapter
+    for all strategies so that only the strategy name differs.
+    """
+    extras = toolset or adapter
     builder = (
         HarnessBuilder("conformance", settings=SETTINGS)
         .strategy(adapter.name)
         .system_prompt("You are a conformance test agent.")
         .tools(*make_tools(log))
-        .permissions(rules=list(rules), approver=approver)
+        .permissions(rules=[*extras.extra_rules, *rules], approver=approver)
         .budget(max_steps=max_steps)
         .trace_dir(None)
     )
-    return adapter.configure(builder)
+    return extras.configure(builder)
 
 
 def scripted(adapter: StrategyAdapter, steps: Sequence[Step]) -> FakeLLMClient:
@@ -108,11 +118,17 @@ def build(
     rules: Sequence[Rule] = ALLOW_ALL,
     approver: Approver | None = None,
     max_steps: int = 10,
+    toolset: StrategyAdapter | None = None,
 ) -> tuple[Harness, FakeLLMClient]:
     """Build a harness for ``adapter`` driven by ``steps``."""
     fake = scripted(adapter, steps)
     builder = make_builder(
-        adapter, log, rules=rules, approver=approver, max_steps=max_steps
+        adapter,
+        log,
+        rules=rules,
+        approver=approver,
+        max_steps=max_steps,
+        toolset=toolset,
     )
     return builder.llm(fake, retry_delay_s=0).build(), fake
 
@@ -123,16 +139,31 @@ def request_text(req: LLMRequest) -> str:
     return "\n".join(parts)
 
 
-def tool_results(trace: Trace) -> list[ToolResultEvent]:
-    """Return every ``tool_result`` event of ``trace`` in order."""
-    return [e for s in trace.steps for e in s.events if isinstance(e, ToolResultEvent)]
+def tool_results(trace: Trace, adapter: StrategyAdapter) -> list[ToolResultEvent]:
+    """Return the non-scaffold ``tool_result`` events of ``trace`` in order."""
+    return [
+        e
+        for s in trace.steps
+        for e in s.events
+        if isinstance(e, ToolResultEvent) and not adapter.scaffold(e.call_id)
+    ]
 
 
-def error_types(trace: Trace) -> list[str | None]:
-    """Return the error type (or None) of each tool result in ``trace``."""
+def error_types(trace: Trace, adapter: StrategyAdapter) -> list[str | None]:
+    """Return the error type (or None) of each non-scaffold tool result."""
     return [
         e.observation.error.type if e.observation.error else None
-        for e in tool_results(trace)
+        for e in tool_results(trace, adapter)
+    ]
+
+
+def permissions(trace: Trace, adapter: StrategyAdapter) -> list[PermissionEvent]:
+    """Return the non-scaffold ``permission`` events of ``trace`` in order."""
+    return [
+        e
+        for s in trace.steps
+        for e in s.events
+        if isinstance(e, PermissionEvent) and not adapter.scaffold(e.call_id)
     ]
 
 
@@ -167,7 +198,7 @@ async def test_tool_call_observation_reaches_next_request(
     assert result.stop.reason == "done"
     assert result.answer == "done shouting"
     assert log == ["shout"]
-    [event] = tool_results(trace)
+    [event] = tool_results(trace, adapter)
     assert event.observation.ok
     assert event.observation.content == "MARKER!"
     assert "MARKER!" not in request_text(fake.requests[0])
@@ -203,8 +234,8 @@ async def test_tool_error_becomes_observation_and_run_continues(
 
     assert result.stop.reason == "done"
     assert result.answer == "recovered"
-    assert error_types(trace) == [expected, None]
-    assert tool_results(trace)[1].observation.content == "5"
+    assert error_types(trace, adapter) == [expected, None]
+    assert tool_results(trace, adapter)[1].observation.content == "5"
     assert expected in request_text(fake.requests[1])
     assert log == ran  # invalid, unknown and denied calls never reach a body
 
@@ -220,9 +251,9 @@ async def test_deny_becomes_permission_denied_and_is_traced(
     result, trace = await harness.run_traced(TASK)
 
     assert result.stop.reason == "done"
-    assert error_types(trace) == ["permission_denied"]
+    assert error_types(trace, adapter) == ["permission_denied"]
     assert log == []
-    perms = [e for s in trace.steps for e in s.events if isinstance(e, PermissionEvent)]
+    perms = permissions(trace, adapter)
     assert [(p.call_id, p.decision) for p in perms] == [("c0", "deny")]
     assert "permission_denied" in request_text(fake.requests[1])
 
@@ -247,9 +278,9 @@ async def test_ask_routes_to_approver(
     result, trace = await harness.run_traced(TASK)
 
     assert result.stop.reason == "done"
-    assert error_types(trace) == [expected]
+    assert error_types(trace, adapter) == [expected]
     assert log == (["shout"] if approved else [])
-    perms = [e for s in trace.steps for e in s.events if isinstance(e, PermissionEvent)]
+    perms = permissions(trace, adapter)
     assert [(p.decision, p.approver_result) for p in perms] == [("ask", approved)]
 
 
@@ -259,6 +290,8 @@ async def test_pre_tool_block_reason_reaches_model(adapter: StrategyAdapter) -> 
     steps: list[Step] = [(CallTool("shout", {"text": "x"}),), (Finish("ok"),)]
 
     def block(call: ToolCall, ctx: RunContextView) -> HookOutcome:
+        if call.name != "shout":
+            return HookOutcome()
         return HookOutcome(action="block", reason="no shouting after midnight")
 
     fake = scripted(adapter, steps)
@@ -272,7 +305,7 @@ async def test_pre_tool_block_reason_reaches_model(adapter: StrategyAdapter) -> 
     result, trace = await harness.run_traced(TASK)
 
     assert result.stop.reason == "done"
-    assert error_types(trace) == ["hook_blocked"]
+    assert error_types(trace, adapter) == ["hook_blocked"]
     assert log == []
     assert "no shouting after midnight" in request_text(fake.requests[1])
 
@@ -283,6 +316,8 @@ async def test_pre_tool_stop_ends_with_veto(adapter: StrategyAdapter) -> None:
     steps: list[Step] = [(CallTool("shout", {"text": "x"}),), (Finish("ok"),)]
 
     def stop(call: ToolCall, ctx: RunContextView) -> HookOutcome:
+        if call.name != "shout":
+            return HookOutcome()
         return HookOutcome(action="stop", reason="halt")
 
     fake = scripted(adapter, steps)
@@ -366,7 +401,12 @@ async def test_trace_round_trips_and_replays(adapter: StrategyAdapter) -> None:
 
 @pytest.mark.anyio
 async def test_same_task_and_tools_swap_strategy_by_name() -> None:
-    """FR-002: only ``strategy.name`` differs between the built harnesses."""
+    """FR-002: only ``strategy.name`` differs between the built harnesses.
+
+    Every strategy gets the same tool set and rules (CodeAct's ``run_code``
+    and its allow rule included), so the config dumps differ only there.
+    """
+    toolset = CodeActAdapter()
     answers: dict[str, tuple[str | None, list[str | None]]] = {}
     configs = {}
     for name, factory in sorted(STRATEGY_FACTORIES.items()):
@@ -376,9 +416,9 @@ async def test_same_task_and_tools_swap_strategy_by_name() -> None:
             (CallTool("shout", {"text": "marker"}),),
             (Finish("MARKER!"),),
         ]
-        harness, _ = build(adapter, steps, log)
+        harness, _ = build(adapter, steps, log, toolset=toolset)
         result, trace = await harness.run_traced(TASK)
-        answers[name] = (result.answer, error_types(trace))
+        answers[name] = (result.answer, error_types(trace, adapter))
         configs[name] = harness.config.model_dump(mode="json")
 
     assert all(a == ("MARKER!", [None]) for a in answers.values()), answers
