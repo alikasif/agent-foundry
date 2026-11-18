@@ -1067,6 +1067,10 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
     - m8: the eager `executor.docker` import in `core.builder` is unchanged.
     - m9 are carried over from T022.
     - m10: the fallback counter in `truncate.count_tokens` is unchanged.
-- **Commits.** B1 is `75358e3`. B2 and the minors are in the next commit. The RALPH carry-forward lines above were uncommitted in this file and went into the B1 commit with my section.
+- **Follow-ups.**
+  - The cycle negative control is now parametrized: an eager back-edge, and both edges lazy (the review's exact case).
+  - BuilderLike negative control (scratchpad pyrefly): `builder_from_spec(spec, builder=HarnessBuilder("x"))` is accepted. An object without the fluent methods gets `bad-specialization` (not assignable to the bound `BuilderLike`).
+  - No `*.md` outside `shared/` mentions `load_builder` or `builder_from_spec`.
+- **Commits.** B1 is `75358e3`, B2 plus m6/m1 is `11fbacf`, and a third commit holds the follow-ups above. The RALPH carry-forward lines above were uncommitted in this file and went into the B1 commit with my section.
 - **Verification (after B2).** `ruff format`, `ruff check` and `pyrefly check` (0 errors, 39 suppressed) are clean. `uv run pytest` gives 1310 passed and 36 skipped: Docker daemon, live and symlink skips, as before.
   - `tests/unit/test_import_rules.py`: `import_graph` (internal edges, lazy counted, `TYPE_CHECKING` excluded, self-edges dropped) and Tarjan `cycles`; `test_source_tree_has_no_import_cycle` (failed on the old tree with exactly `[core.builder, spec.loader]` before the fix), plus two negative controls on synthetic modules (lazy + eager back-edge is a cycle; a `TYPE_CHECKING` back-edge is not). `test_models_roundtrip.py` got a `ChildProfile` sample (the leaf-model coverage test requires one).

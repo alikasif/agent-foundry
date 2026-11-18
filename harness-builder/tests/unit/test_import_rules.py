@@ -599,10 +599,17 @@ def _synthetic_graph(source_a: str, source_b: str) -> dict[str, set[str]]:
     )
 
 
-def test_lazy_import_cycle_is_detected() -> None:
-    graph = _synthetic_graph(
-        "def f():\n    from harness_builder.layer_b.mod import B\n",
+@pytest.mark.parametrize(
+    "source_b",
+    [
         "from harness_builder.layer_a.mod import A\n",
+        "def g():\n    from harness_builder.layer_a.mod import A\n",
+    ],
+    ids=["eager_back_edge", "both_lazy"],
+)
+def test_lazy_import_cycle_is_detected(source_b: str) -> None:
+    graph = _synthetic_graph(
+        "def f():\n    from harness_builder.layer_b.mod import B\n", source_b
     )
     assert cycles(graph) == [[CYCLE_A, CYCLE_B]]
 
