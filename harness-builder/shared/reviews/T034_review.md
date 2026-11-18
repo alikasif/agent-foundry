@@ -2,8 +2,9 @@
 
 ## Review: Docker executor, run_code tool, CodeAct strategy, harness doctor
 
-**Status:** CHANGES_REQUESTED
+**Status (round 1):** CHANGES_REQUESTED
 **Severity:** MAJOR
+**Final verdict (round 2):** APPROVED. See "Round 2" at the end.
 
 Scope reviewed (whole files): `executor/{docker,docker_cli,paths,preflight,models,image_build,fake}.py`,
 `executor/image/{Dockerfile,hb_entry.py}`, `tools/builtin/run_code.py`,
@@ -238,3 +239,80 @@ and network MINORs above.
 
 The MINOR items can be follow-ups. Do the socket denylist before T039, and the
 `SandboxConfig` bounds before `sandbox:` is exposed in specs.
+
+---
+
+## Round 2 (2026-11-18)
+
+**Status:** APPROVED
+
+Commits checked: `2a165b1` (executor), `251acec` (image pinning and tests) and
+`d17d93e` (non-finite timeout and junction tests), plus the `### T034-fixes`
+notes in `shared/implementation-notes.md`. This was still a static review,
+because Docker is not runnable on this host.
+
+### MAJOR 1: FINAL read race. Resolved.
+- **Read only after removal:** `executor/docker.py:122-139`. `_lifecycle` no
+  longer reads FINAL. `run()` reads it only after `_remove` returns True. That
+  method is now shielded internally (`:265-278`) and returns True only when
+  `rm -f` exits 0. The read also requires `_is_real_dir(hb_dir)` to still hold.
+  When removal fails, or `.hb` was swapped, FINAL stays unset, a warning is
+  logged, and nothing is unlinked through a link.
+- **Exception path, including cancellation:** `:126-129`. `rm -f` runs once
+  and the exception is re-raised.
+- **Safe open:** `read_final` (`:281-307`) does the following:
+  - `lstat` must show a regular file that is not a reparse point;
+  - the open uses `O_NOFOLLOW` and `O_NONBLOCK` (so a FIFO cannot hang the host)
+    where available;
+  - `fstat` must match the `lstat` `(st_dev, st_ino)`, which covers Windows,
+    where there is no `O_NOFOLLOW`;
+  - any `OSError` returns None.
+- **Discard guard:** `_discard` (`:319-324`) re-checks `.hb` before unlinking.
+- **Tests:** `tests/unit/test_t034_fixes.py` covers the call order (read after
+  `rm`, including timeout with kill ok, raising, non-zero or hanging), a failed
+  or raising `rm`, `.hb` swapped for a file, symlink or junction, and a swap
+  between `lstat` and `open`. The POSIX symlink cases skip on this Windows host.
+  The junction variants run here.
+
+### MAJOR 2: image pinning. Resolved.
+- `executor/image/requirements.txt` pins all 6 packages (pydantic,
+  pydantic-core, pyyaml, typing-extensions, annotated-types, typing-inspection)
+  with 46 sha256 hashes. I cross-checked every hash against `uv.lock`: all 46
+  are present.
+- The Dockerfile installs with `--require-hashes --only-binary=:all:` and then
+  removes the requirements file.
+- `requirements.txt` is in `IMAGE_FILES`, so the tag changes when it does.
+
+### MINOR items fixed
+- **Socket denylist** (`paths.py`):
+  - new names: `docker.sock.raw`, `podman.sock`, `containerd.sock`;
+  - new fixed paths: macOS `/private/var/run`, podman and containerd;
+  - host-specific `$HOME/.docker/{run,desktop}/docker.sock`,
+    `$XDG_RUNTIME_DIR/docker.sock` and `unix://$DOCKER_HOST`.
+- **Bounds:** positive, finite `SandboxConfig` and `ExecRequest` limits, and
+  `RunCodeTool` rejects nan/inf.
+- **Preflight message:** the "specified.. Start" double period is fixed.
+
+### Residual notes (non-blocking)
+- `host_socket_paths` compares *unresolved* `$HOME` and `$XDG_RUNTIME_DIR`
+  against a *resolved* source. If `$HOME` is itself behind a symlink, the
+  Desktop-socket check can miss it. Resolve those candidates as well when the
+  T039 allowlist work happens. The denylist caveat from round 1 still applies
+  before `ro_mounts` takes untrusted input.
+- `state_mode="session"` is still accepted and ignored. This is documented, and
+  `test_models_roundtrip` pins it.
+- The deferred MINORs listed in the notes are acceptable as follow-ups: root uid
+  mapping, create-timeout and staging `OSError` mapping, FINAL only on a clean
+  exit, the FINAL truncation marker, partial output on timeout, containers that
+  never started, the `--clean` status filter, the ReAct output cap, untagged
+  fences, duplicated error text, `timeout_s` naming, and the FR-046 documentation
+  gaps. Docs (T023) should replace their "Known issues from review" entries for
+  the FINAL race and image pinning, which are now fixed.
+
+### Verification
+- `ruff check src tests/unit/test_t034_fixes.py` and `ruff format --check src`
+  are clean. `pyrefly check` reports 0 errors.
+- `pytest` on `test_t034_fixes`, `test_executor_lifecycle`, `test_docker_cli`,
+  `test_sandbox_image` and `test_import_rules`: 221 passed, 3 skipped (POSIX
+  symlink cases).
+- Real-Docker verification of the argv and image build is still pending (T032).
