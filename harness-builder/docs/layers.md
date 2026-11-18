@@ -121,6 +121,7 @@ raises `FakeScriptExhaustedError`.
 class Strategy(Protocol):
     name: str
     required_tools: frozenset[str]
+
     def system_prompt(self, base: str, tools: list[ToolSchema]) -> str: ...
     def build_request(
         self, messages: list[Message], tools: list[ToolSchema], model: ModelConfig

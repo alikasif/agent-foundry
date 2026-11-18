@@ -160,6 +160,7 @@ Attach them with `HarnessBuilder.hook(event, fn, priority=0, name=None)`:
 
 ```python
 from harness_builder import HarnessBuilder, Settings
+
 builder = (
     HarnessBuilder("calc", Settings(model="openai/gpt-4o-mini"))
     .hook("pre_tool", no_big_numbers, priority=10)
@@ -223,6 +224,7 @@ class KeepLast:
 
 ```python
 from harness_builder import HarnessBuilder, Settings
+
 builder = HarnessBuilder("calc", Settings(model="openai/gpt-4o-mini")).context(
     KeepLast(4)
 )
@@ -317,6 +319,7 @@ Use it by name, with options:
 
 ```python
 from harness_builder import HarnessBuilder, Settings
+
 builder = HarnessBuilder("calc", Settings(model="openai/gpt-4o-mini")).strategy(
     "lines", prefix="CALL"
 )

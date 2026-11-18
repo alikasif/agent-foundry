@@ -76,16 +76,17 @@ Desktop is stopped (trimmed):
 | daemon | fail    | see error below                      |
 | image  | skipped | not run after an earlier failure     |
 +---------------------------------------------------------+
-image: harness-builder-sandbox:df5a4799ca8c
-build: docker build -t harness-builder-sandbox:df5a4799ca8c -f <...>\Dockerfile <...>\image
+image: harness-builder-sandbox:fb170acf1706
+build: docker build -t harness-builder-sandbox:fb170acf1706 -f <...>\Dockerfile <...>\image
 error: Docker daemon is not reachable: `docker info ...` failed (exit 1): ...
 Start Docker Desktop (Windows/macOS) or the docker service (Linux: ...), then
 run `harness doctor` to re-check.
 ```
 
-The tag (`df5a4799ca8c`) is a content hash, so yours matches only while the
-Dockerfile and `hb_entry.py` are the same files. A cosmetic quirk: the daemon
-advice can show a doubled period (`...specified.. Start`).
+The tag (`fb170acf1706`) is a content hash, so yours matches only while the
+Dockerfile, `hb_entry.py` and `requirements.txt` are the same files. An image
+built before the dependency pinning change has a different tag, so `harness
+doctor` reports the image missing until you rebuild.
 
 `--clean` additionally removes leftover containers (see [Cleanup](#cleanup)).
 
@@ -111,8 +112,8 @@ docker build -t harness-builder-sandbox:<hash> -f <path>/Dockerfile <path>
 ```
 
 Run it once. It needs network access to pull the pinned base image
-(`python:3.11-slim`, pinned by digest) and to `pip install` the curated package
-set. To print the command at any time:
+(`python:3.11-slim`, pinned by digest) and to download the curated wheels from
+PyPI. To print the command at any time:
 
 ```text
 uv run python -c "from harness_builder.executor.image_build import build_command; print(' '.join(build_command()))"
@@ -120,18 +121,23 @@ uv run python -c "from harness_builder.executor.image_build import build_command
 
 What is in the image:
 
-- Python 3.11 with `pydantic==2.14.3` and `pyyaml==6.0.3` (versions match the
-  host `uv.lock`; only these two are pinned, their dependencies are not, see
-  [isolation.md](isolation.md#known-issues-from-review)). Nothing else is installed; model code that imports other
+- Python 3.11 with six packages, all pinned with sha256 hashes in
+  `src/harness_builder/executor/image/requirements.txt`: `pydantic==2.14.3`,
+  `pydantic-core==2.50.4`, `annotated-types==0.8.0`,
+  `typing-extensions==4.16.0`, `typing-inspection==0.4.5` and `pyyaml==6.0.3`
+  (versions match the host `uv.lock`). They are installed with
+  `pip install --require-hashes --only-binary=:all:`, so only hash-matching wheels
+  are accepted. Nothing else is installed; model code that imports other
   third-party packages fails with `ModuleNotFoundError`. This package set is an
-  **ASSUMED** default (OQ-6).
+  **ASSUMED** default (OQ-6). Pinning applies to what the build downloads; the
+  base image digest and the hashes have not been exercised by a real build here.
 - A non-root user with uid 10001, `/work` as the working directory.
 - `/opt/hb/hb_entry.py`, the standard-library-only script that runs your code
   and provides `FINAL(...)`, and `/usr/local/bin/hb-final`, the bash equivalent.
 
 The tag is `harness-builder-sandbox:<12 hex chars>`, a SHA-256 over the
-`Dockerfile` and `hb_entry.py` (line endings normalised, so Windows and POSIX
-checkouts agree). Changing either file changes the tag, so `harness doctor`
+`Dockerfile`, `hb_entry.py` and `requirements.txt` (line endings normalised, so Windows and POSIX
+checkouts agree). Changing any of them changes the tag, so `harness doctor`
 reports the image missing until you rebuild. Containers are created with
 `--pull never`: the harness never downloads an image on its own.
 
@@ -152,9 +158,11 @@ timeout `docker kill` takes the place of `docker inspect`):
 3. `docker start -a` under the request timeout, capturing stdout and stderr with
    a per-stream cap.
 4. `docker inspect` for the real exit code and the out-of-memory flag.
-5. Reads the FINAL file, if any.
-6. `docker rm -f` in a `finally` block that is shielded from cancellation, then
-   deletes the staged files.
+5. `docker rm -f`, shielded from cancellation (also run on every error path).
+6. Only after the container is gone, reads the FINAL file, if any, then deletes
+   the staged files. FINAL is treated as unset if the removal failed or
+   `<workdir>/.hb` is no longer a real directory; the read refuses symlinks,
+   Windows junctions and a file swapped between check and open.
 
 Containers are named `hb-<run-id>-<n>` and carry the labels `harness-builder=1`
 and `hb.run=<run id>`. Each execution is a **fresh container**: variables do not

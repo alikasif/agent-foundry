@@ -22,9 +22,8 @@ to let a model run, which is the point of requirement FR-046.
   skipped. They have not passed; they have not failed; they are untested. Some
   of their expectations are guesses about Docker Desktop behaviour.
 - The code review of the Docker and CodeAct code (T034, status
-  CHANGES_REQUESTED) found issues that were being fixed when this page was
-  written. They are listed under [Known issues from review](#known-issues-from-review).
-  Until the fixes land, treat the corresponding statements as not yet true.
+  CHANGES_REQUESTED) found two MAJOR issues, since fixed in source but never run against Docker, and
+  deferred some minor ones. They are listed under [Known issues from review](#known-issues-from-review).
   Defaults marked **ASSUMED** are design placeholders.
 
 ## What is blocked
@@ -49,7 +48,7 @@ create --name hb-<run>-<n> --label harness-builder=1 --label hb.run=<run>
 | Network | `--network none` unless the `run_code` tool is configured with `network: true` | No interfaces except loopback: no DNS, no outbound or inbound connections. |
 | Environment | Explicit allowlist, no `--env-file`, `os.environ` never forwarded | The container sees only `PYTHONUNBUFFERED`, `HOME=/tmp`, `HB_FINAL_PATH` and any variables put in the request (`run_code` puts none). Your `OPENROUTER_API_KEY` is not passed. |
 | Host filesystem | Root filesystem `--read-only`; one read-write bind mount of the per-run temp directory at `/work`; a 64 MiB `tmpfs` at `/tmp` | Code can write only to `/work` and `/tmp`. Nothing else on the host is mounted (`run_code` adds no extra mounts). |
-| Docker socket | Mount builder rejects the socket, the Windows named pipe and any directory that contains the socket (`/`, `/var`, `/run`, `/var/run`) with `ConfigError` | The daemon is not reachable from inside the container through a mount. |
+| Docker socket | Mount builder rejects the socket, the Windows named pipe and any directory that contains the socket (`/`, `/var`, `/run`, `/var/run`), with `ConfigError`. It also covers podman and containerd sockets, `docker.sock.raw`, macOS `/private/var/run`, and on POSIX the per-user sockets under `$HOME`, `$XDG_RUNTIME_DIR` and a `unix://` `$DOCKER_HOST`; `$HOME` and its parents are refused as bind sources on POSIX | A denylist, not an allowlist: an unlisted socket path would not be caught. `run_code` adds no extra mounts today. |
 | Privileges | `--cap-drop ALL`, `--security-opt no-new-privileges`, non-root user | No Linux capabilities, no setuid escalation. POSIX hosts run as the host `uid:gid` (so the container can write the bind mount); Windows hosts run as uid 10001. |
 | Memory | `--memory 512m`, `--memory-swap 512m` | Over-use is OOM-killed; `ExecResult.oom_killed` reports it (from `docker inspect`). |
 | CPU | `--cpus 1` | CPU time is throttled, not killed. |
@@ -57,7 +56,7 @@ create --name hb-<run>-<n> --label harness-builder=1 --label hb.run=<run>
 | Time | Request timeout (default 30 s), then `docker kill` | `ExecResult.timed_out=True`, exit code `None`. |
 | Output | Per-stream cap 64 KiB, the rest is drained and counted | A 10 MB `print` cannot exhaust host memory; `truncated=True`. |
 | Lifetime | One fresh container per execution, `docker rm -f` in `finally`; the per-run directory is deleted after the run | No process or in-memory state survives. Only files in `/work` survive, and only until the run ends. |
-| Image | `--pull never`, tag is a content hash of the Dockerfile and entry script, base image pinned by digest | The harness never pulls an image at run time. |
+| Image | `--pull never`, tag is a content hash of the Dockerfile, entry script and `requirements.txt`; base image pinned by digest; all six Python packages (pydantic's transitive ones included) hash-pinned and installed with `--require-hashes` | The harness never pulls an image at run time. |
 
 Limits above are **ASSUMED** defaults (OQ-13): 30 s, 64 KiB, 512 MiB, 1 CPU,
 128 pids. They are configurable only from code
@@ -78,7 +77,7 @@ double quote, CR or LF, or a relative path, is rejected with `ConfigError`.
 | **Default seccomp and AppArmor profiles** | The harness passes no custom profile, so whatever Docker applies by default applies. It does not tighten or verify it. |
 | **Network opt-in is unrestricted** | With `network: true` the container has ordinary outbound access: no allowlist, no filtering. Anything readable inside the container, including everything in `/work` and anything the model puts in its code, can be sent out. |
 | **Disk use of `/work`** | The bind mount has no quota. Code can fill the host disk under the system temp directory. The 64 MiB limit applies to `/tmp` only. |
-| **Contents of `/work` are untrusted** | Files persist between blocks of a run, so one block can plant files for the next (for example a Python module that the next block imports, which the prompt even invites). The host reads only the FINAL file from it; it ignores a symlink and reads at most the output cap, but see the open race under [Known issues](#known-issues-from-review). |
+| **Contents of `/work` are untrusted** | Files persist between blocks of a run, so one block can plant files for the next (for example a Python module that the next block imports, which the prompt even invites). The host reads only the FINAL file from it, after the container has been removed, refusing symlinks, junctions and swapped files and reading at most the output cap. |
 | **FINAL is just model output** | `FINAL(...)` and `hb-final` write a file that the code itself controls. A model can set a final answer without having computed anything; it is not evidence of correctness. A final answer is also honoured when the run timed out or exited non-zero, as long as the file was written first. |
 | **Output reaches the model and the trace** | Anything the code prints (including secrets it reads from `/work`) goes into the conversation and the trace file. Trace redaction ([traces.md](traces.md#redaction)) scrubs known secret values from the environment and `.env`, not arbitrary data. |
 | **Image contents** | The image is Python 3.11 plus pydantic and pyyaml and the usual `python:3.11-slim` userland (including `bash` and coreutils). Code can use all of it. |
@@ -92,38 +91,27 @@ passed.
 
 ## Known issues from review
 
-From `shared/reviews/T034_review.md`, **open when this page was written** (no fix
-commit existed yet; check `git log` for T034 fixes before relying on any of these
-being resolved):
+From `shared/reviews/T034_review.md`. The two MAJOR findings (FINAL read race and
+unpinned image dependencies) were fixed after review and are described in the
+sections above. These findings were deferred and are **still open**:
 
-- **FINAL file read race (MAJOR).** The host reads the FINAL file and checks for a
-  symlink as two steps, and on a timeout it may read while the container is still
-  alive if `docker kill` failed. Code in the container could swap the file for a
-  symlink to a host path in that window, putting that file's contents into the
-  model context and trace. The reviewer rates it as needing `docker kill` to
-  fail first. Fix requested: read only after the container is removed, and open
-  without following links.
-- **Image dependencies only partly pinned (MAJOR).** The base image is pinned by
-  digest and `pydantic` and `pyyaml` by version, but their transitive
-  dependencies are not pinned or hash-checked, so two builds of the same tag can
-  differ. Do not read "content-hash tag" as "reproducible image" until a fully
-  hashed requirements file is added.
 - **Root hosts.** On a POSIX host running as root, the sandbox user is `0:0`
   (capabilities are still dropped).
-- **Socket check is a denylist.** It does not catch rootless Docker, Docker
-  Desktop home-directory or podman sockets. Not reachable today (the workdir is
-  always a fresh temp dir and `run_code` adds no mounts) but it would be once
-  extra read-only mounts are fed in.
-- **Unbounded numeric settings.** `pids=0` or `-1` disables the pids limit;
-  other non-positive values are not validated. `state_mode="session"` is accepted
-  and ignored.
+- **Socket check is still a denylist.** It was extended (see the table above) but
+  an unlisted socket path would pass. Not reachable today because `run_code` adds
+  no mounts.
+- **State mode.** `state_mode="session"` is accepted and ignored (always
+  stateless). Non-positive or non-finite limits and timeouts now raise.
 - **Network opt-in reaches more than the internet.** With `network: true` the
   container uses the default bridge and can reach host services, the LAN and
   cloud metadata endpoints.
-- **`harness doctor --clean` is global.** It removes every container labelled
+- **`harness doctor --clean` is label-only.** It removes every container labelled
   `harness-builder=1`, including running containers of another live harness run.
 - **Misreported failures.** A container that never started (bad mount, bad user)
   may be reported as an ordinary run of the code with exit code 125 to 128.
+- **Docker create timeout and ReAct output.** A timeout of `docker create` is not
+  mapped to an `executor_error`, and under ReAct `run_code` output has no
+  observation-level cap (64 KiB per stream).
 - **FINAL on failure.** A FINAL answer is accepted with a non-zero exit, timeout
   or OOM; the reviewer recommends accepting it only on a clean exit.
 - **No partial output on timeout** (stdout and stderr are dropped), and a FINAL

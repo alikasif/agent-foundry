@@ -164,8 +164,9 @@ How the answer reaches the loop:
 
 1. The entry script writes the answer as a JSON string to the file named by
    `HB_FINAL_PATH`.
-2. After the container exits, the executor reads that file, ignoring symlinks and
-   reading at most the output cap.
+2. After the container has been removed, the executor reads that file, refusing
+   links and reading at most the output cap. If the container could not be
+   removed, FINAL is treated as unset.
 3. `run_code` copies it to the observation's `final` field; the loop stops with
    reason `done` and that answer.
 
