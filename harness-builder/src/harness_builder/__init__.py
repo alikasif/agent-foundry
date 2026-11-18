@@ -14,12 +14,14 @@ if TYPE_CHECKING:
         ApprovalRequest,
         BudgetLimits,
         BudgetSnapshot,
+        ChildProfile,
         ErrorObservation,
         HookOutcome,
         Message,
         ModelConfig,
         Observation,
         PermissionDecision,
+        Rule,
         RunResult,
         StepDecision,
         StopInfo,
@@ -38,12 +40,16 @@ if TYPE_CHECKING:
     )
     from harness_builder.executor.models import ExecRequest, ExecResult, SandboxConfig
     from harness_builder.llm.types import LLMRequest, LLMResponse, ToolSchema
+    from harness_builder.tools.registry import Tool, tool
+    from harness_builder.trace.diff import diff_traces
     from harness_builder.trace.models import Trace, TraceStep
+    from harness_builder.trace.replay import replay
 
 __all__ = [
     "ApprovalRequest",
     "BudgetLimits",
     "BudgetSnapshot",
+    "ChildProfile",
     "ConfigError",
     "DockerUnavailableError",
     "ErrorObservation",
@@ -60,12 +66,14 @@ __all__ = [
     "Observation",
     "PermissionDecision",
     "ReplayDivergence",
+    "Rule",
     "RunResult",
     "SandboxConfig",
     "Settings",
     "SpecError",
     "StepDecision",
     "StopInfo",
+    "Tool",
     "ToolCall",
     "ToolOutcome",
     "ToolResult",
@@ -74,6 +82,9 @@ __all__ = [
     "TraceStep",
     "Usage",
     "ValidatedCall",
+    "diff_traces",
+    "replay",
+    "tool",
 ]
 
 _MODULES = (
@@ -84,6 +95,9 @@ _MODULES = (
     "harness_builder.trace.models",
     "harness_builder.config",
     "harness_builder.core.builder",
+    "harness_builder.tools.registry",
+    "harness_builder.trace.diff",
+    "harness_builder.trace.replay",
 )
 
 

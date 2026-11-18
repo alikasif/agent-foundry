@@ -150,8 +150,8 @@ def derive_args_model(fn: Callable[..., Any], tool_name: str) -> type[BaseModel]
 class ToolRegistry:
     """Default registry: holds tools, validates calls, invokes tool bodies.
 
-    Accepts any ``ToolDefinition`` that also has a callable ``fn`` attribute
-    (``Tool`` or an equivalent object such as a container-backed tool).
+    Accepts any ``ToolDefinition`` (``Tool`` or an equivalent object such as
+    a container-backed tool); ``fn`` is part of that protocol.
     """
 
     def __init__(self, tools: Iterable[protocols.ToolDefinition] = ()) -> None:
@@ -162,10 +162,17 @@ class ToolRegistry:
             self.register(item)
 
     def register(self, tool: protocols.ToolDefinition) -> None:
-        """Add ``tool``; raises ``ConfigError`` on a duplicate name or no ``fn``."""
+        """Add ``tool``; raises ``ConfigError`` on a duplicate name or no ``fn``.
+
+        The ``fn`` check still runs because untyped callers can pass any
+        object; pyrefly checks typed callers against ``ToolDefinition``.
+        """
         if tool.name in self._tools:
             raise ConfigError(f"tool {tool.name!r} is already registered")
-        fn = getattr(tool, "fn", None)
+        try:
+            fn = tool.fn
+        except AttributeError:
+            fn = None
         if not callable(fn):
             raise ConfigError(f"tool {tool.name!r} has no callable 'fn'")
         self._tools[tool.name] = tool

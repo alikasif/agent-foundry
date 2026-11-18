@@ -41,6 +41,7 @@ from harness_builder.core.protocols import (
     Budget,
     ContextPolicy,
     Executor,
+    ExecutorTool,
     LLMClient,
     PermissionPolicy,
     Strategy,
@@ -73,7 +74,6 @@ from harness_builder.permissions.policy import (
 )
 from harness_builder.strategies.registry import get_strategy
 from harness_builder.tools.builtin.deref import DerefTool
-from harness_builder.tools.builtin.run_code import ExecutorTool
 from harness_builder.tools.builtin.spawn import (
     DEFAULT_MAX_DEPTH,
     SPAWN_TOOL_NAME,
@@ -327,7 +327,7 @@ class HarnessBuilder:
         return self
 
     def tools(self, *tools: ToolDefinition) -> Self:
-        """Register tools (``Tool`` or objects with the attributes plus ``fn``)."""
+        """Register tools: ``Tool`` or any ``ToolDefinition`` implementation."""
         self._tools.extend(tools)
         return self
 

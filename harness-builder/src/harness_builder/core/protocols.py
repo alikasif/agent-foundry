@@ -6,7 +6,7 @@ concrete layer. Async methods run under anyio.
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -144,7 +144,12 @@ class RunContextView(Protocol):
 
 
 class ToolDefinition(Protocol):
-    """Structural view of a registered tool (concrete ``Tool`` lives in T004)."""
+    """Structural view of a registered tool (concrete ``Tool`` lives in T004).
+
+    ``fn`` is the tool body (T024 B2): called with one keyword argument per
+    ``args_model`` field, plus ``ctx`` when it declares that parameter. A
+    method named ``fn`` satisfies it.
+    """
 
     @property
     def name(self) -> str:
@@ -174,6 +179,11 @@ class ToolDefinition(Protocol):
     @property
     def risk(self) -> frozenset[ToolRisk]:
         """Risk tags used by permissions and preflight."""
+        ...
+
+    @property
+    def fn(self) -> Callable[..., Any]:
+        """The tool body, sync or async; its return becomes the observation."""
         ...
 
 
@@ -283,6 +293,26 @@ class Executor(Protocol):
 
     async def preflight(self) -> None:
         """Raise ``DockerUnavailableError`` when the sandbox cannot run."""
+        ...
+
+
+@runtime_checkable
+class ExecutorTool(Protocol):
+    """A tool that needs the harness Executor (run_code; ContainerTool, T039).
+
+    ``HarnessBuilder.build()`` replaces each such tool whose ``executor`` is
+    None with ``with_executor(<harness executor>)`` and preflights every
+    distinct executor once. Executor-backed tools must implement it, or they
+    get neither an executor nor Docker preflight (T024 B2).
+    """
+
+    @property
+    def executor(self) -> Executor | None:
+        """The bound executor; None until the builder binds one."""
+        ...
+
+    def with_executor(self, executor: Executor) -> ToolDefinition:
+        """A copy of this tool bound to ``executor``."""
         ...
 
 

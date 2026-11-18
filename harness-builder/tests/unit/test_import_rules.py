@@ -46,8 +46,9 @@ SPEC_MODELS = f"{PKG}.spec.models"
 ERRORS = f"{PKG}.errors"
 CONFIG = f"{PKG}.config"
 LEAVES: frozenset[str] = frozenset((*LEAF_ORDER, SPEC_MODELS))
-SHARED: frozenset[str] = LEAVES | {ERRORS, CONFIG, PKG}
-"""Modules any layer may import."""
+SHARED: frozenset[str] = LEAVES | {ERRORS, CONFIG}
+"""Modules any layer may import. Not the root package: its lazy re-exports
+would hide a cross-layer import (T024 m1)."""
 
 LEAF_THIRD_PARTY: frozenset[str] = frozenset({"pydantic", "pydantic_core"})
 
@@ -489,6 +490,11 @@ def test_layer_importing_other_layer_concrete_is_rejected() -> None:
 
 def test_layer_importing_other_layer_package_is_rejected() -> None:
     src = "from harness_builder import tools\n"
+    assert _violations(f"{PKG}.hooks.manager", src)
+
+
+def test_root_package_reexport_import_is_rejected() -> None:
+    src = "from harness_builder import HarnessBuilder\n"
     assert _violations(f"{PKG}.hooks.manager", src)
 
 

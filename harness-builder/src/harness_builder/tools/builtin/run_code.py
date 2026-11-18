@@ -9,16 +9,17 @@ the ``ExecResult``, ``final`` set when the code called ``FINAL()`` /
 
 The tool never builds an executor itself: ``HarnessBuilder.build()`` binds
 its executor to every unbound ``ExecutorTool`` (via ``with_executor``) and
-runs Docker preflight once. Executor failures (``ConfigError``,
+runs Docker preflight once. ``ExecutorTool`` lives in ``core.protocols``
+(T024 B2) and is re-exported here. Executor failures (``ConfigError``,
 ``DockerUnavailableError``) become ``executor_error`` observations.
 """
 
 import math
-from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from harness_builder.core.protocols import Executor, RunContextView, ToolDefinition
+from harness_builder.core.protocols import Executor, RunContextView
+from harness_builder.core.protocols import ExecutorTool as ExecutorTool
 from harness_builder.core.types import ErrorObservation, Observation, ToolRisk
 from harness_builder.errors import ConfigError, DockerUnavailableError
 from harness_builder.executor.models import ExecRequest, Language, SandboxConfig
@@ -39,25 +40,6 @@ CONTENT_FIELDS = frozenset(
     }
 )
 """``ExecResult`` fields copied into ``content`` (volatile ones left out)."""
-
-
-@runtime_checkable
-class ExecutorTool(Protocol):
-    """A tool that needs the harness Executor (run_code; ContainerTool, T039).
-
-    ``HarnessBuilder.build()`` replaces each such tool whose ``executor`` is
-    None with ``with_executor(<harness executor>)`` and preflights every
-    distinct executor once.
-    """
-
-    @property
-    def executor(self) -> Executor | None:
-        """The bound executor; None until the builder binds one."""
-        ...
-
-    def with_executor(self, executor: Executor) -> ToolDefinition:
-        """A copy of this tool bound to ``executor``."""
-        ...
 
 
 class RunCodeArgs(BaseModel):
