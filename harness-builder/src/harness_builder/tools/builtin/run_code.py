@@ -13,6 +13,7 @@ runs Docker preflight once. Executor failures (``ConfigError``,
 ``DockerUnavailableError``) become ``executor_error`` observations.
 """
 
+import math
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -108,8 +109,8 @@ class RunCodeTool:
         if timeout_s is not None:
             if isinstance(timeout_s, bool) or not isinstance(timeout_s, int | float):
                 raise TypeError(f"timeout_s must be a number, got {timeout_s!r}")
-            if timeout_s <= 0:
-                raise ValueError(f"timeout_s must be > 0, got {timeout_s}")
+            if not math.isfinite(timeout_s) or timeout_s <= 0:
+                raise ValueError(f"timeout_s must be finite and > 0, got {timeout_s}")
         if network is not None and not isinstance(network, bool):
             raise TypeError(f"network must be true or false, got {network!r}")
         self.timeout_option = timeout_s

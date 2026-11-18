@@ -4,6 +4,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 
@@ -21,6 +23,7 @@ from harness_builder.executor.paths import (
     host_socket_paths,
     is_docker_socket_path,
 )
+from harness_builder.tools.builtin.run_code import RunCodeTool
 
 IMAGE = "hb-test:1"
 NAME = "hb-run1-1"
@@ -379,3 +382,60 @@ async def test_daemon_advice_has_no_double_period() -> None:
     assert failure is not None and failure.name == "daemon"
     assert "specified. Start Docker Desktop" in failure.detail
     assert ".." not in failure.detail
+
+
+# --- Windows junctions (no privilege needed) ----------------------------------
+
+
+def _junction(link: Path, target: Path) -> None:
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+async def test_hb_replaced_by_junction_during_run_ignores_final(
+    tmp_path: Path, spy: Callable[[FakeDockerCli], None]
+) -> None:
+    work, target = tmp_path / "work", tmp_path / "host"
+    work.mkdir()
+    target.mkdir()
+    hb = work / ".hb"
+
+    def swap() -> None:
+        name = next(hb.glob("*.final.json")).name
+        (target / name).write_text(json.dumps("host secret"))
+        shutil.rmtree(hb)
+        _junction(hb, target)
+
+    cli = FinalWriter(work, swap)
+    spy(cli)
+    result = await make(cli).run(request(work))
+    assert READ not in cli.commands()
+    assert not result.final_set
+    assert len(list(target.glob("*.final.json"))) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+async def test_existing_hb_junction_rejected_before_create(tmp_path: Path) -> None:
+    target = tmp_path / "host"
+    target.mkdir()
+    (tmp_path / "work").mkdir()
+    _junction(tmp_path / "work" / ".hb", target)
+    cli = FakeDockerCli()
+    with pytest.raises(ConfigError):
+        await make(cli).run(request(tmp_path / "work"))
+    assert cli.calls == []
+
+
+# --- run_code timeout option --------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 0, -1])
+def test_run_code_rejects_non_finite_timeout(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        RunCodeTool(timeout_s=value)
