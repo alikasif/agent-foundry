@@ -3,8 +3,12 @@
 The loader makes the same builder calls a code-built harness would, so equal
 settings give an equal ``HarnessConfig`` and ``config_hash`` (FR-016). Absent
 sections make no call, keeping the builder defaults. Semantic problems (an
-unknown strategy or builtin, bad builtin options, a prompt file outside the
-harness directory) are ``SpecError``s located like the schema errors.
+unknown strategy or builtin, bad strategy or builtin options, a duplicate
+builtin, a strategy's required tool or a profile tool the spec does not
+provide, a file reference that resolves outside the harness directory) are
+``SpecError``s located like the schema errors. Environment-dependent problems
+(no model or API key, no price under a cost cap, Docker) stay ``ConfigError``
+or ``DockerUnavailableError`` from ``build()``.
 
 The resolved spec (prompt files inlined) is stored on the builder and written
 to the trace as ``spec_snapshot``, so a run can be rebuilt from its trace
@@ -17,7 +21,8 @@ from typing import Any
 
 from harness_builder.config import Settings
 from harness_builder.core.builder import ChildProfile, HarnessBuilder
-from harness_builder.core.protocols import ToolDefinition
+from harness_builder.core.protocols import Strategy, ToolDefinition
+from harness_builder.errors import ConfigError
 from harness_builder.permissions.policy import Rule
 from harness_builder.spec.io import (
     find_spec_file,
@@ -32,8 +37,9 @@ from harness_builder.spec.models import (
     PromptsSpec,
     RuleSpec,
 )
-from harness_builder.strategies.registry import strategy_names
+from harness_builder.strategies.registry import get_strategy, strategy_names
 from harness_builder.tools.builtin.run_code import RUN_CODE_TOOL_NAME, run_code
+from harness_builder.tools.builtin.spawn import SPAWN_TOOL_NAME
 
 BUILTIN_TOOLS: dict[str, Callable[..., ToolDefinition]] = {
     RUN_CODE_TOOL_NAME: run_code,
@@ -98,6 +104,8 @@ def builder_from_spec(
     """
     system = _system_prompt(spec.prompts, base_dir, source)
     _check_strategies(spec, source)
+    tools = _tools(spec, source)
+    _check_tool_needs(spec, [tool.name for tool in tools], source)
     builder = HarnessBuilder(spec.name, settings)
     if spec.model is not None:
         builder.model(
@@ -107,7 +115,7 @@ def builder_from_spec(
         )
     builder.strategy(spec.strategy.name, **spec.strategy.options)
     builder.system_prompt(system)
-    builder.tools(*_tools(spec, source))
+    builder.tools(*tools)
     if spec.context is not None:
         policy, options = _context(spec.context, source)
         builder.context(policy, **options)
@@ -144,17 +152,42 @@ def _system_prompt(prompts: PromptsSpec, base_dir: Path | None, source: str) -> 
     if isinstance(prompts.system, str):
         return prompts.system
     where = "prompts.system.file"
-    rel = Path(prompts.system.file)
+    target = resolve_inside(base_dir, prompts.system.file, source, where)
+    try:
+        return target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise spec_error(
+            source, where, f"cannot read {prompts.system.file}: {exc}"
+        ) from exc
+
+
+def resolve_inside(
+    base_dir: Path | None, rel_path: str, source: str, where: str
+) -> Path:
+    """Resolve a spec file reference that must stay inside ``base_dir``.
+
+    Absolute paths, drives and ``..`` are rejected lexically. The joined path
+    is then resolved (following symlinks and junctions) and must still lie
+    under the resolved ``base_dir``, so a link cannot leave the harness
+    directory. Every file reference of a spec goes through here (T040: module
+    tools and hooks, eval files).
+    """
+    rel = Path(rel_path)
     if rel.is_absolute() or rel.drive or rel.root or ".." in rel.parts:
         raise spec_error(
             source, where, "must be a relative path inside the harness directory"
         )
     if base_dir is None:
-        raise spec_error(source, where, "prompt files need a spec file or directory")
-    try:
-        return (base_dir / rel).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise spec_error(source, where, f"cannot read {rel}: {exc}") from exc
+        raise spec_error(source, where, "file references need a spec file or directory")
+    root = base_dir.resolve()
+    target = (base_dir / rel).resolve()
+    if not target.is_relative_to(root):
+        raise spec_error(
+            source,
+            where,
+            "must resolve inside the harness directory (a link leaves it)",
+        )
+    return target
 
 
 def _check_strategies(spec: HarnessSpec, source: str) -> None:
@@ -174,9 +207,72 @@ def _check_strategies(spec: HarnessSpec, source: str) -> None:
             )
 
 
+def _check_tool_needs(spec: HarnessSpec, declared: list[str], source: str) -> None:
+    """Located checks of what ``build()`` would reject from the spec alone.
+
+    Strategy options must bind, each strategy's ``required_tools`` must be
+    available, and a top-level profile may list only tools this harness has
+    (declared builtins plus ``deref``/``spawn_agent`` implied by ``context``
+    and ``subagents``). Tools chained later with ``.tools()`` are not known
+    here, so a spec must declare what its strategy requires.
+    """
+    available = set(declared)
+    if spec.context is not None and spec.context.policy == "by_reference":
+        available.add("deref")
+    if spec.subagents is not None:
+        available.add(SPAWN_TOOL_NAME)
+    top = _strategy(spec.strategy.name, spec.strategy.options, source, "strategy")
+    _check_required(top, available, source, "strategy.name")
+    if spec.subagents is None:
+        return
+    for name, profile in spec.subagents.profiles.items():
+        where = f"subagents.profiles.{name}"
+        tools = available if profile.tools is None else set(profile.tools)
+        unknown = sorted(tools - available)
+        if unknown:
+            raise spec_error(
+                source, f"{where}.tools", f"not tools of this harness: {unknown}"
+            )
+        if profile.strategy is None:
+            _check_required(top, tools, source, f"{where}.tools")
+            continue
+        strategy = _strategy(profile.strategy, profile.strategy_options, source, where)
+        _check_required(strategy, tools, source, f"{where}.strategy")
+
+
+def _strategy(name: str, options: dict[str, Any], source: str, where: str) -> Strategy:
+    """Build the strategy to check its options (``<where>.options``)."""
+    try:
+        return get_strategy(name, options)
+    except (ConfigError, TypeError, ValueError) as exc:
+        field = "options" if where == "strategy" else "strategy_options"
+        raise spec_error(source, f"{where}.{field}", str(exc)) from exc
+
+
+def _check_required(
+    strategy: Strategy, tools: set[str], source: str, where: str
+) -> None:
+    missing = sorted(strategy.required_tools - tools)
+    if missing:
+        raise spec_error(
+            source,
+            where,
+            f"strategy {strategy.name!r} requires tools {missing}; "
+            "list them under tools",
+        )
+
+
 def _tools(spec: HarnessSpec, source: str) -> list[ToolDefinition]:
     tools: list[ToolDefinition] = []
+    seen: dict[str, int] = {}
     for index, ref in enumerate(spec.tools):
+        if ref.builtin in seen:
+            raise spec_error(
+                source,
+                f"tools[{index}].builtin",
+                f"duplicate tool {ref.builtin!r} (also tools[{seen[ref.builtin]}])",
+            )
+        seen[ref.builtin] = index
         factory = BUILTIN_TOOLS.get(ref.builtin)
         if factory is None:
             hint = IMPLIED_TOOLS.get(ref.builtin)

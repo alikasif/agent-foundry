@@ -351,7 +351,13 @@ class StepLoop:
 
         outcome = await self.hooks.pre_tool(vcall.call, ctx)
         if outcome.action == "stop":
-            raise _VetoStopError(outcome.reason or "stopped by pre_tool hook")
+            reason = outcome.reason or "stopped by pre_tool hook"
+            # Pair the traced tool_call with a tool_result before the run ends.
+            error = ErrorObservation(type="hook_blocked", message=reason)
+            ctx.recorder.record(
+                ToolResultEvent(call_id=call.id, observation=_failed(call.id, error))
+            )
+            raise _VetoStopError(reason)
         if outcome.action == "block":
             error = ErrorObservation(
                 type="hook_blocked",

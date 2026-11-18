@@ -69,12 +69,18 @@ def _fail(message: str, code: int) -> click.exceptions.Exit:
 
 @contextmanager
 def _exit_codes() -> Generator[None, None, None]:
-    """Map framework errors to exit codes: config/spec 2, Docker 3."""
+    """Map errors to exit codes: config/spec/file 2, Docker 3, other framework 1.
+
+    Any other ``HarnessError`` (for example a ``RedactionError`` while the
+    trace is finished) is a failed run; an ``OSError`` (for example writing
+    ``--trace``) is a usage error. Both print ``error: <msg>``, no traceback.
+    """
     from pydantic import ValidationError
 
     from harness_builder.errors import (
         ConfigError,
         DockerUnavailableError,
+        HarnessError,
         SpecError,
     )
 
@@ -85,6 +91,10 @@ def _exit_codes() -> Generator[None, None, None]:
     except DockerUnavailableError as exc:
         raise _fail(str(exc), EXIT_DOCKER) from exc
     except ValidationError as exc:
+        raise _fail(str(exc), EXIT_USAGE) from exc
+    except HarnessError as exc:
+        raise _fail(f"{type(exc).__name__}: {exc}", EXIT_FAILED) from exc
+    except OSError as exc:
         raise _fail(str(exc), EXIT_USAGE) from exc
 
 
@@ -130,9 +140,9 @@ def run(
             builder.trace_dir(None)
         harness = builder.build()
         result, trace = anyio.run(harness.run_traced, task)
-    path = result.trace_path
-    if trace_file is not None:
-        path = str(write_trace(trace, trace_file))
+        path = result.trace_path
+        if trace_file is not None:
+            path = str(write_trace(trace, trace_file))
     if result.answer is not None:
         click.echo(result.answer)
     stop = result.stop

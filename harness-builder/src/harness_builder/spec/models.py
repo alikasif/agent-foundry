@@ -82,6 +82,19 @@ class PermissionsSpec(_Spec):
     rules: list[RuleSpec] = Field(default_factory=list)
 
 
+class BudgetSpec(_Spec):
+    """Run limits (``core.types.BudgetLimits``) with spec-level bounds.
+
+    ``max_steps`` must be at least 1 (a spec with 0 or less would stop
+    before any step); unset limits are unlimited.
+    """
+
+    max_steps: int = Field(default=BudgetLimits().max_steps, ge=1)
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    max_cost_usd: float | None = Field(default=None, ge=0)
+
+
 class BuiltinHookRef(_Spec):
     """A built-in hook by name, registered for ``event`` at ``priority``."""
 
@@ -128,6 +141,6 @@ class HarnessSpec(_Spec):
     tools: list[BuiltinToolRef] = Field(default_factory=list)
     context: ContextSpec | None = None
     permissions: PermissionsSpec = Field(default_factory=PermissionsSpec)
-    budget: BudgetLimits = Field(default_factory=BudgetLimits)
+    budget: BudgetSpec = Field(default_factory=BudgetSpec)
     hooks: list[BuiltinHookRef] = Field(default_factory=list)
     subagents: SubagentsSpec | None = None
