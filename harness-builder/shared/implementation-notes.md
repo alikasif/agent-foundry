@@ -1161,3 +1161,70 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
 - **Import rules.** `retriever.py` imports only stdlib and the `core.types` leaf. No allowlist change. A subprocess test checks that importing it loads no `skillful_agent`/`google.adk`/`google.genai`/`litellm`. The bare `google` namespace package does show up in `sys.modules` from a `.pth` file in the venv, so the check uses those prefixes.
 - **Contracts.** T051: `r = LexicalRetriever(); r.index(store.catalog_entries(manager)); r.search(task_text, k=cfg.top_k)`, re-indexing after promotion. `ScoredSkill.entry.path` is the absolute SKILL.md. T052: `r.similarity(candidate.description, live.description)` with the index built from live entries (or empty). T054: tie-break order, the `[]` cases, and the `tokenize` normalisation are the stable surface. Weights are constants and may be retuned.
 - **Commit.** `b857764` (code and tests). Full suite: 1492 passed, 37 skipped; `ruff format`/`ruff check`/`pyrefly check` (0 errors, 39 suppressed) clean.
+
+### T052
+- **Verified success (OQ-9 ASSUMED, T036 condition).** `promotion.verified_success(result, last_obs)` requires all of: `stop.reason == "done"`, an answer, and a last invoked `run_code` observation that is `ok`, has `exec`, `final_set`, `exit_code == 0`, not `timed_out`, not `oom_killed`, and `final_value == result.answer`. The last check is my addition. It ties the FINAL to the answer that ended the run, so an earlier successful block followed by a plain-text answer is not promoted. The "passing test" part of OQ-9 is checked by `CandidateValidator` before the gate, not in the hook.
+- **How the hook sees the ExecResult.** `RunContextView` exposes only messages, and rendered messages lose `exec`. So `PromotionHook` has two handlers:
+  - `post_tool(call, obs, ctx)` remembers the last `run_code` call and observation per `ctx.run_id`. The loop calls `post_tool` only for invoked calls. At most 64 runs are remembered.
+  - `on_stop(result, ctx)` pops that entry and decides.
+  - Wiring for T051: register both with `priority=PROMOTION_HOOK_PRIORITY` (1_000_000), so the hook runs last. A veto by an earlier hook short-circuits, so a vetoed answer is never promoted (tested).
+- **Errors and veto.** `on_stop` always returns `None`. Errors are *not* swallowed in the hook. They propagate to `HookManager.on_stop`, which catches every `Exception`, records a `HookTraceEvent` with `error` set (for example `PromotionError: unparsable promotion output ...`) and continues with allow (U9). This is how "errors traced, never raised" is met without a second trace event. It is tested through a real `HookManager`. Calling the hook directly, outside a manager, can raise. Sub-agent runs (`ctx.depth > 0`) are never promoted (decision).
+- **Modes.**
+  - `on_stop` (default) calls `PromotionService.propose(source)` inline. The run's end waits for one LLM call.
+  - `deferred` calls `service.write_source(source)`, which writes only `pending/<cid>/source.json`. `service.propose_deferred(cid)` generates the candidate later; this is the T053 `harness skills propose` entry point.
+- **Candidate layout** (designs 4.7 plus files). `pending/<cid>/source.json` (`PromotionSource`), `pending/<cid>/<name>/{SKILL.md, scripts/<name>.py, tests/test_<name>.py}`, then `pending/<cid>/candidate.json` (`CandidateMeta`: schema_version 1, cid, name, created_at, model, usage, source). `candidate.json` is written last with an atomic write and marks the candidate complete. The skill dir is built in `<cid>/.tmp-<name>` and renamed into place. cids are `<UTC %Y%m%dT%H%M%SZ>-<8 hex>`.
+- **Script/test contract (for T051, T053, T055).**
+  - The script defines `main(args: dict) -> object`. Under `if __name__ == "__main__":` it reads the args as JSON from stdin and prints `json.dumps(main(args))`. This matches T051's `run_skill_script`, which sends the args on stdin.
+  - `<name>.py` is kebab-case and cannot be imported by name. The validator's stdlib runner (`validation.RUNNER`) therefore loads the script by path as module `skill_script` (`promotion.SCRIPT_ALIAS`), loads the test by path, and calls every argument-free `test_*` function. It prints `N ran, M failed` and exits 1 on any failure or when there are zero tests.
+  - The sandbox image has no pytest (requirements.txt), so generated tests must use plain `assert`.
+- **PromotionService.**
+  - `PromotionService(store, llm, model, *, budget_factory=None, id_factory, clock)` makes one `LLMRequest(purpose="promotion")` per proposal.
+  - **Own budget.** `budget_factory()` is called once per proposal. It is checked with `check_before_step()` before the call (an exhausted budget raises `PromotionError` and the LLM is never called) and charged with `record_llm` after. The run ledger is never charged. With no factory, exactly one call is made.
+  - `budget.ledger` is another layer, so the composition root (T051/T053) must pass for example `lambda: BudgetLedger(max_steps=1, max_cost_usd=...)`.
+  - Promotion LLM calls are **not** recorded into the run trace. A `purpose="promotion"` `LlmCallEvent` inside the run trace could disturb replay; T051 may add this if wanted.
+  - The reply must be one JSON object (`name, description, triggers, instructions, script, test`), optionally in a code fence. The name must pass `validate_skill_name` before any path is built, so `../escape` raises.
+  - The frontmatter is written with `yaml.safe_dump`, not an f-string.
+- **CandidateValidator order (deviation from designs 10.3 order).** The checks run in this order:
+  1. layout and confinement;
+  2. a zero-warning throwaway `ScopedSkillManager([pending/<cid>])` that must discover exactly `[name]`;
+  3. strict frontmatter;
+  4. `ast.parse` of the script and the test;
+  5. `safety.screen` of the script and the test;
+  6. dedup;
+  7. the sandbox test, **only if steps 1-5 left no reason**.
+
+  The Docker test runs last so that a malformed or unsafe candidate never costs a container run. Every failure adds a reason and `ok` means no reasons.
+  - **Confinement.** The candidate may contain only `candidate.json`, `source.json`, `<name>/`, `<name>/scripts/`, `<name>/tests/` and the three files. Anything else is `unexpected entry`. Symlinks and any Windows reparse point are refused (checked with `os.lstat` and `st_reparse_tag`, which covers junctions on Python 3.11 as well), as is anything resolving outside the candidate.
+  - **Digests.** `tree_digest` (SHA-256 over relative paths and bytes) is computed before and after reading the files and must match. It is stored in the report.
+  - **Zero warnings.** `warnings.simplefilter("always")` is set inside `catch_warnings(record=True)`, because the per-location registry would otherwise hide a repeated name/dir mismatch warning (tested twice in one session). A skill the sibling skips with `logger.error` (missing description, bad YAML) records no warning, so "discovered exactly [name]" is also required.
+  - **Found while testing: the sibling `_parse_skill_md` splits on the first two `---` anywhere in the file.** A description such as `a --- b` was silently cut to `a`, and the candidate passed. The validator now parses the frontmatter strictly: it must be one `---`-fenced YAML mapping with no `---` inside, and it must equal the catalog's lenient parse. An injected `\n---\nname: evil` makes the sibling skip the skill, which is rejected as "discovered []". Note for T054/T056: live skills written by hand can still hit this sibling quirk.
+  - **Safety.** A `secret` finding in the script or the test rejects the candidate. Other categories (network, subprocess, delete, dynamic_exec) are shown to the approver, and `report.flagged` blocks auto-approve.
+  - **Sandbox test.** It runs as `ExecRequest(language="python", code=RUNNER, workdir=<fresh temp dir>, timeout_s=60, network=False, ro_mounts={<resolved skill dir>: "/skill"})`. It passes only with `exit_code == 0`, no timeout and no OOM. With no executor, or on `ConfigError` or `DockerUnavailableError`, the test check fails closed ("test did not run"), so the candidate cannot be approved without Docker. The T039 `check_ro_source` allowlist applies to the mount; project skills roots are accepted, but a skills root equal to the home dir or a drive root would be refused by the executor.
+  - **Dedup (OQ-12).** `DEDUP_THRESHOLD = 0.7`, not designs' 0.8, per the T050 calibration (one substituted word scored 0.77). An exact name collision is checked first and proposes `replace`. A description similarity of 0.9 or more proposes `skip`, and 0.7 or more proposes `merge`. The index is built from live `store.catalog_entries()` (empty library means uniform IDF). Dedup is informational: it does not reject. **Merge is not automated.** A human merges by editing; the gate only offers new or replace.
+- **ApprovalGate.**
+  - `ApprovalGate(store, validator, approver=None, *, console=None, auto_approve=False)`; `review(cid, *, replace=False) -> ReviewOutcome(cid, name, decision: promoted|denied|invalid, reasons, report, live_path, trashed)`. It re-validates on every review.
+  - **Fail-closed rules.**
+    - Invalid candidates are rejected before the approver is asked.
+    - A name collision without `replace=True` is `invalid`.
+    - `approver=None` means `AutoDenyPromotionApprover`.
+    - An approver that raises, or returns anything but `True` (for example `"yes"`), is a no.
+  - **Approvers are a gate-local `PromotionApprover` protocol** (`approve(CandidateReview) -> bool`, with `CandidateReview(report, replace, existing)`), not `core.protocols.Approver`. `ApprovalRequest` is shaped for tool calls, and `permissions.approvers` is another layer. Provided: `AutoDenyPromotionApprover`, `StaticPromotionApprover` (tests, records reviews) and `CliPromotionApprover` (rich `Confirm`, default no, EOF/Ctrl-C mean no).
+  - The review is printed with `rich.text.Text` only, so markup in candidate content is shown literally. `printable()` escapes control and format characters (ANSI escapes, bidi overrides), so content cannot hide lines from the reviewer.
+- **Atomic promote (deviation from designs 10.3 staging path).** `promote(report, replace=)` copies `pending/<cid>/<name>` to **`.agents/.tmp-<cid>`**, not `.agents/skills/.tmp-<cid>`. The sibling `_scan_dir` does not skip dot-dirs and still registers a skill after the name/dir mismatch warning, so a staging copy inside `skills/` left by a hard crash would be discovered as live (tested: a leftover `.agents/.tmp-<cid>` is not discovered). The staging dir is on the same volume, so `os.replace` stays atomic.
+  - The staged tree must hash to the validated digest. A candidate edited after validation raises `ValueError` ("changed since it was validated").
+  - **Replace** renames the old skill to `store.trash_dir(name)` first, then moves the new one in. If that second rename fails, the old skill is moved back (tested). During that window the skill is briefly absent; it is never half-written.
+  - Staging is always removed. On success the pending candidate dir is deleted (its content is now live). Denied and invalid candidates stay pending for T053 hygiene.
+- **Auto-approve (OQ-10).** The constructor raises `ConfigError` unless `<root>/.hb-sandbox-library` is a *file* (a directory does not count). Even with the marker, auto-approve refuses invalid candidates, flagged candidates (any safety finding) and any dedup match, replace included.
+- **Import rules.** `skills.validation -> safety.screen` is cross-layer, so I added the `CROSS_LAYER_ALLOWLIST` entry `f"{PKG}.skills.validation": frozenset({f"{PKG}.safety.screen"})` in the same commit. Everything else uses the skills layer, leaves, `errors`, pyyaml, rich and anyio. The `skillful_agent` import stays in `_compat` (lazy `new_scoped_manager` import inside `_manager_check`).
+- **Contracts.**
+  - **T051:** `hook = PromotionHook(PromotionService(store, llm, model, budget_factory=...), mode=cfg.promotion_mode)`, then `builder.hook("post_tool", hook.post_tool, priority=PROMOTION_HOOK_PRIORITY)` and `builder.hook("on_stop", hook.on_stop, priority=PROMOTION_HOOK_PRIORITY)`. Build a fresh manager or retriever after a promotion.
+  - **T053:** `harness skills review <cid> [--replace] [--auto-approve]` calls `ApprovalGate(store, CandidateValidator(store, docker_executor), CliPromotionApprover() if tty else None, auto_approve=flag).review(cid, replace=...)`. Exit codes follow `decision`. `propose <cid>` calls `service.propose_deferred(cid)`. List pending candidates by `candidate.json` presence (`source.json` only means deferred). `ConfigError` from auto-approve maps to exit 2.
+  - **T055:** use `StaticPromotionApprover`, `FakeExecutor` and `FakeLLMClient` returning the JSON reply shape; the crash test can patch `harness_builder.skills.approval.os.replace`.
+- **Tests.** `tests/unit/test_promotion_t052.py` has 44 tests covering:
+  - the verification matrix;
+  - hook propose, skip and deferred, error tracing via `HookManager`, and veto before promotion;
+  - service bad output, path escape, fence and budget;
+  - validator valid run and `ExecRequest` shape, failing, timed-out and OOM tests, no executor, syntax, description length, `---` injection, secret, name/dir mismatch (x2), extra file and link (symlink or NTFS junction), incomplete candidate, and dedup;
+  - the stdlib runner run on the host (pass and fail);
+  - the gate: AutoDeny default, approve then discovered, raising and truthy approvers, invalid never reaching the approver, collision then replace to trash, crash before rename, leftover staging not discovered, failed replace restored, digest mismatch, auto-approve marker file vs dir, flagged auto-approve denied, escaping, and review content.
+- **Verification.** `ruff format --check .` and `ruff check .` are clean. `pyrefly check` gives 0 errors; the `yaml` untyped-import warnings are suppressed like `spec/io.py`. Full `uv run pytest`: 1589 passed, 38 skipped (Docker/live/symlink skips). Code commit `9f3b696`. No real Docker run: the in-container test path is exercised with `FakeExecutor`, and the runner itself on the host interpreter.
