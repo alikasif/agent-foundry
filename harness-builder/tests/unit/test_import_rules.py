@@ -73,6 +73,9 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
             f"{PKG}.trace.replay",
         }
     ),
+    # T039: trusted `runtime: host` tools reuse the stdlib-only in-container
+    # tool runner in-process (designs.md 9.2), so host and container agree.
+    f"{PKG}.tools.container_tool": frozenset({f"{PKG}.executor.image.hb_entry"}),
 }
 """Explicit, reviewed exceptions: importing module -> allowed target modules.
 
