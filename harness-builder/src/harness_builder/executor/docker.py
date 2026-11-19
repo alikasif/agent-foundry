@@ -143,7 +143,12 @@ class DockerExecutor:
     async def _run_entry(
         self, req: ExecRequest, name: str, args: list[str]
     ) -> ExecResult:
-        """A ``schema``/``call`` entry: nothing staged, FINAL never read (C1)."""
+        """A ``schema``/``call`` entry: nothing staged, FINAL never read (C1).
+
+        The workdir is created as in run mode, so ``docker create`` never
+        fails on a missing bind source (which would read as "no Docker").
+        """
+        req.workdir.mkdir(parents=True, exist_ok=True)
         try:
             result = await self._lifecycle(req, name, args, anyio.current_time())
         finally:

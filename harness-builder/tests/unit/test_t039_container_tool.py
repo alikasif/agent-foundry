@@ -278,6 +278,29 @@ async def test_container_validation_error_keeps_its_type(
 
 
 @pytest.mark.anyio
+async def test_validation_message_uses_structured_errors(
+    harness: Path, entry: ToolSchemaEntry, tmp_path: Path
+) -> None:
+    payload = {
+        "ok": False,
+        "error": {
+            "type": "validation",
+            "message": "2 validation errors\nraw pydantic text input_value='x'",
+            "errors": [
+                {"type": "int_parsing", "loc": ["a"], "msg": "bad int"},
+                {"type": "missing", "loc": [], "msg": "root problem"},
+            ],
+        },
+    }
+    fake = FakeExecutor([envelope_result(payload, exit_code=1)])
+    tool = ContainerTool(entry, harness).with_executor(fake)
+    obs = await invoke(tool, {"a": 1}, tmp_path)
+    assert obs.error is not None and obs.error.message == (
+        "invalid arguments for 'add': a: bad int; (args): root problem"
+    )
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("result", "fragment"),
     [
@@ -501,7 +524,9 @@ async def test_e2e_invalid_args_never_reach_the_body(
     tool = ContainerTool(entry, harness).with_executor(executor)
     obs = await invoke(tool, {"a": "not a number"}, workdir)
     assert obs.error is not None and obs.error.type == "validation", obs
-    assert "a" in obs.error.message
+    assert obs.error.message.startswith("invalid arguments for 'add': a: ")
+    assert "input_value" not in obs.error.message
+    assert "\n" not in obs.error.message
     assert not marker.exists()
     ok = await invoke(tool, {"a": 1}, workdir)
     assert ok.ok and marker.exists()  # the same setup does reach the body

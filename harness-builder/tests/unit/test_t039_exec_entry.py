@@ -162,3 +162,14 @@ async def test_tool_entry_create_failure_still_removes(tmp_path: Path) -> None:
     with pytest.raises(DockerUnavailableError):
         await executor.run(call_request(tmp_path))
     assert cli.commands() == ["create", "rm"]
+
+
+@pytest.mark.anyio
+async def test_tool_entry_creates_a_missing_workdir(tmp_path: Path) -> None:
+    """A missing bind source would fail `docker create` as if Docker were down."""
+    workdir = tmp_path / "not" / "yet"
+    cli = FakeDockerCli()
+    cli.script(["inspect"], FakeResponse.inspect(0))
+    executor = DockerExecutor(cli=cli, image="i:1", user="10001")
+    await executor.run(call_request(workdir))
+    assert workdir.is_dir() and not (workdir / ".hb").exists()

@@ -278,12 +278,23 @@ class ContainerTool:
         return _failed(_tool_exception(message), result)
 
     def _validation_error(self, envelope: dict[str, Any]) -> ErrorObservation:
+        """Registry-style ``loc: msg; ...`` from the structured errors, falling
+        back to the envelope message (pydantic's multi-line text)."""
         params = self.entry.parameters
         fields = ", ".join(params.get("properties", {})) or "(none)"
         required = ", ".join(params.get("required", [])) or "(none)"
+        errors = envelope["error"].get("errors")
+        problems = _error_message(envelope)
+        if isinstance(errors, list) and errors:
+            problems = "; ".join(
+                f"{'.'.join(str(p) for p in e.get('loc', [])) or '(args)'}: "
+                f"{e.get('msg', '')}"
+                for e in errors
+                if isinstance(e, dict)
+            )
         return ErrorObservation(
             type="validation",
-            message=f"invalid arguments for {self.name!r}: {_error_message(envelope)}",
+            message=f"invalid arguments for {self.name!r}: {problems}",
             hint=(
                 f"Call {self.name!r} again with valid arguments. "
                 f"Fields: {fields}. Required: {required}."
