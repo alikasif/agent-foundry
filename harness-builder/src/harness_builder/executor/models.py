@@ -7,13 +7,21 @@ Numeric defaults are ASSUMED (OQ-13): 30 s timeout, 64 KiB output cap,
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Language = Literal["python", "bash"]
+Entry = Literal["run", "schema", "call"]
 
 
 class ExecRequest(BaseModel):
-    """One code execution inside a fresh sandbox container."""
+    """One code execution inside a fresh sandbox container.
+
+    ``entry`` picks the ``hb_entry.py`` mode (T039, T036 C1). ``run`` executes
+    ``code`` in ``language`` and takes no ``entry_args``. ``schema`` and
+    ``call`` run a generated tool module (``entry_args`` = module path and
+    function name); they stage no code, so ``language`` must be ``python``
+    and ``code`` empty, and they never report FINAL.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -26,6 +34,20 @@ class ExecRequest(BaseModel):
     ro_mounts: dict[Path, str] = Field(default_factory=dict)
     stdin: str | None = None
     run_id: str | None = None
+    entry: Entry = "run"
+    entry_args: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_entry(self) -> "ExecRequest":
+        if self.entry == "run":
+            if self.entry_args:
+                raise ValueError("entry 'run' takes no entry_args")
+            return self
+        if self.language != "python" or self.code:
+            raise ValueError(
+                f"entry {self.entry!r} needs language 'python' and empty code"
+            )
+        return self
 
 
 class ExecResult(BaseModel):

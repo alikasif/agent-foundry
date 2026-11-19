@@ -115,6 +115,8 @@ class DockerExecutor:
         code_name = f"{name}.{CODE_EXT[req.language]}"
         final_name = f"{name}.final.json"
         args = self.create_args(req, name, run, code_name, final_name)
+        if req.entry != "run":
+            return await self._run_entry(req, name, args)
         hb_dir = _hb_dir(req.workdir)
         code_file, final_file = hb_dir / code_name, hb_dir / final_name
         started = anyio.current_time()
@@ -137,6 +139,16 @@ class DockerExecutor:
         return result.model_copy(
             update={"final_set": final is not None, "final_value": final}
         )
+
+    async def _run_entry(
+        self, req: ExecRequest, name: str, args: list[str]
+    ) -> ExecResult:
+        """A ``schema``/``call`` entry: nothing staged, FINAL never read (C1)."""
+        try:
+            result = await self._lifecycle(req, name, args, anyio.current_time())
+        finally:
+            await self._remove(name)
+        return result
 
     def create_args(
         self,
@@ -190,11 +202,7 @@ class DockerExecutor:
             *[arg for key, value in env.items() for arg in ("-e", f"{key}={value}")],
             *(["-i"] if req.stdin is not None else []),
             self.image,
-            "python",
-            ENTRY_SCRIPT,
-            "run",
-            req.language,
-            f"{hb}/{code_name}",
+            *_entry_command(req, f"{hb}/{code_name}"),
         ]
 
     async def _lifecycle(
@@ -276,6 +284,15 @@ class DockerExecutor:
         if not result.ok:
             logger.warning("docker rm -f %s: %s", name, _first_line(result.stderr))
         return result.ok
+
+
+def _entry_command(req: ExecRequest, code_path: str) -> list[str]:
+    """The container command: ``run`` keeps the M2 argv; ``schema``/``call``
+    run isolated (``python -I``: no cwd, script dir or env paths on sys.path).
+    """
+    if req.entry == "run":
+        return ["python", ENTRY_SCRIPT, "run", req.language, code_path]
+    return ["python", "-I", ENTRY_SCRIPT, req.entry, *req.entry_args]
 
 
 def read_final(path: Path, cap_bytes: int) -> str | None:
