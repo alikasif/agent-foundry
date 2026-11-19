@@ -188,7 +188,7 @@ def test_bash_runner_passes_final_path_and_clears_stale(
 
 
 def test_modes_and_runners() -> None:
-    assert set(hb_entry.MODES) == {"run", "final"}
+    assert set(hb_entry.MODES) == {"run", "final", "schema", "call"}  # T039
     assert set(hb_entry.RUNNERS) == {"python", "bash"}
 
 
@@ -221,17 +221,25 @@ def test_run_mode_with_extra_args_is_usage_error(tmp_path: Path) -> None:
 # --- standalone script contract ------------------------------------------------------
 
 
-def test_entry_script_imports_only_the_standard_library() -> None:
-    tree = ast.parse(ENTRY_SCRIPT.read_text(encoding="utf-8"))
+def _imported(nodes: list[ast.stmt] | list[ast.AST]) -> set[str]:
     modules: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Import):
             modules.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             assert node.level == 0, "relative imports break the standalone script"
             modules.add((node.module or "").split(".")[0])
-    assert "harness_builder" not in modules
-    assert modules <= set(sys.stdlib_module_names)
+    return modules
+
+
+def test_entry_script_imports_only_the_standard_library() -> None:
+    """Module level is stdlib-only; pydantic only inside functions (T039 modes)."""
+    tree = ast.parse(ENTRY_SCRIPT.read_text(encoding="utf-8"))
+    top_level = _imported(tree.body)
+    everywhere = _imported(list(ast.walk(tree)))
+    assert "harness_builder" not in everywhere
+    assert top_level <= set(sys.stdlib_module_names)
+    assert everywhere - set(sys.stdlib_module_names) <= {"pydantic", "pydantic_core"}
 
 
 def test_standalone_usage_error_exit_code(tmp_path: Path) -> None:
