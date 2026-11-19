@@ -25,6 +25,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import stat
 import tempfile
 import warnings
@@ -78,8 +79,13 @@ def load(alias, path):
     return module
 
 
-load({alias!r}, {script!r})
-tests = load("skill_test", {test!r})
+try:
+    load({alias!r}, {script!r})
+    tests = load("skill_test", {test!r})
+except BaseException:  # SystemExit at import time must not look like a pass
+    traceback.print_exc()
+    print("HB-SKILL-TESTS load-error")
+    sys.exit(1)
 ran = failed = 0
 for name in sorted(vars(tests)):
     fn = getattr(tests, name)
@@ -89,14 +95,19 @@ for name in sorted(vars(tests)):
     try:
         fn()
         print("PASS", name)
-    except Exception:
+    except BaseException:
         failed += 1
         print("FAIL", name)
         traceback.print_exc()
-print(f"{{ran}} ran, {{failed}} failed")
+sys.stdout.flush()
+print(f"HB-SKILL-TESTS ran={{ran}} failed={{failed}}", flush=True)
 sys.exit(1 if failed or not ran else 0)
 """
-"""Stdlib test runner (the sandbox image has no pytest)."""
+"""Stdlib test runner (the sandbox image has no pytest).
+
+A pass needs exit code 0 *and* the sentinel as the last stdout line, so a
+``sys.exit(0)`` or ``os._exit(0)`` in the script or a test is a failure."""
+PASS_SENTINEL = re.compile(r"HB-SKILL-TESTS ran=[1-9][0-9]* failed=0")
 
 
 @dataclass(frozen=True)
@@ -121,6 +132,7 @@ class TestRun:
     stderr: str = ""
     timed_out: bool = False
     oom_killed: bool = False
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +183,7 @@ class CandidateValidator:
         timeout_s: float = TEST_TIMEOUT_S,
         dedup_threshold: float = DEDUP_THRESHOLD,
     ) -> None:
+        """Bind the store and the sandbox executor (None fails the test check)."""
         self.store = store
         self.executor = executor
         self.timeout_s = timeout_s
@@ -291,7 +304,15 @@ class CandidateValidator:
 
 
 def _test_run(result: ExecResult) -> TestRun:
-    passed = result.exit_code == 0 and not result.timed_out and not result.oom_killed
+    lines = result.stdout.strip().splitlines()
+    sentinel = bool(lines) and PASS_SENTINEL.fullmatch(lines[-1].strip()) is not None
+    passed = (
+        result.exit_code == 0
+        and sentinel
+        and not result.timed_out
+        and not result.oom_killed
+        and not result.truncated
+    )
     return TestRun(
         passed=passed,
         exit_code=result.exit_code,
@@ -299,6 +320,7 @@ def _test_run(result: ExecResult) -> TestRun:
         stderr=result.stderr[-OUTPUT_PREVIEW:],
         timed_out=result.timed_out,
         oom_killed=result.oom_killed,
+        truncated=result.truncated,
     )
 
 
@@ -309,7 +331,11 @@ def _test_reason(test: TestRun) -> str:
         return "test was killed (out of memory)"
     if test.exit_code is None:
         return f"test did not run: {test.stderr}"
-    return f"test failed (exit code {test.exit_code})"
+    if test.exit_code != 0:
+        return f"test failed (exit code {test.exit_code})"
+    if test.truncated:
+        return "test output was truncated"
+    return "test exited 0 without the runner's pass line (early exit)"
 
 
 def confinement_problems(candidate_dir: Path, name: str) -> list[str]:

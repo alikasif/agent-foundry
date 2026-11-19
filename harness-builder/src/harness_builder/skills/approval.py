@@ -103,6 +103,7 @@ class StaticPromotionApprover:
     """Returns a fixed answer and records every review (tests)."""
 
     def __init__(self, answer: bool) -> None:
+        """Answer every review with ``answer``."""
         self.answer = answer
         self.reviews: list[CandidateReview] = []
 
@@ -120,6 +121,7 @@ class CliPromotionApprover:
     """
 
     def __init__(self, console: Console | None = None) -> None:
+        """Ask on ``console`` (rich's default console when None)."""
         self.console = console
 
     async def approve(self, review: CandidateReview) -> bool:
@@ -182,7 +184,7 @@ class ApprovalGate:
         if not await self._approved(review):
             return ReviewOutcome(cid, name, "denied", ("not approved",), report)
         try:
-            live, trashed = self.promote(report, replace=replace)
+            live, trashed = self._promote(report, replace=replace)
         except (OSError, ValueError, ConfigError) as exc:
             reason = f"promotion failed: {type(exc).__name__}: {exc}"
             return ReviewOutcome(cid, name, "invalid", (reason,), report)
@@ -198,7 +200,7 @@ class ApprovalGate:
             return False
         return answer is True
 
-    def promote(
+    def _promote(
         self, report: ValidationReport, *, replace: bool = False
     ) -> tuple[Path, Path | None]:
         """Atomically move the validated candidate into the live library.

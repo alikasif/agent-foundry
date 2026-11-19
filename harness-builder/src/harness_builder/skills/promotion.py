@@ -172,6 +172,7 @@ class PromotionHook:
     def __init__(
         self, service: "PromotionService", mode: PromotionMode = "on_stop"
     ) -> None:
+        """Raise ``ValueError`` for an unknown ``mode``."""
         if mode not in ("on_stop", "deferred"):
             raise ValueError(f"unknown promotion mode {mode!r}")
         self.service = service
@@ -281,6 +282,7 @@ class PromotionService:
         id_factory: Callable[[], str] = new_candidate_id,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        """Bind the store, the promotion LLM/model and the budget factory."""
         self.store = store
         self.llm = llm
         self.model = model

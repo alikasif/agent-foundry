@@ -52,7 +52,7 @@ from harness_builder.skills.promotion import (
     verified_success,
 )
 from harness_builder.skills.store import SkillStore
-from harness_builder.skills.validation import RUNNER, CandidateValidator
+from harness_builder.skills.validation import RUNNER, CandidateValidator, _test_run
 from harness_builder.trace.models import HookTraceEvent, Trace, TraceEvent
 
 pytestmark = pytest.mark.timeout(180)
@@ -116,6 +116,14 @@ async def make_candidate(store: SkillStore, reply: str | None = None) -> str:
     return await make_service(store, reply or skill_json()).propose(SOURCE)
 
 
+PASS_LINE = "HB-SKILL-TESTS ran=1 failed=0"
+
+
+def passing() -> FakeExecutor:
+    """A sandbox whose test run passes (exit 0 plus the runner's pass line)."""
+    return FakeExecutor([ExecResult(exit_code=0, stdout=f"PASS test_sum\n{PASS_LINE}")])
+
+
 def gate(
     store: SkillStore,
     approver: StaticPromotionApprover | None = None,
@@ -123,7 +131,7 @@ def gate(
     executor: FakeExecutor | None = None,
     auto_approve: bool = False,
 ) -> ApprovalGate:
-    validator = CandidateValidator(store, executor or FakeExecutor())
+    validator = CandidateValidator(store, executor or passing())
     console = Console(quiet=True)
     return ApprovalGate(
         store, validator, approver, console=console, auto_approve=auto_approve
@@ -348,7 +356,7 @@ async def test_service_uses_its_own_budget(store: SkillStore) -> None:
 @pytest.mark.anyio
 async def test_valid_candidate_runs_test_in_sandbox(store: SkillStore) -> None:
     cid = await make_candidate(store)
-    executor = FakeExecutor([ExecResult(exit_code=0, stdout="1 ran, 0 failed")])
+    executor = passing()
     report = await CandidateValidator(store, executor).validate(cid)
     assert report.ok, report.reasons
     assert report.test is not None and report.test.passed
@@ -368,6 +376,9 @@ async def test_valid_candidate_runs_test_in_sandbox(store: SkillStore) -> None:
         (ExecResult(exit_code=1), "test failed"),
         (ExecResult(exit_code=None, timed_out=True), "timed out"),
         (ExecResult(exit_code=137, oom_killed=True), "out of memory"),
+        (ExecResult(exit_code=0), "without the runner's pass line"),
+        (ExecResult(exit_code=0, stdout="HB-SKILL-TESTS ran=0 failed=0"), "pass line"),
+        (ExecResult(exit_code=0, stdout=PASS_LINE, truncated=True), "truncated"),
     ],
 )
 async def test_failing_test_rejects(
@@ -404,7 +415,7 @@ async def test_invalid_candidates_rejected_with_reason(
     store: SkillStore, reply: str, expected: str
 ) -> None:
     cid = await make_candidate(store, reply)
-    executor = FakeExecutor()
+    executor = passing()
     report = await CandidateValidator(store, executor).validate(cid)
     assert not report.ok
     assert any(expected in reason for reason in report.reasons), report.reasons
@@ -418,7 +429,7 @@ async def test_name_dir_mismatch_rejected(store: SkillStore, attempt: int) -> No
     skill_md = store.candidate_dir(cid) / "sum-numbers" / "SKILL.md"
     text = skill_md.read_text("utf-8").replace("name: sum-numbers", "name: other")
     skill_md.write_text(text, encoding="utf-8")
-    report = await CandidateValidator(store, FakeExecutor()).validate(cid)
+    report = await CandidateValidator(store, passing()).validate(cid)
     assert not report.ok
     assert any("SkillManager warning" in r for r in report.reasons), report.reasons
 
@@ -441,7 +452,7 @@ async def test_unexpected_files_and_links_rejected(
             check=True,
             capture_output=True,
         )
-    report = await CandidateValidator(store, FakeExecutor()).validate(cid)
+    report = await CandidateValidator(store, passing()).validate(cid)
     assert "unexpected entry: sum-numbers/extra.py" in report.reasons
     assert "link not allowed: sum-numbers/linked" in report.reasons
 
@@ -449,9 +460,9 @@ async def test_unexpected_files_and_links_rejected(
 @pytest.mark.anyio
 async def test_incomplete_candidate_rejected(store: SkillStore) -> None:
     cid = make_service(store).write_source(SOURCE)  # deferred, not generated
-    report = await CandidateValidator(store, FakeExecutor()).validate(cid)
+    report = await CandidateValidator(store, passing()).validate(cid)
     assert not report.ok and "not a complete candidate" in report.reasons[0]
-    report = await CandidateValidator(store, FakeExecutor()).validate("../x")
+    report = await CandidateValidator(store, passing()).validate("../x")
     assert not report.ok
 
 
@@ -467,41 +478,53 @@ async def test_dedup_reports_name_and_description_matches(
             description="Add up a list of numbers and return the sum.",
         ),
     )
-    report = await CandidateValidator(store, FakeExecutor()).validate(cid)
+    report = await CandidateValidator(store, passing()).validate(cid)
     assert report.ok  # dedup is informational
     [match] = report.dedup
     assert match.name == "sum-numbers" and match.reason == "description"
     assert match.similarity >= 0.7 and match.proposal in ("merge", "skip")
     cid = await make_candidate(store)
-    report = await CandidateValidator(store, FakeExecutor()).validate(cid)
+    report = await CandidateValidator(store, passing()).validate(cid)
     assert [(m.reason, m.proposal) for m in report.dedup] == [("name", "replace")]
 
 
-def test_runner_executes_tests_on_the_host(tmp_path: Path) -> None:
-    """The stdlib runner passes a good test and fails a bad one (no Docker)."""
-    (tmp_path / "s.py").write_text(SCRIPT, encoding="utf-8")
-    (tmp_path / "t.py").write_text(TEST, encoding="utf-8")
-    bad = TEST.replace("== {", "!= {")
-    (tmp_path / "bad.py").write_text(bad, encoding="utf-8")
+EARLY_EXIT_TEST = "import os\nimport sys\n\n\ndef test_a():\n    {}\n"
 
-    def run(test: str) -> subprocess.CompletedProcess[str]:
-        code = RUNNER.format(
-            alias=SCRIPT_ALIAS,
-            script=str(tmp_path / "s.py"),
-            test=str(tmp_path / test),
-        )
-        return subprocess.run(
-            [sys.executable, "-I", "-c", code],
-            capture_output=True,
-            text=True,
-            cwd=tmp_path,
-            check=False,
-        )
 
-    good = run("t.py")
-    assert good.returncode == 0 and "1 ran, 0 failed" in good.stdout
-    failing = run("bad.py")
-    assert failing.returncode == 1 and "FAIL test_sum" in failing.stdout
+@pytest.mark.parametrize(
+    ("script", "test", "passes"),
+    [
+        (SCRIPT, TEST, True),
+        (SCRIPT, TEST.replace("== {", "!= {"), False),
+        (SCRIPT, "x = 1\n", False),  # no tests at all
+        ("import sys\nsys.exit(0)\n", TEST, False),  # script exits at import
+        (SCRIPT, EARLY_EXIT_TEST.format("sys.exit(0)"), False),
+        (SCRIPT, EARLY_EXIT_TEST.format("os._exit(0)"), False),
+        (SCRIPT, "import sys\nsys.exit(0)\n", False),  # test exits at import
+    ],
+)
+def test_runner_on_the_host(
+    tmp_path: Path, script: str, test: str, passes: bool
+) -> None:
+    """Runs the stdlib runner with the host interpreter (no Docker).
+
+    The verdict goes through the validator's own result check, so an early
+    ``sys.exit(0)`` / ``os._exit(0)`` cannot pass with exit code 0.
+    """
+    (tmp_path / "s.py").write_text(script, encoding="utf-8")
+    (tmp_path / "t.py").write_text(test, encoding="utf-8")
+    code = RUNNER.format(
+        alias=SCRIPT_ALIAS, script=str(tmp_path / "s.py"), test=str(tmp_path / "t.py")
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    result = ExecResult(exit_code=done.returncode, stdout=done.stdout)
+    assert _test_run(result).passed is passes, (done.stdout, done.stderr)
 
 
 # --- ApprovalGate ---------------------------------------------------------------
@@ -549,7 +572,7 @@ async def test_raising_or_truthy_approver_is_a_no(store: SkillStore) -> None:
 
     cid = await make_candidate(store)
     for approver in (Raising(), Truthy()):
-        validator = CandidateValidator(store, FakeExecutor())
+        validator = CandidateValidator(store, passing())
         outcome = await ApprovalGate(
             store, validator, approver, console=Console(quiet=True)
         ).review(cid)
@@ -645,7 +668,7 @@ async def test_changed_candidate_is_not_promoted(store: SkillStore) -> None:
     script = store.candidate_dir(cid) / "sum-numbers" / "scripts" / "sum-numbers.py"
     script.write_text(SCRIPT + "\nimport socket\n", encoding="utf-8")
     with pytest.raises(ValueError, match="changed"):
-        the_gate.promote(report)
+        the_gate._promote(report)
     assert live_names(store) == []
 
 
@@ -684,16 +707,14 @@ async def test_review_shows_script_tests_and_safety(store: SkillStore) -> None:
         store, skill_json(script=SCRIPT + "\nimport socket  # [bold]x[/bold]\n")
     )
     console = Console(record=True, width=200)
-    validator = CandidateValidator(
-        store, FakeExecutor([ExecResult(exit_code=0, stdout="1 ran, 0 failed")])
-    )
+    validator = CandidateValidator(store, passing())
     await ApprovalGate(store, validator, console=console).review(cid)
     text = console.export_text()
     for expected in (
         "Add up a list of numbers",
         "def main(args: dict)",
         "def test_sum",
-        "1 ran, 0 failed",
+        PASS_LINE,
         "network",
         "[bold]x[/bold]",  # markup is shown literally, not interpreted
     ):
