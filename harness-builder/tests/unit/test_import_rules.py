@@ -76,6 +76,8 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
     # T039: trusted `runtime: host` tools reuse the stdlib-only in-container
     # tool runner in-process (designs.md 9.2), so host and container agree.
     f"{PKG}.tools.container_tool": frozenset({f"{PKG}.executor.image.hb_entry"}),
+    # T052: skill candidates pass the shared static safety screen (FR-054).
+    f"{PKG}.skills.validation": frozenset({f"{PKG}.safety.screen"}),
 }
 """Explicit, reviewed exceptions: importing module -> allowed target modules.
 
