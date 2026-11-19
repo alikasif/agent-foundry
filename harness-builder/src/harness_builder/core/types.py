@@ -169,7 +169,7 @@ class HookOutcome(_Frozen):
     reason: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class Rule:
     """One permission rule: ``Rule("run_code", "allow")``.
 
@@ -179,7 +179,8 @@ class Rule:
     ``rules[<index>]`` inside a policy. Globs use ``fnmatch.fnmatchcase``
     (case-sensitive on every platform); ``*`` also matches ``/`` and ``..``.
     Lives in this leaf (T024 B1) so ``ChildProfile`` can; re-exported by
-    ``permissions.policy``.
+    ``permissions.policy``. Unknown keys are rejected (T040), so
+    ``ChildProfile.model_validate`` never drops a typo silently.
     """
 
     tool: str

@@ -488,29 +488,9 @@ class HarnessBuilder:
         registry = ToolRegistry(tools)
         redactor = Redactor.from_settings(settings)
         context = self._resolve_context(llm, model, redactor)
-        visible = None if self._visible is None else list(self._visible)
-        rules = list(self._rules)
-        if isinstance(context, ByReferencePolicy) and registry.get("deref") is None:
-            registry.register(DerefTool(context.store))
-            rules.insert(0, DEREF_RULE)  # first match: before any "*" deny
-            if visible is not None and "deref" not in visible:
-                visible.append("deref")
-        if self._subagents is not None:
-            if not any(rule.tool == SPAWN_TOOL_NAME for rule in rules):
-                rules.insert(0, SPAWN_RULE)  # exact-name rules opt out
-            if visible is not None and SPAWN_TOOL_NAME not in visible:
-                visible.append(SPAWN_TOOL_NAME)
-
+        rules, visible = self._inject_implied(registry, context)
         price_lookup = self._price_lookup or PriceTable().price
-        priced = [model.name]
-        if isinstance(context, SummarizePolicy):
-            priced.append(context.model.name)
-        unpriced = [name for name in priced if price_lookup(name) is None]
-        if self._limits.max_cost_usd is not None and unpriced:
-            raise ConfigError(
-                f"no price known for model {unpriced[0]!r} but max_cost_usd is set; "
-                "add a price override or remove the cost cap"
-            )
+        self._check_prices(model, context, price_lookup)
         hooks = self._resolve_hooks()
         permissions = self._policy or RulePermissionPolicy(rules, self._default)
         approver = self._approver or default_approver()
@@ -549,29 +529,12 @@ class HarnessBuilder:
             visible=None if visible is None else frozenset(visible),
             retry_delay_s=self._retry_delay_s,
         )
-        config = HarnessConfig(
-            name=self._name,
-            model=model,
-            strategy=strategy.name,
-            strategy_options=self._strategy_options,
-            system_prompt=self._system_prompt,
-            tools=registry.schemas(),
-            visible_tools=visible,
-            context=None if context is None else _describe_context(context),
-            permissions=self._describe_permissions(rules),
-            budget=self._limits,
-            hooks={e: hooks.names(e) for e in HOOK_ORDER if hooks.names(e)},
-            subagents=self._describe_subagents(),
+        config = self._describe_config(
+            model, strategy, registry, visible, context, rules, hooks
         )
         trace_dir = settings.trace_dir if self._trace_dir is _UNSET else self._trace_dir
         if self._level == 0 and self._preflight and self._runner is None:
-            executors = {
-                id(t.executor): t.executor
-                for t in tools
-                if isinstance(t, ExecutorTool) and t.executor is not None
-            }
-            for bound in executors.values():
-                _preflight(bound)
+            _preflight_all(tools)
         return Harness(
             config=config,
             loop=loop,
@@ -604,6 +567,75 @@ class HarnessBuilder:
             for t in self._tools
         ]
         return executor, tools
+
+    def _inject_implied(
+        self, registry: ToolRegistry, context: ContextPolicy | None
+    ) -> tuple[list[Rule], list[str] | None]:
+        """Rules and visible names after adding implied ``deref``/``spawn_agent``.
+
+        ``by_reference`` registers ``deref`` (allowed by ``DEREF_RULE``);
+        ``.subagents()`` prepends ``SPAWN_RULE`` unless a rule names
+        ``spawn_agent`` exactly. Both are made visible when a visible set is
+        configured.
+        """
+        visible = None if self._visible is None else list(self._visible)
+        rules = list(self._rules)
+        if isinstance(context, ByReferencePolicy) and registry.get("deref") is None:
+            registry.register(DerefTool(context.store))
+            rules.insert(0, DEREF_RULE)  # first match: before any "*" deny
+            if visible is not None and "deref" not in visible:
+                visible.append("deref")
+        if self._subagents is not None:
+            if not any(rule.tool == SPAWN_TOOL_NAME for rule in rules):
+                rules.insert(0, SPAWN_RULE)  # exact-name rules opt out
+            if visible is not None and SPAWN_TOOL_NAME not in visible:
+                visible.append(SPAWN_TOOL_NAME)
+        return rules, visible
+
+    def _check_prices(
+        self,
+        model: ModelConfig,
+        context: ContextPolicy | None,
+        price_lookup: PriceLookup,
+    ) -> None:
+        """U10: an unknown model price under ``max_cost_usd`` is a ConfigError."""
+        if self._limits.max_cost_usd is None:
+            return
+        priced = [model.name]
+        if isinstance(context, SummarizePolicy):
+            priced.append(context.model.name)
+        unpriced = [name for name in priced if price_lookup(name) is None]
+        if unpriced:
+            raise ConfigError(
+                f"no price known for model {unpriced[0]!r} but max_cost_usd is set; "
+                "add a price override or remove the cost cap"
+            )
+
+    def _describe_config(
+        self,
+        model: ModelConfig,
+        strategy: Strategy,
+        registry: ToolRegistry,
+        visible: list[str] | None,
+        context: ContextPolicy | None,
+        rules: list[Rule],
+        hooks: HookManager,
+    ) -> HarnessConfig:
+        """The resolved, hashable ``HarnessConfig`` of this build."""
+        return HarnessConfig(
+            name=self._name,
+            model=model,
+            strategy=strategy.name,
+            strategy_options=self._strategy_options,
+            system_prompt=self._system_prompt,
+            tools=registry.schemas(),
+            visible_tools=visible,
+            context=None if context is None else _describe_context(context),
+            permissions=self._describe_permissions(rules),
+            budget=self._limits,
+            hooks={e: hooks.names(e) for e in HOOK_ORDER if hooks.names(e)},
+            subagents=self._describe_subagents(),
+        )
 
     def _resolve_model(self, settings: Settings) -> ModelConfig:
         if self._model is not None:
@@ -792,6 +824,17 @@ class HarnessBuilder:
 def _describe_context(policy: ContextPolicy) -> dict[str, Any]:
     name = getattr(policy, "name", type(policy).__qualname__)
     return {"policy": name, "options": describe(policy)}
+
+
+def _preflight_all(tools: list[ToolDefinition]) -> None:
+    """Preflight each distinct executor bound to an executor tool, once."""
+    executors = {
+        id(t.executor): t.executor
+        for t in tools
+        if isinstance(t, ExecutorTool) and t.executor is not None
+    }
+    for bound in executors.values():
+        _preflight(bound)
 
 
 def _preflight(executor: Executor) -> None:

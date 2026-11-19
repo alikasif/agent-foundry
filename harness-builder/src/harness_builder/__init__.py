@@ -87,25 +87,55 @@ __all__ = [
     "tool",
 ]
 
-_MODULES = (
-    "harness_builder.errors",
-    "harness_builder.core.types",
-    "harness_builder.llm.types",
-    "harness_builder.executor.models",
-    "harness_builder.trace.models",
-    "harness_builder.config",
-    "harness_builder.core.builder",
-    "harness_builder.tools.registry",
-    "harness_builder.trace.diff",
-    "harness_builder.trace.replay",
-)
+_TYPES = "harness_builder.core.types"
+_ERRORS = "harness_builder.errors"
+_MODULES: dict[str, str] = {
+    "ApprovalRequest": _TYPES,
+    "BudgetLimits": _TYPES,
+    "BudgetSnapshot": _TYPES,
+    "ChildProfile": _TYPES,
+    "ConfigError": _ERRORS,
+    "DockerUnavailableError": _ERRORS,
+    "ErrorObservation": _TYPES,
+    "ExecRequest": "harness_builder.executor.models",
+    "ExecResult": "harness_builder.executor.models",
+    "Harness": "harness_builder.core.builder",
+    "HarnessBuilder": "harness_builder.core.builder",
+    "HarnessError": _ERRORS,
+    "HookOutcome": _TYPES,
+    "LLMRequest": "harness_builder.llm.types",
+    "LLMResponse": "harness_builder.llm.types",
+    "Message": _TYPES,
+    "ModelConfig": _TYPES,
+    "Observation": _TYPES,
+    "PermissionDecision": _TYPES,
+    "ReplayDivergence": _ERRORS,
+    "Rule": _TYPES,
+    "RunResult": _TYPES,
+    "SandboxConfig": "harness_builder.executor.models",
+    "Settings": "harness_builder.config",
+    "SpecError": _ERRORS,
+    "StepDecision": _TYPES,
+    "StopInfo": _TYPES,
+    "Tool": "harness_builder.tools.registry",
+    "ToolCall": _TYPES,
+    "ToolOutcome": _TYPES,
+    "ToolResult": _TYPES,
+    "ToolSchema": "harness_builder.llm.types",
+    "Trace": "harness_builder.trace.models",
+    "TraceStep": "harness_builder.trace.models",
+    "Usage": _TYPES,
+    "ValidatedCall": _TYPES,
+    "diff_traces": "harness_builder.trace.diff",
+    "replay": "harness_builder.trace.replay",
+    "tool": "harness_builder.tools.registry",
+}
+"""Public name -> defining module; only that module is imported on access."""
 
 
 def __getattr__(name: str) -> Any:
     """Import the module that defines public ``name`` on first access."""
-    if name in __all__:
-        for module_name in _MODULES:
-            module = import_module(module_name)
-            if hasattr(module, name):
-                return getattr(module, name)
-    raise AttributeError(f"module 'harness_builder' has no attribute {name!r}")
+    module_name = _MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module 'harness_builder' has no attribute {name!r}")
+    return getattr(import_module(module_name), name)
