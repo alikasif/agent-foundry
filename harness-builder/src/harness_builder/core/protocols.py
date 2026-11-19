@@ -106,6 +106,31 @@ class TraceSink(Protocol):
         ...
 
 
+@runtime_checkable
+class NestingTraceSink(TraceSink, Protocol):
+    """A ``TraceSink`` that can open a nested sink for a sub-agent run (T040).
+
+    ``Harness`` asks a parent sink of this kind for the child's sink, so a
+    custom sink gets nested child traces without being a ``TraceRecorder``.
+    A sink without ``child`` makes the child record into a standalone
+    recorder; its trace still reaches the parent as a ``SubagentEvent``.
+    ``TraceSink`` itself is unchanged, so existing sinks keep conforming.
+    """
+
+    def child(
+        self,
+        *,
+        run_id: str,
+        task: str,
+        harness_name: str | None = None,
+        config_hash: str | None = None,
+        strategy: str | None = None,
+        model: str | None = None,
+    ) -> TraceSink:
+        """A sink for a sub-agent run at depth + 1 (writes no file)."""
+        ...
+
+
 class RunContextView(Protocol):
     """Read-only view of the per-run state that layers may use.
 
@@ -313,6 +338,32 @@ class ExecutorTool(Protocol):
 
     def with_executor(self, executor: Executor) -> ToolDefinition:
         """A copy of this tool bound to ``executor``."""
+        ...
+
+
+class PromptContributor(Protocol):
+    """Adds per-run text to the step-0 system prompt (T040, T024 MJ3).
+
+    ``HarnessBuilder.prompt_contributor(c)`` registers one; the skills
+    extension (T051) is the first user. At the start of every run,
+    ``Harness`` awaits ``contribute(task, ctx)`` for each contributor in
+    registration order and appends each non-empty result, separated by a
+    blank line, to the system message before step 0. The text is therefore
+    part of the step-0 request and its fingerprint, so replay reproduces it
+    or reports a ``request`` divergence. The identity (``name`` plus the
+    public scalar attributes) enters ``HarnessConfig.prompt_contributors``;
+    the output never does. Sub-agent children inherit the parent's
+    contributors and call them with their own task. An exception ends the
+    run with stop ``error`` before any LLM call.
+    """
+
+    @property
+    def name(self) -> str:
+        """Stable identity of this contributor (hashed into the config)."""
+        ...
+
+    async def contribute(self, task: str, ctx: RunContextView) -> str | None:
+        """Text for this run's system prompt, or None to add nothing."""
         ...
 
 

@@ -18,7 +18,7 @@ from harness_builder.llm.fake import FakeLLMClient
 from harness_builder.llm.types import LLMResponse
 from harness_builder.permissions.policy import Rule
 from harness_builder.spec import loader
-from harness_builder.tools.registry import tool
+from harness_builder.tools.registry import Tool, tool
 from harness_builder.trace.diff import diff_traces
 from harness_builder.trace.models import Trace
 from harness_builder.trace.replay import Replayable, ReplaySession, replay
@@ -95,10 +95,15 @@ def stable(trace: Trace) -> dict[str, Any]:
     return data
 
 
+def add_factory() -> Tool:
+    """Builtin factory for ``add`` (module level: re-registering is a no-op)."""
+    return add
+
+
 @pytest.fixture
-def spec_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def spec_dir(tmp_path: Path) -> Path:
     """Write the harness directory (CRLF prompt file) and register ``add``."""
-    monkeypatch.setitem(loader.BUILTIN_TOOLS, "add", lambda: add)
+    loader.register_builtin_tool("add", add_factory)
     (tmp_path / "prompts").mkdir()
     prompt = PROMPT.replace("\n", "\r\n").encode()
     (tmp_path / "prompts" / "system.md").write_bytes(prompt)

@@ -43,7 +43,9 @@ from harness_builder.core.protocols import (
     Executor,
     ExecutorTool,
     LLMClient,
+    NestingTraceSink,
     PermissionPolicy,
+    PromptContributor,
     Strategy,
     TokenCounter,
     ToolDefinition,
@@ -59,9 +61,11 @@ from harness_builder.core.types import (
     ModelConfig,
     PermissionValue,
     RunResult,
+    StopInfo,
 )
 from harness_builder.errors import ConfigError
 from harness_builder.executor.docker import DockerExecutor
+from harness_builder.executor.models import SandboxConfig
 from harness_builder.hooks.manager import HookManager
 from harness_builder.llm.pricing import PriceTable
 from harness_builder.llm.tokens import HeuristicCounter
@@ -82,7 +86,7 @@ from harness_builder.tools.builtin.spawn import (
     SubagentRunner,
 )
 from harness_builder.tools.registry import ToolRegistry
-from harness_builder.trace.models import Trace
+from harness_builder.trace.models import Trace, stable_dump
 from harness_builder.trace.recorder import TraceRecorder, config_hash
 from harness_builder.trace.redact import Redactor
 
@@ -120,6 +124,22 @@ class HarnessConfig(BaseModel):
     budget: BudgetLimits = Field(default_factory=BudgetLimits)
     hooks: dict[str, list[str]] = Field(default_factory=dict)
     subagents: dict[str, Any] | None = None
+    prompt_contributors: list[dict[str, Any]] = Field(default_factory=list)
+    sandbox: dict[str, Any] | None = None
+
+
+OPTIONAL_CONFIG_KEYS: tuple[str, ...] = ("prompt_contributors", "sandbox")
+"""``HarnessConfig`` fields added in T040; left out of the hash when unset, so
+every harness without them keeps its pre-T040 ``config_hash``."""
+
+
+def harness_config_hash(config: HarnessConfig) -> str:
+    """``config_hash`` of ``config``; unset ``OPTIONAL_CONFIG_KEYS`` omitted."""
+    data = stable_dump(config)
+    for key in OPTIONAL_CONFIG_KEYS:
+        if not data[key]:
+            del data[key]
+    return config_hash(data)
 
 
 def describe(obj: object) -> dict[str, Any]:
@@ -149,16 +169,18 @@ class Harness:
         trace_dir: Path | None,
         spec_snapshot: dict[str, Any] | None = None,
         uses_workdir: bool = False,
+        contributors: tuple[PromptContributor, ...] = (),
     ) -> None:
         """Hold the wired loop and per-run factories' inputs (use the builder).
 
         ``spec_snapshot`` (spec-built harnesses) is written into top-level
         traces, so ``harness replay`` can rebuild the harness from the trace.
         ``uses_workdir`` (a tool needs the Executor) gives every run a fresh
-        host temp dir as ``RunContext.workdir``.
+        host temp dir as ``RunContext.workdir``. ``contributors`` add per-run
+        text to the step-0 system prompt (``PromptContributor``).
         """
         self.config = config
-        self.config_hash = config_hash(config)
+        self.config_hash = harness_config_hash(config)
         self.loop = loop
         self.system_prompt = system_prompt
         self.redactor = redactor
@@ -166,6 +188,7 @@ class Harness:
         self.trace_dir = trace_dir
         self.spec_snapshot = spec_snapshot
         self.uses_workdir = uses_workdir
+        self.contributors = contributors
 
     async def run(self, task: str) -> RunResult:
         """Run ``task`` to a stop; ``trace_path`` is set when traces are written."""
@@ -186,12 +209,13 @@ class Harness:
         parent's trace sink; the child trace is then not written to disk and
         is returned for embedding as a ``SubagentEvent``. With an executor,
         the run's workdir is removed after the trace is finished, also when
-        the run fails or is cancelled.
+        the run fails or is cancelled. Prompt contributors run first; a
+        failing one ends the run with stop ``error`` before any LLM call.
         """
         run_id = uuid.uuid4().hex
         if ledger is None:
             ledger = BudgetLedger.from_limits(self.config.budget, self.price_lookup)
-        recorder = self._recorder(run_id, task, depth, parent)
+        recorder, top = self._recorder(run_id, task, depth, parent)
         messages = [Message(role="user", content=task)]
         if self.system_prompt:
             messages.insert(0, Message(role="system", content=self.system_prompt))
@@ -207,19 +231,48 @@ class Harness:
             messages=messages,
         )
         try:
-            result = await self.loop.run(ctx)
+            stop = await self._contribute(task, ctx)
+            if stop is None:
+                result = await self.loop.run(ctx)
+            else:
+                usage = ctx.ledger.snapshot().usage
+                result = RunResult(answer=None, stop=stop, usage=usage)
             trace = recorder.finish(result.stop)
         finally:
             if workdir is not None:
                 shutil.rmtree(workdir, ignore_errors=True)
-        path = str(recorder.path) if recorder.path is not None else None
+        path = None if top is None or top.path is None else str(top.path)
         return result.model_copy(update={"stop": trace.stop, "trace_path": path}), trace
+
+    async def _contribute(self, task: str, ctx: RunContext) -> StopInfo | None:
+        """Append contributor texts to the system message; error stop on failure."""
+        parts: list[str] = []
+        for contributor in self.contributors:
+            try:
+                text = await contributor.contribute(task, ctx)
+            except Exception as exc:  # becomes the run's stop, like loop errors
+                detail = (
+                    f"prompt contributor {contributor.name!r} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return StopInfo(reason="error", detail=detail)
+            if text:
+                parts.append(text)
+        if not parts:
+            return None
+        if self.system_prompt:
+            content = "\n\n".join([self.system_prompt, *parts])
+            ctx.messages[0] = Message(role="system", content=content)
+        else:
+            ctx.messages.insert(0, Message(role="system", content="\n\n".join(parts)))
+        return None
 
     def _recorder(
         self, run_id: str, task: str, depth: int, parent: TraceSink | None
-    ) -> TraceRecorder:
-        if isinstance(parent, TraceRecorder):
-            return parent.child(
+    ) -> tuple[TraceSink, TraceRecorder | None]:
+        """The run's sink, and the top-level recorder (None for a child sink)."""
+        if isinstance(parent, NestingTraceSink):
+            child = parent.child(
                 run_id=run_id,
                 task=task,
                 harness_name=self.config.name,
@@ -227,7 +280,8 @@ class Harness:
                 strategy=self.config.strategy,
                 model=self.config.model.name,
             )
-        return TraceRecorder(
+            return child, None
+        recorder = TraceRecorder(
             run_id=run_id,
             harness_name=self.config.name,
             config_hash=self.config_hash,
@@ -239,6 +293,7 @@ class Harness:
             redactor=self.redactor,
             trace_dir=None if parent is not None else self.trace_dir,
         )
+        return recorder, recorder
 
 
 class HarnessBuilder:
@@ -251,10 +306,28 @@ class HarnessBuilder:
     traces written to ``Settings.trace_dir``.
     """
 
-    def __init__(self, name: str, settings: Settings | None = None) -> None:
-        """Start a builder for harness ``name``; settings default to the env."""
+    def __init__(
+        self,
+        name: str,
+        settings: Settings | None = None,
+        *,
+        trust_host_tools: bool = False,
+        allow_failed: bool = False,
+    ) -> None:
+        """Start a builder for harness ``name``; settings default to the env.
+
+        The two flags matter only for spec-built harnesses (``from_spec``):
+        ``trust_host_tools`` allows ``runtime: host`` tools and module hooks,
+        which run harness code in this process instead of Docker (U5,
+        ``--trust-tools``); ``allow_failed`` allows a harness whose
+        ``.harness-meta.json`` says ``fail`` (``--allow-failed``).
+        """
         self._name = name
         self._settings = settings
+        self._trust_host_tools = trust_host_tools
+        self._allow_failed = allow_failed
+        self._contributors: list[PromptContributor] = []
+        self._sandbox: SandboxConfig | None = None
         self._model: ModelConfig | None = None
         self._strategy: str | Strategy = "react"
         self._strategy_options: dict[str, Any] = {}
@@ -287,20 +360,51 @@ class HarnessBuilder:
         source: "Path | str | HarnessSpec | Mapping[str, Any]",
         *,
         settings: Settings | None = None,
+        trust_host_tools: bool = False,
+        allow_failed: bool = False,
+        base_dir: Path | None = None,
+        flagged_tools: Iterable[str] = (),
     ) -> Self:
         """A builder configured from a HarnessSpec (FR-016, FR-030).
 
         ``source`` is a spec file, a harness directory (``harness.yaml``), a
         parsed ``HarnessSpec`` or a mapping such as ``trace.spec_snapshot``.
-        Raises ``SpecError`` with located paths for an invalid spec. Code-only
+        ``base_dir`` is the harness directory for an in-memory source (a
+        snapshot of a harness with module tools, eval files or a skills
+        root); a file or directory source uses its own directory.
+        ``flagged_tools`` (safety screen, FR-032) get prepended ``ask`` rules.
+        ``trust_host_tools`` and ``allow_failed`` are the builder flags.
+        Raises ``SpecError`` with located paths for an invalid spec and
+        ``ConfigError`` for environment problems (untrusted host tools, a
+        missing ``tools.schema.json`` entry, a failed harness). Code-only
         settings (``.llm``, ``.tools``, ``.approver``) can be chained after.
         """
         from harness_builder.spec.loader import builder_from_spec, load_spec
 
-        spec, base_dir, name = load_spec(source)
-        return builder_from_spec(
-            spec, builder=cls(spec.name, settings), base_dir=base_dir, source=name
+        spec, spec_dir, name = load_spec(source)
+        builder = cls(
+            spec.name,
+            settings,
+            trust_host_tools=trust_host_tools,
+            allow_failed=allow_failed,
         )
+        return builder_from_spec(
+            spec,
+            builder=builder,
+            base_dir=spec_dir or base_dir,
+            source=name,
+            flagged_tools=flagged_tools,
+        )
+
+    @property
+    def trust_host_tools(self) -> bool:
+        """True when ``runtime: host`` spec tools and module hooks may load."""
+        return self._trust_host_tools
+
+    @property
+    def allow_failed(self) -> bool:
+        """True when a harness whose meta status is ``fail`` may be built."""
+        return self._allow_failed
 
     def model(
         self,
@@ -469,6 +573,27 @@ class HarnessBuilder:
         self._spec_snapshot = snapshot
         return self
 
+    def prompt_contributor(self, contributor: PromptContributor) -> Self:
+        """Add per-run text to the step-0 system prompt (``PromptContributor``).
+
+        Contributors run in registration order at the start of every run,
+        sub-agent children inherit them, and their identities (not their
+        outputs) are part of ``HarnessConfig`` and so of ``config_hash``.
+        """
+        self._contributors.append(contributor)
+        return self
+
+    def sandbox(self, config: SandboxConfig) -> Self:
+        """Sandbox limits of the default ``DockerExecutor`` (spec ``sandbox:``).
+
+        The image comes from ``config.image``, else ``HARNESS_DOCKER_IMAGE``,
+        else the content-hash tag. The limits (not the image) are part of
+        ``config_hash``. An explicit ``.executor(e)`` wins over this: ``e``
+        runs the tools and the sandbox only stays in the config.
+        """
+        self._sandbox = config
+        return self
+
     def build(self) -> Harness:
         """Validate the configuration and return a ``Harness``.
 
@@ -546,6 +671,7 @@ class HarnessBuilder:
             trace_dir=trace_dir,
             spec_snapshot=self._spec_snapshot,
             uses_workdir=executor is not None,
+            contributors=tuple(self._contributors),
         )
 
     def _bind_executor(
@@ -559,7 +685,9 @@ class HarnessBuilder:
         """
         if not any(isinstance(t, ExecutorTool) for t in self._tools):
             return None, list(self._tools)
-        executor = self._executor or DockerExecutor(image=settings.docker_image)
+        executor = self._executor or DockerExecutor(
+            self._sandbox, image=self._sandbox_image(settings)
+        )
         tools = [
             t.with_executor(executor)
             if isinstance(t, ExecutorTool) and t.executor is None
@@ -567,6 +695,12 @@ class HarnessBuilder:
             for t in self._tools
         ]
         return executor, tools
+
+    def _sandbox_image(self, settings: Settings) -> str | None:
+        """``SandboxConfig.image`` wins over ``HARNESS_DOCKER_IMAGE``."""
+        if self._sandbox is not None and self._sandbox.image is not None:
+            return self._sandbox.image
+        return settings.docker_image
 
     def _inject_implied(
         self, registry: ToolRegistry, context: ContextPolicy | None
@@ -635,6 +769,12 @@ class HarnessBuilder:
             budget=self._limits,
             hooks={e: hooks.names(e) for e in HOOK_ORDER if hooks.names(e)},
             subagents=self._describe_subagents(),
+            prompt_contributors=[
+                {"name": c.name, "options": describe(c)} for c in self._contributors
+            ],
+            sandbox=None
+            if self._sandbox is None
+            else self._sandbox.model_dump(mode="json", exclude={"image"}),
         )
 
     def _resolve_model(self, settings: Settings) -> ModelConfig:
@@ -768,6 +908,8 @@ class HarnessBuilder:
                 child._trace_dir = None
                 child._counter = self._counter
                 child._executor = executor
+                child._sandbox = self._sandbox
+                child._contributors = list(self._contributors)
                 if SPAWN_TOOL_NAME in allowed:
                     child._subagents = self._subagents
                 try:
