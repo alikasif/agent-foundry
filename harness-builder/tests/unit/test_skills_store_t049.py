@@ -179,6 +179,21 @@ def test_linked_skill_leaving_the_search_path_is_dropped(tmp_path: Path) -> None
     assert [e.name for e in store.catalog_entries()] == ["inside-skill"]
 
 
+def test_symlinked_skill_md_leaving_the_skill_dir_is_dropped(
+    tmp_path: Path,
+) -> None:
+    store = SkillStore(tmp_path / "proj")
+    outside = write_skill(tmp_path / "outside", "escaper") / "SKILL.md"
+    (store.live / "escaper").mkdir(parents=True)
+    try:
+        os.symlink(outside, store.live / "escaper" / "SKILL.md")
+    except OSError as exc:  # Windows without symlink privilege
+        pytest.skip(f"cannot create file symlinks here: {exc}")
+    write_skill(store.live, "inside-skill")
+
+    assert [e.name for e in store.catalog_entries()] == ["inside-skill"]
+
+
 # --- SkillEntry mapping ------------------------------------------------------
 
 
@@ -319,15 +334,16 @@ def test_record_use_persists_counts(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "content", [None, "", "{not json", '{"x": {"usage_count": "a"}}']
+    "content",
+    [None, b"", b"{not json", b'{"x": {"usage_count": "a"}}', b"\xff\xfe{"],
 )
 def test_missing_or_corrupt_stats_read_as_empty(
-    tmp_path: Path, content: str | None
+    tmp_path: Path, content: bytes | None
 ) -> None:
     store = SkillStore(tmp_path)
     if content is not None:
         store.meta.mkdir(parents=True)
-        store.stats_path.write_text(content, encoding="utf-8")
+        store.stats_path.write_bytes(content)
 
     assert store.read_stats() == {}
 

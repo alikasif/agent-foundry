@@ -64,7 +64,8 @@ def scoped_skill_manager_class() -> type:
     package) and scans only the explicit search paths with the inherited
     ``_scan_dir``. Bundled package skills and ``~/.agents/skills`` are never
     scanned unless passed explicitly. Entries whose resolved directory leaves
-    its search path (a symlink or junction) are dropped.
+    its search path, or whose resolved SKILL.md leaves the skill directory
+    (a symlink or junction), are dropped.
     """
     from skillful_agent.skill_manager import SkillCatalogEntry, SkillManager
 
@@ -94,7 +95,10 @@ def scoped_skill_manager_class() -> type:
                 if not skills_dir.is_dir():
                     continue
                 for entry in self._scan_dir(skills_dir):
-                    if not entry.skill_dir.is_relative_to(skills_dir):
+                    if not (
+                        entry.skill_dir.is_relative_to(skills_dir)
+                        and entry.location.is_relative_to(entry.skill_dir)
+                    ):
                         logger.warning(
                             "Skipping skill '%s': %s resolves outside %s",
                             entry.name,

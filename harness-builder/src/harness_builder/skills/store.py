@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from harness_builder.config import ENV_VARS
 from harness_builder.core.types import SkillEntry
@@ -198,7 +198,7 @@ class SkillStore:
         try:
             raw = self.stats_path.read_text(encoding="utf-8")
             return _STATS_ADAPTER.validate_json(raw)
-        except (OSError, ValidationError):
+        except (OSError, ValueError):  # ValidationError and bad UTF-8 included
             return {}
 
     def write_stats(self, stats: Mapping[str, SkillStats]) -> None:
