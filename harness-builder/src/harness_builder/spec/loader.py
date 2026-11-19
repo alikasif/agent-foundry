@@ -417,11 +417,31 @@ def _eval_cases(data: Any, source: str, prefix: str) -> list[EvalCase]:
     except ValidationError as exc:
         lines: list[str] = []
         for err in exc.errors():
-            path = located_path(data, err["loc"], missing=err["type"] == "missing")
+            loc = _drop_tags(data, err["loc"])
+            path = located_path(data, loc, missing=err["type"] == "missing")
             line = f"{source}: {_join(prefix, path)}: {err['msg']}"
             if line not in lines:
                 lines.append(line)
         raise SpecError("\n".join(lines)) from exc
+
+
+def _drop_tags(data: Any, loc: tuple[int | str, ...]) -> list[int | str]:
+    """Drop discriminator tags (``tool``, ``contains``) from an eval error loc.
+
+    A tag equals the node's ``kind``/``type`` value and may also be a data key
+    (``tool``), so ``located_path`` alone would descend into the wrong value.
+    """
+    kept: list[int | str] = []
+    node = data
+    for part in loc:
+        if isinstance(node, dict) and part in (node.get("kind"), node.get("type")):
+            continue
+        kept.append(part)
+        if isinstance(part, int) and isinstance(node, list) and part < len(node):
+            node = node[part]
+        elif isinstance(node, dict):
+            node = node.get(part)
+    return kept
 
 
 def _join(prefix: str, path: str) -> str:
@@ -717,14 +737,12 @@ def _skills(
 ) -> SkillsConfig | None:
     """The enabled skills section with ``root`` resolved inside ``base_dir``."""
     skills = spec.skills
-    if skills is None or not skills.enabled:
-        return None
-    if skills.root is None:
-        return skills
+    if skills is None or skills.root is None:
+        return skills if skills is not None and skills.enabled else None
     root = resolve_inside(base_dir, skills.root, source, "skills.root")
     if not root.is_dir():
         raise spec_error(source, "skills.root", f"{skills.root} is not a directory")
-    return skills.model_copy(update={"root": str(root)})
+    return skills.model_copy(update={"root": str(root)}) if skills.enabled else None
 
 
 def _extension(section: str, source: str) -> SpecExtension:
