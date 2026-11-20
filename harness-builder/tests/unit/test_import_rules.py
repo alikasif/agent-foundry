@@ -81,6 +81,24 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
     # T051 (T036 C2): skill dirs pass the executor's read-only mount allowlist
     # (`confine_ro_source`) before they become `ro_mounts` of a script run.
     f"{PKG}.skills.extension": frozenset({f"{PKG}.executor.paths"}),
+    # T041: the validation pipeline builds and runs the harness (spec loader,
+    # builder, fake smoke LLM, auto-approver), extracts schemas (container_tool,
+    # hb_entry for trusted host tools), screens modules and runs evals.
+    f"{PKG}.generator.validate": frozenset(
+        {
+            f"{PKG}.core.builder",
+            f"{PKG}.evals.models",
+            f"{PKG}.evals.runner",
+            f"{PKG}.executor.docker",
+            f"{PKG}.executor.fake",
+            f"{PKG}.executor.image.hb_entry",
+            f"{PKG}.llm.fake",
+            f"{PKG}.permissions.approvers",
+            f"{PKG}.safety.screen",
+            f"{PKG}.spec.loader",
+            f"{PKG}.tools.container_tool",
+        }
+    ),
 }
 """Explicit, reviewed exceptions: importing module -> allowed target modules.
 
