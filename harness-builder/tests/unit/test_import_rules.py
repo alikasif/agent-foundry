@@ -78,6 +78,9 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
     f"{PKG}.tools.container_tool": frozenset({f"{PKG}.executor.image.hb_entry"}),
     # T052: skill candidates pass the shared static safety screen (FR-054).
     f"{PKG}.skills.validation": frozenset({f"{PKG}.safety.screen"}),
+    # T051 (T036 C2): skill dirs pass the executor's read-only mount allowlist
+    # (`confine_ro_source`) before they become `ro_mounts` of a script run.
+    f"{PKG}.skills.extension": frozenset({f"{PKG}.executor.paths"}),
 }
 """Explicit, reviewed exceptions: importing module -> allowed target modules.
 
