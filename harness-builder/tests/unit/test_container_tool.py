@@ -443,3 +443,16 @@ async def test_validation_error_shape_reaches_the_model(harness: Path) -> None:
 
     rendered = " ".join(m.content for m in seen[1].messages)
     assert "invalid arguments for 'add'" in rendered
+
+
+# --- offline guard for the real-Docker stdin probes (T036 m4) ---------------
+
+
+def test_real_docker_stdin_probes_compile() -> None:
+    """``tests/docker/test_stdin_round_trip.py`` never runs without Docker."""
+    from tests.docker.test_stdin_round_trip import (  # pyrefly: ignore[missing-import]
+        PROBES,
+    )
+
+    for name, source in PROBES.items():
+        compile(source, f"<probe {name}>", "exec")
