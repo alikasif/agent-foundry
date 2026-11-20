@@ -14,13 +14,20 @@ import pytest
 
 from harness_builder.config import Settings
 from harness_builder.core.builder import HarnessBuilder
-from harness_builder.core.types import Rule, ToolCall
+from harness_builder.core.types import ModelConfig, Rule, ToolCall
 from harness_builder.executor.fake import FakeExecutor
 from harness_builder.executor.models import ExecResult
 from harness_builder.llm.fake import FakeLLMClient
 from harness_builder.llm.types import LLMRequest, LLMResponse
-from harness_builder.skills.extension import SKILL_TOOL_NAMES, SkillsExtension
+from harness_builder.skills.extension import (
+    SKILL_TOOL_NAMES,
+    SkillsExtension,
+    install_skills,
+)
+from harness_builder.skills.promotion import PromotionHook, PromotionService
 from harness_builder.skills.store import SkillStore
+from harness_builder.spec.models import SkillsConfig
+from harness_builder.tools.builtin.run_code import run_code
 
 SETTINGS = Settings(model="fake/model")
 BODY = "BODY-MARKER-91c2: call scripts/merge.py with files."
@@ -152,3 +159,31 @@ async def test_spec_skills_section_installs_the_extension(tmp_path: Path) -> Non
     assert harness.config.prompt_contributors[0]["options"]["top_k"] == 2
     assert {t.name for t in harness.config.tools} >= set(SKILL_TOOL_NAMES)
     assert "<name>pdf-merge</name>" in (llm.requests[0].system or "")
+
+
+@pytest.mark.anyio
+async def test_promotion_hook_fires_through_a_built_harness(tmp_path: Path) -> None:
+    store = library(tmp_path / "root")
+    service = PromotionService(store, FakeLLMClient([]), ModelConfig(name="fake/m"))
+    hook = PromotionHook(service, mode="deferred")  # no LLM call
+    code = ToolCall(
+        id="c1", name="run_code", args={"language": "python", "code": "FINAL(1)"}
+    )
+    llm = FakeLLMClient([LLMResponse(tool_calls=[code])])
+    final = ExecResult(exit_code=0, final_set=True, final_value="merged")
+    builder = (
+        base(llm, FakeExecutor([final]))
+        .tools(run_code())
+        .permissions([*ALLOW_SKILLS, Rule("run_code", "allow")])
+    )
+    install_skills(SkillsConfig(root=str(store.root)), builder, promotion=hook)
+    harness = builder.build()
+
+    result = await harness.run(TASK)
+
+    assert result.answer == "merged"
+    assert "<available_skills>" in (llm.requests[0].system or "")
+    (cid,) = hook.proposed
+    assert service.read_source(cid).task == TASK  # not the catalog text
+    assert "skills:promotion" in harness.config.hooks["post_tool"]
+    assert "skills:promotion" in harness.config.hooks["on_stop"]
