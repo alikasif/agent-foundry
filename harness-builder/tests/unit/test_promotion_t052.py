@@ -32,7 +32,6 @@ from harness_builder.executor.models import ExecResult
 from harness_builder.hooks.manager import HookManager
 from harness_builder.llm.fake import FakeLLMClient
 from harness_builder.llm.types import LLMResponse
-from harness_builder.skills import approval as approval_module
 from harness_builder.skills.approval import (
     SANDBOX_MARKER,
     ApprovalGate,
@@ -49,6 +48,7 @@ from harness_builder.skills.promotion import (
     PromotionHook,
     PromotionService,
     PromotionSource,
+    replace_path,
     verified_success,
 )
 from harness_builder.skills.store import SkillStore
@@ -617,7 +617,7 @@ async def test_crash_before_rename_leaves_live_library_unchanged(
     def crash(src: object, dst: object) -> None:
         raise OSError("simulated crash between copy and rename")
 
-    monkeypatch.setattr(approval_module.os, "replace", crash)
+    monkeypatch.setattr(os, "replace", crash)
     outcome = await gate(store, StaticPromotionApprover(True)).review(cid)
     monkeypatch.undo()
     assert outcome.decision == "invalid" and "simulated crash" in outcome.reasons[0]
@@ -652,7 +652,7 @@ async def test_failed_replace_restores_old_skill(
             raise OSError("simulated crash")
         real_replace(src, dst)
 
-    monkeypatch.setattr(approval_module.os, "replace", flaky)
+    monkeypatch.setattr(os, "replace", flaky)
     outcome = await gate(store, StaticPromotionApprover(True)).review(cid, replace=True)
     monkeypatch.undo()
     assert outcome.decision == "invalid"
@@ -719,3 +719,71 @@ async def test_review_shows_script_tests_and_safety(store: SkillStore) -> None:
         "[bold]x[/bold]",  # markup is shown literally, not interpreted
     ):
         assert expected in text
+
+
+# --- transient Windows rename failures ------------------------------------------
+
+
+def flaky_replace(
+    monkeypatch: pytest.MonkeyPatch, failures: int, error: OSError
+) -> list[tuple[str, str]]:
+    """Make ``os.replace`` raise ``error`` ``failures`` times, then work."""
+    real_replace = os.replace
+    calls: list[tuple[str, str]] = []
+
+    def replace(src: Any, dst: Any) -> None:
+        calls.append((str(src), str(dst)))
+        if len(calls) <= failures:
+            raise error
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    return calls
+
+
+def test_replace_path_retries_permission_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    calls = flaky_replace(monkeypatch, 2, PermissionError("in use"))
+    sleeps: list[float] = []
+    replace_path(tmp_path / "a", tmp_path / "b", sleep=sleeps.append)
+    assert len(calls) == 3 and sleeps == [0.05, 0.1]
+    assert (tmp_path / "b").is_dir() and not (tmp_path / "a").exists()
+
+
+def test_replace_path_gives_up_after_bounded_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    calls = flaky_replace(monkeypatch, 99, PermissionError("in use"))
+    sleeps: list[float] = []
+    with pytest.raises(PermissionError):
+        replace_path(tmp_path / "a", tmp_path / "b", sleep=sleeps.append)
+    assert len(calls) == 5 and sum(sleeps) < 1.0
+    assert (tmp_path / "a").is_dir() and not (tmp_path / "b").exists()
+
+
+def test_replace_path_does_not_retry_other_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = flaky_replace(monkeypatch, 99, FileNotFoundError("gone"))
+    with pytest.raises(FileNotFoundError):
+        replace_path(tmp_path / "a", tmp_path / "b", sleep=lambda _: None)
+    assert len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_promotion_survives_transient_permission_errors(
+    store: SkillStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await promote_one(store)
+    cid = await make_candidate(store, skill_json(description="Sum, version two."))
+    calls = flaky_replace(monkeypatch, 2, PermissionError("in use"))
+    outcome = await gate(store, StaticPromotionApprover(True)).review(cid, replace=True)
+    monkeypatch.undo()
+    assert outcome.promoted, outcome.reasons
+    assert len(calls) == 4  # old -> trash (3 attempts), staging -> live
+    assert "version two" in (store.skill_dir("sum-numbers") / "SKILL.md").read_text(
+        "utf-8"
+    )

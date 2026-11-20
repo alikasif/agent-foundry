@@ -26,7 +26,6 @@ fails.
 """
 
 import logging
-import os
 import shutil
 import unicodedata
 from dataclasses import dataclass
@@ -40,6 +39,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 from harness_builder.errors import ConfigError
+from harness_builder.skills.promotion import replace_path
 from harness_builder.skills.store import SkillStore
 from harness_builder.skills.validation import (
     CandidateValidator,
@@ -232,16 +232,16 @@ class ApprovalGate:
         self, staging: Path, target: Path, name: str, *, replace: bool
     ) -> Path | None:
         if not target.exists():
-            os.replace(staging, target)
+            replace_path(staging, target)
             return None
         if not replace:
             raise ConfigError(f"a live skill named {name!r} exists")
         trashed = self.store.trash_dir(name)
-        os.replace(target, trashed)
+        replace_path(target, trashed)
         try:
-            os.replace(staging, target)
+            replace_path(staging, target)
         except BaseException:
-            os.replace(trashed, target)
+            replace_path(trashed, target)
             raise
         return trashed
 

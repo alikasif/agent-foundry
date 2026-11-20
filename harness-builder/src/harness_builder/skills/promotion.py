@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -70,8 +71,31 @@ MAX_TRACKED_RUNS = 64
 """Bound on remembered runs whose ``on_stop`` never came (budget/error stops)."""
 MAX_SOURCE_CHARS = 20_000
 """Snippet and output text kept in ``source.json`` and sent to the LLM."""
+REPLACE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4)
+"""Backoff between ``os.replace`` attempts on ``PermissionError`` (0.75 s total).
+Windows refuses a rename while another process (indexer, antivirus, a
+concurrent test run) briefly holds a handle under the directory."""
 
 PromotionMode = Literal["on_stop", "deferred"]
+
+
+def replace_path(
+    src: Path, dst: Path, *, sleep: Callable[[float], None] = time.sleep
+) -> None:
+    """``os.replace(src, dst)``, retried with backoff on ``PermissionError``.
+
+    Atomicity is unchanged: each attempt is one ``os.replace``, and a failed
+    attempt leaves both paths as they were. After the last attempt the
+    ``PermissionError`` is re-raised; any other ``OSError`` is raised at once.
+    """
+    for delay in REPLACE_RETRY_DELAYS_S:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            logger.debug("os.replace(%s, %s) denied; retrying", src, dst)
+            sleep(delay)
+    os.replace(src, dst)
 
 
 class PromotionError(HarnessError):
@@ -341,7 +365,7 @@ class PromotionService:
         shutil.rmtree(staging, ignore_errors=True)
         try:
             _write_skill(staging, name, skill)
-            os.replace(staging, target)
+            replace_path(staging, target)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -418,7 +442,7 @@ def write_atomic(path: Path, text: str) -> None:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        replace_path(Path(tmp), path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
