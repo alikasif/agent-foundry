@@ -1333,7 +1333,7 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
     - FakeExecutor results for skill scripts need no sentinel; only the validator's test runner does.
 
 ### T041
-- **Files.** `src/harness_builder/generator/validate.py`; tests `tests/unit/test_validation_t041.py` (28 tests, offline, no Docker; names do not clash with T045's `tests/generator/`). One `CROSS_LAYER_ALLOWLIST` entry, `generator.validate`, was added to `tests/unit/test_import_rules.py`. It allows `core.builder`, `spec.loader`, `tools.container_tool`, `executor.image.hb_entry`, `executor.docker`, `executor.fake`, `llm.fake`, `permissions.approvers`, `safety.screen`, `evals.runner` and `evals.models`. The pipeline is a composition root for validation. No dependency was added and no frozen file changed. Commits `e12717f` (code and allowlist), `d24aad5` (tests), `74c2867` (flagged tools kept on an A failure).
+- **Files.** `src/harness_builder/generator/validate.py`; tests `tests/unit/test_validation_t041.py` (28 tests, offline, no Docker; names do not clash with T045's `tests/generator/`). One `CROSS_LAYER_ALLOWLIST` entry, `generator.validate`, was added to `tests/unit/test_import_rules.py`. It allows `core.builder`, `spec.loader`, `tools.container_tool`, `executor.image.hb_entry`, `executor.docker`, `executor.fake`, `llm.fake`, `permissions.approvers`, `safety.screen`, `evals.runner` and `evals.models`. The pipeline is a composition root for validation. No dependency was added and no frozen file changed. Commits `e12717f` (code and allowlist), `d24aad5` (tests), `74c2867` (flagged tools kept on an A failure), `7202090` (notes), `db58b35` (learnings), `b2891c8` (trust-mode builtin ToolCase fix).
 - **API.** `ValidationPipeline(*, live=False, trust_tools=False, llm=None, executor=None, judge=None, settings=None)` with `await pipeline.run(harness_dir) -> ValidationReport`, plus the shortcut `await validate_harness(dir, ...)`. It does not raise for harness problems: they become stage results.
   - `executor` is the **Docker sandbox**: B0 schema extraction, generated tools, PyAssert. The default is `DockerExecutor(SandboxConfig(spec.sandbox) or default, image=Settings.docker_image)`.
   - Tests inject an executor that emulates Docker (`EmulatedDocker` runs the real `hb_entry` functions in-process) or one whose `preflight` raises `DockerUnavailableError`. The CLI must never pass a fake.
@@ -1387,13 +1387,14 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
   - Stage status: any fail is `fail`, else any incomplete is `incomplete`, else any pass is `pass`, else `not_run`.
   - TaskCases are `not_run` unless `live`. With `live` and `llm=None`, the harness default LLM is used (T043 live).
   - **Trust mode:**
-    - A ToolCase whose `tool` is not a module tool is `incomplete` without running, because `run_code` would hit the FakeExecutor and could fake a pass. This is conservative and covers every builtin.
+    - A ToolCase whose `tool` is a declared builtin (`tools[i].builtin`, plus `deref`/`spawn_agent` when `context: by_reference`/`subagents` implies them) is `incomplete` without running, because `run_code` would hit the FakeExecutor and could fake a pass. Any other name runs, so a typo is `unknown_tool` and C fails, the same as in Docker mode. The first version held back every non-module tool, which turned a typo into `incomplete`, a runnable meta status; fixed in `b2891c8`.
     - PyAssert still goes to the Docker `executor`, never to the FakeExecutor. Without Docker it is `incomplete`, even when trusted (tested). This deviates from a plain "executor=None": PyAssert works in trust mode whenever Docker is up.
 - **Trust mode = host runtime.** `trust_tools=True` validates a copy of the spec with every module tool's `runtime` set to `host`, so generator-written fixtures (default `runtime: docker`) pass A and B offline (T045). The copy is also what `spec_snapshot` records during validation. The original spec on disk is unchanged.
 - **Known limits.**
   - `builder_from_spec`-only checks (duplicate tool names, unknown builtins, strategy required tools) surface in B as build errors, not in A. Stage A deliberately does not call the loader's tool construction, because that would import host tools.
   - Async host tools in trust mode go through `hb_entry.invoke`'s `asyncio.run` inside a running loop (a T039 limit, not exercised here).
   - Ruff and pyrefly cost about 0.3-0.8 s per validation.
+  - A spec with `budget.max_cost_usd` and no model (placeholder `validation/fake-llm` in use) fails stage C with "no price known", because the C rebuild keeps the spec budget. Stage B resets the budget, so it is not affected. A real model name has a price or fails at run time too.
 - **Contracts.**
   - **T042:**
     - Run `report = await ValidationPipeline(trust_tools=..., live=..., llm=...).run(staging_dir)`.
@@ -1408,7 +1409,12 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
     - Docker-absent incomplete: inject `executor=FakeExecutor(preflight_error=DockerUnavailableError(...))` without trust and expect `status == "incomplete"` and `exit_code == 3`. This does not depend on this machine's Docker being down.
     - A broken tool (untyped parameter) fails A; a raising body fails B (`tool_exception` in `report.stage("B").problems`).
     - Stage C "under the docker marker" means `ValidationPipeline()` with the default `DockerExecutor`; it needs the sandbox image `harness-builder-sandbox:<tag>` built.
-- **Verification.** `ruff format` and `ruff check` are clean on my files. `ruff check .` currently reports 2 E501 in `tests/unit/test_workdir_lifecycle.py`, T044's uncommitted work in progress, not mine. `pyrefly check` gives 0 errors (51 suppressed, none added by T041) and no warnings. `uv run pytest`: 1936 passed, 38 skipped, 1 xfailed (Docker/live/symlink skips; includes concurrent tasks' tests). No docker-marked test was added. Docker is not running, so no real-Docker validation has been run.
+- **Verification (after `b2891c8`).**
+  - `uv run ruff check .` is clean and `uv run ruff format --check .` reports 178 files formatted.
+  - `pyrefly check` gives 0 diagnostics (none suppressed by T041).
+  - `uv run pytest`: 1939 passed, 44 skipped, 1 xfailed (Docker/live/symlink skips; includes concurrent tasks' tests). `test_validation_t041.py` has 28 tests.
+  - **Production default path, scratchpad script (no injected executor, real `DockerExecutor`, Docker Desktop stopped):** a harness with one docker-runtime tool gave `incomplete`, exit code 3, with A pass and B0/B/C incomplete. The B0 problem quoted the real preflight message (`failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`), nothing was raised, and no `tools.schema.json` was written.
+  - No docker-marked test was added. A real-Docker validation has never been run.
 
 ### T044
 - **Files (tests only, no src change).**
