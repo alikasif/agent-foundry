@@ -1331,3 +1331,81 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
     - After approval, the next run retrieves the new skill; there is no cache to clear.
     - A repeat task uses it through `activate_skill`/`run_skill_script`.
     - FakeExecutor results for skill scripts need no sentinel; only the validator's test runner does.
+
+### T041
+- **Files.** `src/harness_builder/generator/validate.py`; tests `tests/unit/test_validation_t041.py` (28 tests, offline, no Docker; names do not clash with T045's `tests/generator/`). One `CROSS_LAYER_ALLOWLIST` entry, `generator.validate`, was added to `tests/unit/test_import_rules.py`. It allows `core.builder`, `spec.loader`, `tools.container_tool`, `executor.image.hb_entry`, `executor.docker`, `executor.fake`, `llm.fake`, `permissions.approvers`, `safety.screen`, `evals.runner` and `evals.models`. The pipeline is a composition root for validation. No dependency was added and no frozen file changed. Commits `e12717f` (code and allowlist), `d24aad5` (tests), `74c2867` (flagged tools kept on an A failure).
+- **API.** `ValidationPipeline(*, live=False, trust_tools=False, llm=None, executor=None, judge=None, settings=None)` with `await pipeline.run(harness_dir) -> ValidationReport`, plus the shortcut `await validate_harness(dir, ...)`. It does not raise for harness problems: they become stage results.
+  - `executor` is the **Docker sandbox**: B0 schema extraction, generated tools, PyAssert. The default is `DockerExecutor(SandboxConfig(spec.sandbox) or default, image=Settings.docker_image)`.
+  - Tests inject an executor that emulates Docker (`EmulatedDocker` runs the real `hb_entry` functions in-process) or one whose `preflight` raises `DockerUnavailableError`. The CLI must never pass a fake.
+  - The pipeline writes only `tools.schema.json`, atomically (temp file + `replace`) and only after every docker-runtime tool was extracted. `reports/validation.{json,md}` and `.harness-meta.json` are T042's job.
+- **`ValidationReport`** (frozen pydantic):
+  - fields: `harness`, `status` pass|fail|incomplete, `stages: list[StageResult(id A|B0|B|C, name, status pass|fail|incomplete|not_run, detail, problems)]`, `flagged_tools: list[str]` (tool names), `safety_findings: list[SafetyFinding(module, tools, category, line, detail)]`, `eval_cases: list[evals.models.CaseResult]`, `attempts` (default 1; T042 sets it with `model_copy(update={"attempts": n})`), `trusted`, `live`;
+  - helpers: `.exit_code` (0/1/3), `.stage(id)`, `.to_json()`, `.to_markdown()`.
+  - **Deviation in shape:** designs 9.3 lists `flagged_tools` only. Findings are a separate list, so T043 can pass `report.flagged_tools` straight to `from_spec(flagged_tools=)`.
+- **Status rules (never a false pass).**
+  - Overall: `fail` if any stage failed, else `incomplete` if any stage could not finish, else `pass`.
+  - A stage that did no work is `not_run`, never `pass`: B0 without docker-runtime tools, C without eval cases or with only non-live TaskCases.
+  - After a `fail`, the later stages are `not_run` ("stage X failed"). After an `incomplete`, they are `incomplete` ("stage X could not finish"), because they need the same missing Docker. So a stage-A failure wins over missing Docker.
+- **Stage A (never imports or runs harness code).**
+  - Checks:
+    - `load_spec` and `load_eval_cases`, with located errors (`harness.json: budget.max_steps: ...`, `evals[0].check.value`);
+    - every module tool/hook ref through `spec.loader.resolve_inside` plus "is a file";
+    - non-empty `examples` (T040 contract);
+    - `runtime: host` tools and module hooks are a stage-A failure without trust. Otherwise B0 would run and B would die with a less clear `ConfigError`.
+  - AST check (`signature_problems`), mirroring `hb_entry.args_model_for` (T039 convention):
+    - the last top-level `def`/`async def` with that name, so a class or a missing name fails;
+    - every parameter annotated (the explicit-model form is one annotated parameter, so it is the same rule);
+    - `ctx`, `*args`, `**kwargs` and positional-only parameters are refused;
+    - zero parameters are allowed (as in `hb_entry`).
+  - All problems are collected in one pass, so the repair loop sees them together.
+  - **Lint, decisions not in the spec:**
+    - It runs on the referenced module files (tools and hooks), not on all of `tools/`, with cwd at the harness dir and relative paths.
+    - ruff: `python -m ruff check --isolated --no-cache --select E9,F63,F7,F82`. `--isolated` ignores harness-builder's own config, which excludes `harnesses/` and `broken_*`; I probed that `--isolated` alone still fires I001. The flake8 "fatal" set keeps style issues from burning repair attempts. The cost: unused imports pass.
+    - pyrefly: `python -m pyrefly check -c <temp pyrefly.toml>` with `python-interpreter-path = sys.executable`. **Without `-c` pyrefly falls back to the `basic` preset outside a project and missed a real `bad-return` (probed)**, and harness-builder's `project-excludes` would apply inside the repo. A test pins that `bad-return` is caught.
+    - Exit 0 is clean and exit 1 is findings (stage A fails). Any other exit code, a timeout (120 s) or a missing executable makes stage A `incomplete`, never `pass`.
+  - Safety:
+    - `safety.screen` runs on every parsed module, hooks included.
+    - Every tool of a module with findings is flagged; the screen is per file, so this is coarser than per function.
+    - Flagged names go to `builder_from_spec(flagged_tools=)`, so the validated harness has the `ask` rules. Hook-module findings are reported but get no rule.
+- **Stage B0.**
+  - Docker mode: `await sandbox.preflight()` once, then `extract_tool_schema` per `runtime: docker` tool in a temp workdir. `DockerUnavailableError` makes it `incomplete`, and `ConfigError` (load error, missing args model, garbled output) is a problem. The schema timeout is the spec sandbox `timeout_s` (default 30).
+  - Trust mode: `hb_entry.load_tool` plus `tool_schema` in-process for the same tools. It still writes `tools.schema.json`, so a harness validated in trust mode can later run in Docker. Host and container use the same code (T039), so the schemas agree.
+- **Stage B (smoke).**
+  - `builder_from_spec(info.spec, builder=HarnessBuilder(name, settings, trust_host_tools=trust, allow_failed=True), base_dir, source, flagged_tools)`, then:
+    - `.trace_dir(None)` and `.approver(StaticApprover(True))`. Validation approves `ask` decisions, including safety-flagged tools. Their code runs in Docker, or on the host only in trust mode.
+    - `.executor(sandbox)`, or `FakeExecutor()` in trust mode;
+    - `.llm(FakeLLMClient(callable))`;
+    - `.budget(max_steps=2)`, with no token or cost caps;
+    - a placeholder model `validation/fake-llm` only when neither the spec nor `HARNESS_MODEL` names one.
+  - The script: one step with every module tool's `examples[0]` (ids `smoke-<i>`), then a final answer. Builtin tools are not called (they have no examples).
+  - **Pass criterion, stricter than designs 9.3 (decision):** stop `done`, **every scripted call has an `ok=True` observation**, and `Trace.model_validate_json(trace.model_dump_json()) == trace`. The literal list (no validation, tool_exception or executor_error) would let a call that was `permission_denied`, `timeout`, `unknown_tool` or never executed count as a pass. A default-deny harness that never allows its own tool therefore fails B (tested).
+  - The budget override is a decision: the smoke run tests the tools, not the spec's limits.
+  - `DockerUnavailableError` from `build()` (preflight) makes B `incomplete`, which also covers a `run_code`-only harness. `SpecError`/`ConfigError` from the build (unknown builtin, bad strategy options, host-tool load failure) are a B `fail`.
+- **Stage C.**
+  - `EvalRunner(factory, cases, llm=llm, live=live, executor=sandbox, judge=judge)`. The factory rebuilds the stage-B builder per run, with the runner's client.
+  - `ConfigError`/`SpecError` from the factory are a C `fail`. `DockerUnavailableError` is `incomplete` (the runner's own rule).
+  - Stage status: any fail is `fail`, else any incomplete is `incomplete`, else any pass is `pass`, else `not_run`.
+  - TaskCases are `not_run` unless `live`. With `live` and `llm=None`, the harness default LLM is used (T043 live).
+  - **Trust mode:**
+    - A ToolCase whose `tool` is not a module tool is `incomplete` without running, because `run_code` would hit the FakeExecutor and could fake a pass. This is conservative and covers every builtin.
+    - PyAssert still goes to the Docker `executor`, never to the FakeExecutor. Without Docker it is `incomplete`, even when trusted (tested). This deviates from a plain "executor=None": PyAssert works in trust mode whenever Docker is up.
+- **Trust mode = host runtime.** `trust_tools=True` validates a copy of the spec with every module tool's `runtime` set to `host`, so generator-written fixtures (default `runtime: docker`) pass A and B offline (T045). The copy is also what `spec_snapshot` records during validation. The original spec on disk is unchanged.
+- **Known limits.**
+  - `builder_from_spec`-only checks (duplicate tool names, unknown builtins, strategy required tools) surface in B as build errors, not in A. Stage A deliberately does not call the loader's tool construction, because that would import host tools.
+  - Async host tools in trust mode go through `hb_entry.invoke`'s `asyncio.run` inside a running loop (a T039 limit, not exercised here).
+  - Ruff and pyrefly cost about 0.3-0.8 s per validation.
+- **Contracts.**
+  - **T042:**
+    - Run `report = await ValidationPipeline(trust_tools=..., live=..., llm=...).run(staging_dir)`.
+    - Feed `report.to_markdown()` (or the stage `problems`) back to the generator.
+    - Write `reports/validation.json` from `report.model_copy(update={"attempts": n}).to_json()` and `validation.md` from `.to_markdown()`.
+    - `.harness-meta.json` `status = report.status` (pass|fail|incomplete).
+    - FAILED banner when `report.status == "fail"`.
+    - The pipeline already wrote `tools.schema.json` into the dir it validated, so validate the staging dir before the atomic move.
+  - **T043:** `harness validate <dir> [--live] [--trust-tools]` exits with `sys.exit(report.exit_code)` (0/1/3) and prints `to_markdown()`. Pass the Fake LLM (`LLM_FACTORY` / `--fake-llm`) as `llm=` for `--live`, and an `AdkLiteLlmClient` factory as `judge=` for Rubric checks. Never pass `executor=`. `run` should pass `report.flagged_tools` (from `reports/validation.json`) to `from_spec(flagged_tools=)`.
+  - **T045:**
+    - Generated fixtures pass A/B/C offline with `ValidationPipeline(trust_tools=True)`.
+    - Docker-absent incomplete: inject `executor=FakeExecutor(preflight_error=DockerUnavailableError(...))` without trust and expect `status == "incomplete"` and `exit_code == 3`. This does not depend on this machine's Docker being down.
+    - A broken tool (untyped parameter) fails A; a raising body fails B (`tool_exception` in `report.stage("B").problems`).
+    - Stage C "under the docker marker" means `ValidationPipeline()` with the default `DockerExecutor`; it needs the sandbox image `harness-builder-sandbox:<tag>` built.
+- **Verification.** `ruff format` and `ruff check` are clean on my files. `ruff check .` currently reports 2 E501 in `tests/unit/test_workdir_lifecycle.py`, T044's uncommitted work in progress, not mine. `pyrefly check` gives 0 errors (51 suppressed, none added by T041) and no warnings. `uv run pytest`: 1936 passed, 38 skipped, 1 xfailed (Docker/live/symlink skips; includes concurrent tasks' tests). No docker-marked test was added. Docker is not running, so no real-Docker validation has been run.
