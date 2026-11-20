@@ -263,7 +263,7 @@ class ValidationPipeline:
         name = info.spec.name if info is not None else harness_dir.name
         if info is None or stage_a.status == "fail":
             stages += _skipped(("B0", "B", "C"), "not_run", "stage A failed")
-            return self._report(name, stages, None, findings, [])
+            return self._report(name, stages, info, findings, [])
         sandbox = self.executor or DockerExecutor(
             SandboxConfig(**info.spec.sandbox.model_dump())
             if info.spec.sandbox is not None

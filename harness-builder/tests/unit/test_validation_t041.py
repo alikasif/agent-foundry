@@ -422,6 +422,15 @@ async def test_flagged_tool_is_reported_and_still_smoke_tested(
     assert report.status == "pass", report.to_markdown()
 
 
+async def test_flagged_tools_are_kept_when_stage_a_fails(tmp_path: Path) -> None:
+    source = "import socket  # noqa: F401\n" + GOOD_TOOL
+    harness = make_harness(tmp_path, source, examples=[])
+    report = await pipeline(trust_tools=True).run(harness)
+    assert report.status == "fail"
+    assert report.flagged_tools == ["add"]
+    assert "Safety findings" in report.to_markdown()
+
+
 # -- report ------------------------------------------------------------------
 
 
