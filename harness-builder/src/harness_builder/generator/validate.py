@@ -66,7 +66,12 @@ from harness_builder.spec.loader import (
     load_spec,
     resolve_inside,
 )
-from harness_builder.spec.models import HarnessSpec, ModuleHookRef, ModuleToolRef
+from harness_builder.spec.models import (
+    BuiltinToolRef,
+    HarnessSpec,
+    ModuleHookRef,
+    ModuleToolRef,
+)
 from harness_builder.tools.container_tool import (
     TOOLS_SCHEMA_FILE,
     ToolSchemaEntry,
@@ -497,18 +502,20 @@ class ValidationPipeline:
         """ToolCases (and live TaskCases) through ``EvalRunner``."""
         if not info.cases:
             return _stage("C", "not_run", "no eval cases"), []
-        module_names = {t.function for t in info.module_tools}
+        builtins = _builtin_names(info.spec)
         held: list[CaseResult] = []
         cases: list[EvalCase] = []
         for case in info.cases:
+            # Trust mode fakes run_code, so a builtin ToolCase could pass
+            # falsely; an unknown tool name still runs (and fails).
             if self.trust_tools and isinstance(case, ToolCase):
-                if case.tool not in module_names:
+                if case.tool in builtins:
                     held.append(
                         CaseResult(
                             id=case.id,
                             kind="tool",
                             status="incomplete",
-                            detail=f"{case.tool!r} is not a module tool; only module "
+                            detail=f"{case.tool!r} is a builtin tool; only module "
                             "tools run in --trust-tools mode (run_code is faked)",
                         )
                     )
@@ -619,6 +626,16 @@ def smoke_problems(trace: Trace, calls: list[ToolCall]) -> list[str]:
             message = obs.error.message if obs.error is not None else obs.content
             problems.append(f"tool {call.name!r} (examples[0]): {kind}: {message}")
     return problems
+
+
+def _builtin_names(spec: HarnessSpec) -> set[str]:
+    """Declared builtin tools plus ``deref``/``spawn_agent`` the spec implies."""
+    names = {t.builtin for t in spec.tools if isinstance(t, BuiltinToolRef)}
+    if spec.context is not None and spec.context.policy == "by_reference":
+        names.add("deref")
+    if spec.subagents is not None:
+        names.add("spawn_agent")
+    return names
 
 
 def _host_runtime(spec: HarnessSpec) -> HarnessSpec:

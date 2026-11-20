@@ -390,6 +390,14 @@ async def test_trusted_tool_case_on_run_code_is_incomplete(tmp_path: Path) -> No
     assert report.status == "incomplete"
 
 
+async def test_trusted_tool_case_on_unknown_tool_fails(tmp_path: Path) -> None:
+    """A typo is a failure, not 'incomplete' (only builtins are held back)."""
+    typo = {**ADD_CASE, "tool": "ad"}
+    report = await pipeline(trust_tools=True).run(make_harness(tmp_path, cases=[typo]))
+    assert statuses(report)["C"] == "fail" and report.status == "fail"
+    assert "unknown_tool" in (report.eval_cases[0].detail or "")
+
+
 async def test_failing_tool_case_fails_stage_c(tmp_path: Path) -> None:
     wrong = {**ADD_CASE, "check": {"type": "equals", "value": 4}}
     report = await pipeline(trust_tools=True).run(make_harness(tmp_path, cases=[wrong]))
