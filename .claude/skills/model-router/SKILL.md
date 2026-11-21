@@ -20,6 +20,8 @@ A skill cannot switch the current session's model. Routing means delegating to a
 | Writing or editing code, tests, skills, docs, scaffolding | `sonnet` |
 | Mechanical refactors, renames, dispatch loops, formatting | `sonnet` |
 
+When rows overlap, the output decides. If the deliverable is code, tests, a skill or scaffolding, it goes to `sonnet`, even when the work is high-stakes or involves design choices. High-stakes raises the review bar, not the writer: have `opus` review the result. If the deliverable is a plan, design, decision, diagnosis or review, it goes to `opus`.
+
 Unsure which row fits: reasoning-heavy goes to `opus`, everything else to `sonnet`.
 
 ## Mixed tasks
