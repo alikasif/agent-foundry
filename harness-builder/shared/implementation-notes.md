@@ -1547,3 +1547,50 @@ Skills hygiene (`skills/hygiene.py`), the `harness skills` CLI group and the ski
   - `--skills-compare`: the empty run took 2 steps and the seeded run 1, and the real library was unchanged.
 - **Commit trailer.** As in T042-T044, the commit carries the session's Opus trailer.
 - **Verification.** `ruff check .` is clean. `ruff format --check .` flags only `tests/generator/test_domains.py`, an untracked file from a concurrent agent. `pyrefly check` reports 0 errors. Full `uv run pytest`: 2084 passed, 46 skipped, 3 xfailed.
+
+### T045
+- **Files (all under `tests/generator/`).** `support.py` (helpers), `conftest.py` (fixtures), `test_domains.py`, `test_broken_and_repair.py`, `test_cli_domains.py`, `test_docker_stage_c.py`, and `fixtures/`:
+  - `csv_triage/`, `repo_qa/` and `unit_conversion/` are complete harness dirs: `harness.yaml`, `prompts/system.md`, `tools/__init__.py`, `tools/<module>.py`, `evals/cases.yaml`. `csv_triage` also ships its own `README.md`. `repo_qa` bundles a `repo/` folder that its tools read through `Path(__file__).parents[1] / "repo"`. This path works on the host and at the read-only `/tools` mount.
+  - `broken_tool/bad_signature/` and `broken_tool/raising_body/` are **overlays**, not whole harnesses. Each holds only `tools/units.py`, which replaces the `unit_conversion` module. `bad_signature` has an untyped parameter, so stage A fails. `raising_body` is typed but raises `KeyError`, so stage B fails with `tool_exception`. The overlay lets "broken, then fixed" be the same harness, and the `broken_*` ruff/pyrefly exclusion from T001 covers it.
+  - No `src/` change and no dependency added.
+- **How the fixtures are driven.** `ScriptedGenerator(*file_sets)` is a callable `FakeLLMClient`. On run n it writes `file_sets[min(n, len) - 1]` through `write_file` (POSIX paths), then calls `submit`. It counts runs and records each run's task, so repair prompts can be asserted. Fixture files are read with universal newlines, so a CRLF checkout writes the same text.
+- **Offline Docker paths (decision).** The fixtures keep the default `runtime: docker`, as the generator would write them. Two seams avoid needing the real daemon:
+  - `EmulatedDocker` (an injected executor) and the `emulated_docker` fixture both answer the sandbox's `schema` and `call` entries in-process with the real `hb_entry` functions. The fixture monkeypatches `DockerExecutor.preflight` and `DockerExecutor.run`, which is how the CLI tests run production `new`/`validate`/`eval`/`run` with no `--trust-tools` and no injected validator. The `run` entry (`run_code`, PyAssert) is deliberately not emulated: it raises, so it can never fake a pass.
+  - Docker down is simulated two ways: `FakeExecutor(preflight_error=...)`, or `no_docker`, which patches `preflight` to raise. Neither depends on this machine's daemon.
+- **Coverage (PRD AC 6, FR-031/034/035).**
+  - Per domain:
+    - passes A/B0/B/C trusted, with no safety findings, TaskCases `not_run` and every written file byte-equal to the fixture;
+    - `tools.schema.json` covers every module tool;
+    - README is either the generator's own or the template;
+    - passes untrusted with the emulated sandbox (every tool gets a schema request and a call request, all with `network=False`);
+    - `from_spec(out)` builds and runs every `examples[0]` call ok;
+    - without Docker it is `incomplete`, exits 3, makes no repair, writes no schema, makes no sandbox request and gets the INCOMPLETE banner;
+    - a negative control: one wrong ToolCase value fails stage C on exactly that case.
+  - Broken generation:
+    - status `fail`, exit 1, `attempts == max_attempts`;
+    - the README starts with the FAILED banner, including on top of a generator-written README;
+    - meta and `reports/validation.json` say fail, with located problems;
+    - a stage-A failure makes no sandbox request.
+  - Repair:
+    - bounded by `max_attempts` from 1 to 4, and repair task n carries "Attempt n failed validation" plus the report;
+    - broken then fixed passes with 2 attempts;
+    - a generator `budget` stop ends the loop;
+    - without Docker, a raising body is `incomplete` (never pass, never repaired), while a stage-A failure still outranks missing Docker.
+  - CLI (`CliRunner`):
+    - `new` followed by `validate`, `eval` and `run` exits 0 on every domain with emulated Docker;
+    - the default `-o` is `./harnesses/<slug>`;
+    - broken `new` exits 1 with the banner, `validate` exits 1, and `run` exits 2 without `--allow-failed`;
+    - `run --allow-failed` on the raising harness surfaces the `KeyError` observation;
+    - `new` repairs a broken draft;
+    - without Docker, `new` and `validate` exit 3;
+    - if Docker disappears after generation, `eval` (all ToolCases incomplete) and `run` exit 3;
+    - `validate --trust-tools` passes the same incomplete harness.
+- **Defect found (minor, reported, not fixed: `src/` is not mine).** `harness eval <dir>` and `harness run <dir>` on a harness that `harness new` produced **without Docker** (status `incomplete`) exit **2**, not 3. Stage B0 never ran, so there is no `tools.schema.json`, and building the docker-runtime tool raises `ConfigError` ("docker-runtime tools need tools.schema.json; run `harness validate` to extract it"). The message is actionable. But plan 5 says 3 means "Docker unavailable (or validation incomplete)", and here the root cause is the missing daemon. This is pinned by a strict xfail, `test_cli_domains.py::test_incomplete_generated_harness_eval_and_run_exit_3[eval|run]`. Remove the xfail when it is fixed. Possible fix for T046: when `tools.schema.json` is missing and `.harness-meta.json` says `incomplete`, or when the Docker preflight fails, map the error to exit 3. When the schema exists and Docker is down, both commands already exit 3 (tested).
+- **Fixture note.** The first `repo_qa` `list_files` sorted `Path` objects. On Windows that comparison ignores case (`CHANGELOG.md`, `docs/`, `README.md`), but in the Linux sandbox it is case-sensitive, so a ToolCase would pass on the host in trust mode and fail in Docker. The fixture now sorts by the POSIX string. Generated tools can carry the same trap, and only real-Docker stage C would catch it.
+- **Skipped tests (Docker daemon not running on this machine; no `HARNESS_LIVE`).** All 5 are in `tests/generator/test_docker_stage_c.py`:
+  - `test_domain_passes_all_stages_in_real_docker[csv_triage|repo_qa|unit_conversion]` and `test_raising_tool_fails_stage_b_in_real_docker` (`docker` marker). Skip reason: `Docker not available: failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; ...`.
+  - `test_live_generation_is_validated_in_docker` (`docker` + `live`). Skip reason: `live test: set HARNESS_LIVE=1 to run`, and also the Docker reason when HARNESS_LIVE=1.
+  - When Docker is up, the local `sandbox_image` session fixture builds the image if it is missing, and skips with the build error if the build fails. `tests/docker`'s fixture of the same name is not visible from `tests/generator`.
+  - **Real-Docker stage C has never run.** PRD AC 6 stage C is covered offline only, by the emulated sandbox, which runs the real `hb_entry` but not the container.
+- **Commit trailer.** As in T042-T044, the commit carries the session's Opus trailer, not the Sonnet one in the dispatch.
+- **Verification.** See the T045 commit message.

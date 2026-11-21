@@ -1,0 +1,26 @@
+schema_version: 1
+name: unit-conversion
+description: Converts lengths and temperatures between units.
+strategy:
+  name: react
+prompts:
+  system:
+    file: prompts/system.md
+tools:
+  - module: tools/units.py
+    function: convert_length
+    examples:
+      - {value: 1, from_unit: km, to_unit: m}
+  - module: tools/units.py
+    function: convert_temperature
+    examples:
+      - {value: 0, from_unit: C, to_unit: F}
+permissions:
+  default: deny
+  rules:
+    - {tool: convert_length, decision: allow}
+    - {tool: convert_temperature, decision: allow}
+budget:
+  max_steps: 10
+evals:
+  file: evals/cases.yaml

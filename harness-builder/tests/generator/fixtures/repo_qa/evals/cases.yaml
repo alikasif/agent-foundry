@@ -1,0 +1,22 @@
+- kind: tool
+  id: lists-files
+  tool: list_files
+  args: {}
+  check: {type: equals, value: [CHANGELOG.md, README.md, docs/setup.md]}
+- kind: tool
+  id: finds-port
+  tool: search_repo
+  args: {query: "default port"}
+  check:
+    type: equals
+    value:
+      - {path: docs/setup.md, line: 5, text: "The default port is 8080."}
+- kind: tool
+  id: reads-changelog
+  tool: read_repo_file
+  args: {path: CHANGELOG.md}
+  check: {type: contains, text: "## 1.2.0"}
+- kind: task
+  id: which-port
+  input: "Which port does widget-service use by default?"
+  check: {type: contains, text: "8080"}

@@ -1,0 +1,23 @@
+schema_version: 1
+name: csv-bug-triage
+description: Triages bug reports exported as CSV by severity and status.
+prompts:
+  system:
+    file: prompts/system.md
+tools:
+  - module: tools/triage.py
+    function: triage_by_severity
+    examples:
+      - csv_text: "id,title,severity,status\nB1,Crash on save,high,open\n"
+  - module: tools/triage.py
+    function: count_by_status
+    examples:
+      - csv_text: "id,title,severity,status\nB1,Crash on save,high,open\n"
+permissions:
+  rules:
+    - {tool: triage_by_severity, decision: allow}
+    - {tool: count_by_status, decision: allow}
+budget:
+  max_steps: 8
+evals:
+  file: evals/cases.yaml
