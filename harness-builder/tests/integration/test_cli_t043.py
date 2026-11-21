@@ -318,6 +318,9 @@ def test_eval_live_fake_llm_file_serves_every_run(
     )
     assert live.exit_code == 0, live.output
     assert "passed: 2, failed: 0" in live.output
+    assert "tokens: " in live.output
+    assert "cost: " in live.output
+    assert live.output.count("trace: say-three: ") == 2
 
 
 def test_eval_runs_must_be_positive(invoke: Invoke, tmp_path: Path) -> None:

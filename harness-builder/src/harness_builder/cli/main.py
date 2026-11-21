@@ -384,7 +384,11 @@ EVAL_TOOL_MODEL = "eval/scripted-tool-case"
     help="Runs per TaskCase (overrides each case's runs).",
 )
 @click.option("--live", is_flag=True, help=LIVE_HELP)
-@click.option("--trust-tools", is_flag=True, help=TRUST_HELP)
+@click.option(
+    "--trust-tools",
+    is_flag=True,
+    help="Allow 'runtime: host' tools and module hooks (runs them on the host).",
+)
 @click.option(
     "--allow-failed",
     is_flag=True,
@@ -447,12 +451,16 @@ def eval_command(
         )
         report = anyio.run(runner.run)
     Console().print(_eval_table(report))
+    for case in report.cases:
+        for path in case.trace_paths:
+            click.echo(f"trace: {case.id}: {path}", err=True)
     totals = report.totals
     rate = "-" if totals.success_rate is None else f"{totals.success_rate:.0%}"
     click.echo(
         f"cases: {totals.cases}, passed: {totals.passed}, failed: {totals.failed}, "
         f"incomplete: {totals.incomplete}, not run: {totals.not_run}, "
-        f"success rate: {rate}"
+        f"success rate: {rate}, tokens: {totals.tokens}, "
+        f"cost: {_usd(totals.cost)}"
     )
     if totals.failed:
         raise click.exceptions.Exit(EXIT_FAILED)
@@ -461,7 +469,7 @@ def eval_command(
 
 
 def _eval_table(report: EvalReport) -> Table:
-    """Rich table: one row per case with status, success rate and detail."""
+    """Rich table: per case status, success rate, mean steps, tokens, cost."""
     from rich.table import Table
     from rich.text import Text
 
@@ -472,7 +480,8 @@ def _eval_table(report: EvalReport) -> Table:
         "not_run": "dim",
     }
     table = Table(title="harness eval")
-    for column in ("case", "kind", "status", "rate", "steps", "detail"):
+    columns = ("case", "kind", "status", "rate", "steps", "tokens", "cost", "detail")
+    for column in columns:
         table.add_column(column)
     for case in report.cases:
         rate = "-" if case.success_rate is None else f"{case.success_rate:.0%}"
@@ -483,9 +492,16 @@ def _eval_table(report: EvalReport) -> Table:
             Text(case.status, style=styles[case.status]),
             rate,
             steps,
+            str(case.tokens),
+            _usd(case.cost),
             Text(case.detail or "-"),
         )
     return table
+
+
+def _usd(cost: float | None) -> str:
+    """``$0.0012`` style, or ``unknown`` when a model price is unknown."""
+    return "unknown" if cost is None else f"${cost:.4f}"
 
 
 @main.command()
