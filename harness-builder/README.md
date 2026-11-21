@@ -4,12 +4,13 @@ A layered agent-harness framework in Python. You compose a harness from small,
 swappable layers (LLM client, strategy, tools, permissions, hooks, context policy,
 budget, trace), run it, and get a complete, replayable trace of what it did.
 
-Status: milestone M2 (M1 framework core, spec loader, trace replay and diff, plus
-the Docker sandbox, the `run_code` tool, the CodeAct strategy and `harness
-doctor`). Skills and the harness generator are later milestones and are not
-documented here yet. **No live LLM run has been made yet, and the Docker sandbox
-has not been run against a real Docker daemon yet**; everything below was
-exercised offline with a scripted fake model and a fake Docker CLI.
+Status: milestone M3 (M1 framework core, spec loader, trace replay and diff, the
+Docker sandbox, the `run_code` tool, the CodeAct strategy and `harness doctor`,
+plus the harness generator `harness new`, validation, evals and the full
+HarnessSpec v1). Skills are a later milestone and are not documented here yet.
+**No live LLM run has been made yet, and the Docker sandbox has not been run
+against a real Docker daemon yet**; everything below was exercised offline with a
+scripted fake model, a fake Docker CLI and `--trust-tools`.
 
 ## Install
 
@@ -146,11 +147,41 @@ a key, the hidden, test-only option `--fake-llm FILE` takes a JSON list of
 scripted `LLMResponse` objects, for example `[{"text": "Hello"}]`. It is meant
 for tests and smoke runs and may change.
 
-Commands and exit codes are listed in [docs/traces.md](docs/traces.md#cli-reference).
-Spec fields in M1: `schema_version` (required, `1`), `name`, `description`,
-`model`, `strategy`, `prompts`, `tools`, `context`, `permissions`, `budget`,
-`hooks`, `subagents`. Unknown keys are rejected with a located error such as
-`harness.yaml: budget.max_stepz: Extra inputs are not permitted`.
+Commands and exit codes for `run`, `replay`, `diff` and `trace` are listed in
+[docs/traces.md](docs/traces.md#cli-reference). Spec fields: `schema_version`
+(required, `1`), `name`, `description`, `model`, `strategy`, `prompts`, `tools`
+(built-in or module tools), `context`, `permissions`, `budget`, `hooks`,
+`subagents`, `sandbox`, `skills` and `evals`. Unknown keys are rejected with a
+located error such as `harness.yaml: budget.max_stepz: Extra inputs are not
+permitted`. The full reference is [docs/spec.md](docs/spec.md).
+
+## Generate, validate and evaluate a harness
+
+`harness new` asks a model to write a harness directory (spec, tool modules,
+eval cases, README), validates it in stages, repairs it a bounded number of
+times and writes it with a validation report. It needs a model
+(`HARNESS_MODEL`, `OPENROUTER_API_KEY`) and, for generated tools, Docker.
+
+```text
+uv run harness new "Count the words in a text" --non-interactive
+uv run harness validate harnesses/count-the-words-in-a-text
+uv run harness eval harnesses/count-the-words-in-a-text
+uv run harness run harnesses/count-the-words-in-a-text "How many words in: a b c?"
+```
+
+| Command | Exit 0 | Exit 1 | Exit 2 | Exit 3 |
+|---|---|---|---|---|
+| `new` | validation passed | validation failed (still written, marked failed) | usage or config error | validation incomplete (for example no Docker) |
+| `validate` | passed | failed | usage error | incomplete |
+| `eval` | no case failed | a case failed | usage or config error | a case is incomplete |
+
+Generated tools run only in Docker. `--trust-tools` (on `validate`, `eval` and
+`run`) runs hand-checked `runtime: host` tools on the host instead, and
+`--allow-failed` runs a harness whose validation status is `fail`. `harness
+new --live` and `harness validate --live` also run TaskCases and rubric checks
+with the real model. Details: [docs/generator.md](docs/generator.md) (stages,
+statuses, repair loop, output layout) and [docs/evals.md](docs/evals.md) (case
+and check formats).
 
 ## Documentation
 
@@ -166,14 +197,29 @@ Spec fields in M1: `schema_version` (required, `1`), `name`, `description`,
   not, Windows notes, latency.
 - [docs/strategies.md](docs/strategies.md): ReAct vs CodeAct, `run_code`,
   stateless execution, `FINAL`, `spawn_agent`.
+- [docs/spec.md](docs/spec.md): HarnessSpec v1 field reference, versioning,
+  module tools, `runtime: docker` vs `host`, permission defaults.
+- [docs/generator.md](docs/generator.md): `harness new`, `validate` and `run` on
+  generated harnesses, validation stages, statuses, repair loop, `--live`,
+  `--trust-tools`, output layout.
+- [docs/evals.md](docs/evals.md): ToolCase and TaskCase, checks, the runner and
+  `harness eval`.
 
-## Known limitations (M1 and M2)
+## Known limitations (M1 to M3)
 
 - No live OpenRouter run has been made; `AdkLiteLlmClient` is tested against a
   stubbed ADK only.
-- Custom tools, hooks and approvers are code-only. A spec can name only built-in
-  tools and hooks, and there are no built-in hooks yet, so `harness run` cannot
-  load custom code.
+- A spec can name built-in tools and, since M3, module tools and module hooks in
+  the harness directory. Module tools run in Docker by default; `runtime: host`
+  tools and module hooks need `--trust-tools`. There are no built-in hooks yet,
+  and custom approvers are code-only.
+- The generator, validation and evals have never run against a live model or a
+  real Docker daemon. Without Docker, a harness with Docker tools validates as
+  `incomplete` (exit 3).
+- `harness run` does not apply the safety screen's flagged-tool `ask` rules to a
+  generated harness, and `harness replay` cannot rebuild a harness that has
+  module tools (no harness-directory option); see
+  [docs/spec.md](docs/spec.md#known-gaps).
 - Docker has not been exercised against a real daemon: the sandbox, `run_code`
   and CodeAct are tested with fakes only, and the real-Docker isolation tests
   (`tests/docker`, 25 tests) exist but have never run (all skipped). Isolation is best effort
