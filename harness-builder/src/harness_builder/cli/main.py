@@ -25,15 +25,20 @@ import click
 
 if TYPE_CHECKING:
     from rich.table import Table
+    from rich.text import Text
 
     from harness_builder.config import Settings
     from harness_builder.core.builder import Harness, HarnessBuilder
-    from harness_builder.core.protocols import LLMClient
+    from harness_builder.core.protocols import Executor, LLMClient
     from harness_builder.evals.models import EvalReport
-    from harness_builder.evals.runner import JudgeFactory
+    from harness_builder.evals.runner import EvalRunner, JudgeFactory
+    from harness_builder.evals.skills_compare import SkillsComparison
     from harness_builder.executor.docker_cli import DockerCli
     from harness_builder.executor.preflight import DoctorReport
     from harness_builder.generator.validate import ValidationPipeline
+    from harness_builder.skills.approval import ReviewOutcome
+    from harness_builder.skills.store import SkillStore
+    from harness_builder.spec.models import SkillsConfig
     from harness_builder.trace.models import Trace
     from harness_builder.trace.replay import ReplaySession
 
@@ -185,13 +190,17 @@ def _spec_builder(
     *,
     trust_tools: bool = False,
     allow_failed: bool = False,
+    skills: SkillsConfig | None = None,
 ) -> tuple[HarnessBuilder, str | None]:
     """Builder for the spec at ``target`` plus the spec's model name.
 
     A ``--strategy`` override is applied to the spec itself, so the trace's
     ``spec_snapshot`` names the strategy that ran and replay matches.
     ``trust_tools`` and ``allow_failed`` are the builder's
-    ``trust_host_tools`` and ``allow_failed`` flags.
+    ``trust_host_tools`` and ``allow_failed`` flags. ``skills`` replaces the
+    spec's skills section (the skills eval): its absolute ``root`` may lie
+    outside the harness directory, so it is installed directly instead of
+    through the spec, and the snapshot carries no skills section.
     """
     from harness_builder.core.builder import HarnessBuilder
     from harness_builder.spec.io import find_spec_file, parse_spec, read_spec_data
@@ -202,6 +211,8 @@ def _spec_builder(
     spec = parse_spec(read_spec_data(file), file.name)
     if strategy is not None and strategy != spec.strategy.name:
         spec = spec.model_copy(update={"strategy": StrategySpec(name=strategy)})
+    if skills is not None:
+        spec = spec.model_copy(update={"skills": None})
     builder = builder_from_spec(
         spec,
         builder=HarnessBuilder(
@@ -213,6 +224,10 @@ def _spec_builder(
         base_dir=file.parent,
         source=file.name,
     )
+    if skills is not None:
+        from harness_builder.skills.extension import install_skills
+
+        install_skills(skills, builder)
     return builder, spec.model.name if spec.model is not None else None
 
 
@@ -394,6 +409,17 @@ EVAL_TOOL_MODEL = "eval/scripted-tool-case"
     is_flag=True,
     help="Evaluate a generated harness whose validation status is 'fail'.",
 )
+@click.option(
+    "--skills-compare",
+    is_flag=True,
+    help="Skills eval: run the cases with an empty and a seeded skills "
+    "library and compare steps and success rate (needs --live).",
+)
+@click.option(
+    "--skills-root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Skills root of the seeded library (with --skills-compare).",
+)
 @FAKE_LLM_OPTION
 def eval_command(
     target: Path,
@@ -401,6 +427,8 @@ def eval_command(
     live: bool,
     trust_tools: bool,
     allow_failed: bool,
+    skills_compare: bool,
+    skills_root: Path | None,
     fake_llm: Path | None,
 ) -> None:
     """Run the eval cases of the harness at TARGET and print a summary.
@@ -408,6 +436,12 @@ def eval_command(
     Exits 0 when every decided case passed, 1 when a case failed and 3 when a
     case is incomplete (Docker unavailable). Without --live, TaskCases and
     Rubric checks are listed as not run.
+
+    With --skills-compare the cases run twice, with an empty and with a
+    seeded copy of the skills library (the spec's skills root, else
+    --skills-root, HARNESS_SKILLS_ROOT or the nearest pyproject.toml above
+    the CWD). It exits 0 when both runs completed, whatever the pass rate,
+    and 3 when a case is incomplete.
     """
     import anyio
     from rich.console import Console
@@ -418,27 +452,34 @@ def eval_command(
     from harness_builder.executor.models import SandboxConfig
     from harness_builder.spec.loader import load_eval_cases, load_spec
 
+    if skills_root is not None and not skills_compare:
+        raise _fail("--skills-root needs --skills-compare", EXIT_USAGE)
+    if skills_compare and not live:
+        raise _fail(
+            "--skills-compare needs --live (skills affect TaskCases)", EXIT_USAGE
+        )
     settings = Settings.from_env()
 
-    def factory(llm: LLMClient | None) -> Harness:
-        """A fresh harness per run; None builds a fresh run LLM (TaskCases)."""
-        builder, model = _spec_builder(
-            target,
-            None,
-            settings,
-            trust_tools=trust_tools,
-            allow_failed=allow_failed,
-        )
-        if llm is None:
-            llm = _run_llm(fake_llm, settings, model)
-        elif model is None and not settings.model:
-            builder.model(EVAL_TOOL_MODEL)
-        return builder.llm(llm).build()
+    def runner_for(skills: SkillsConfig | None) -> EvalRunner:
+        """An EvalRunner whose harnesses install ``skills`` (None: the spec's)."""
 
-    with _exit_codes():
-        spec, base_dir, source = load_spec(target)
-        sandbox = spec.sandbox
-        runner = EvalRunner(
+        def factory(llm: LLMClient | None) -> Harness:
+            """A fresh harness per run; None builds a fresh run LLM (TaskCases)."""
+            builder, model = _spec_builder(
+                target,
+                None,
+                settings,
+                trust_tools=trust_tools,
+                allow_failed=allow_failed,
+                skills=skills,
+            )
+            if llm is None:
+                llm = _run_llm(fake_llm, settings, model)
+            elif model is None and not settings.model:
+                builder.model(EVAL_TOOL_MODEL)
+            return builder.llm(llm).build()
+
+        return EvalRunner(
             factory,
             load_eval_cases(spec, base_dir, source),
             runs=runs,
@@ -449,7 +490,20 @@ def eval_command(
             ),
             judge=_judge_factory(fake_llm, settings),
         )
-        report = anyio.run(runner.run)
+
+    with _exit_codes():
+        spec, base_dir, source = load_spec(target)
+        sandbox = spec.sandbox
+        if skills_compare:
+            from harness_builder.evals.skills_compare import compare_skills
+
+            library = _seeded_library(spec.skills, base_dir, skills_root)
+            comparison = anyio.run(compare_skills, runner_for, library, spec.skills)
+            _print_skills_comparison(comparison, library)
+            if comparison.incomplete:
+                raise click.exceptions.Exit(EXIT_DOCKER)
+            return
+        report = anyio.run(runner_for(None).run)
     Console().print(_eval_table(report))
     for case in report.cases:
         for path in case.trace_paths:
@@ -502,6 +556,449 @@ def _eval_table(report: EvalReport) -> Table:
 def _usd(cost: float | None) -> str:
     """``$0.0012`` style, or ``unknown`` when a model price is unknown."""
     return "unknown" if cost is None else f"${cost:.4f}"
+
+
+def _seeded_library(
+    spec_skills: SkillsConfig | None, base_dir: Path | None, cli_root: Path | None
+) -> Path:
+    """The live library to seed the skills eval with (U4 root order)."""
+    from harness_builder.skills.store import SkillStore, resolve_skills_root
+    from harness_builder.spec.loader import resolve_inside
+
+    config_root = None
+    if spec_skills is not None and spec_skills.root is not None:
+        config_root = resolve_inside(base_dir, spec_skills.root, "spec", "skills.root")
+    return SkillStore(resolve_skills_root(config_root, cli_root)).live
+
+
+def _print_skills_comparison(comparison: SkillsComparison, library: Path) -> None:
+    """Side-by-side table (empty vs seeded) plus a totals line per library."""
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title="harness eval --skills-compare")
+    columns = (
+        "case",
+        "empty rate",
+        "empty steps",
+        "seeded rate",
+        "seeded steps",
+        "rate delta",
+        "steps delta",
+    )
+    for column in columns:
+        table.add_column(column)
+    for row in comparison.cases:
+        table.add_row(
+            row.id,
+            _rate(row.empty.success_rate if row.empty else None),
+            _steps(row.empty.mean_steps if row.empty else None),
+            _rate(row.seeded.success_rate if row.seeded else None),
+            _steps(row.seeded.mean_steps if row.seeded else None),
+            _signed(row.rate_delta, percent=True),
+            _signed(row.steps_delta, percent=False),
+        )
+    empty, seeded = comparison.empty.totals, comparison.seeded.totals
+    table.add_section()
+    table.add_row(
+        "total",
+        _rate(empty.success_rate),
+        _steps(empty.mean_steps),
+        _rate(seeded.success_rate),
+        _steps(seeded.mean_steps),
+        "",
+        "",
+    )
+    Console().print(table)
+    click.echo(f"seeded library: {library} ({comparison.seeded_skills} skill(s))")
+    for label, totals in (("empty", empty), ("seeded", seeded)):
+        click.echo(
+            f"{label}: cases: {totals.cases}, passed: {totals.passed}, "
+            f"failed: {totals.failed}, incomplete: {totals.incomplete}, "
+            f"not run: {totals.not_run}, success rate: {_rate(totals.success_rate)}"
+            f", mean steps: {_steps(totals.mean_steps)}, tokens: {totals.tokens}, "
+            f"cost: {_usd(totals.cost)}"
+        )
+    for label, report in (("empty", comparison.empty), ("seeded", comparison.seeded)):
+        for case in report.cases:
+            if case.detail:
+                click.echo(
+                    f"{label}: {case.id}: {case.status}: {case.detail}", err=True
+                )
+
+
+def _rate(value: float | None) -> str:
+    return "-" if value is None else f"{value:.0%}"
+
+
+def _steps(value: float | None) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
+def _signed(value: float | None, *, percent: bool) -> str:
+    if value is None:
+        return "-"
+    return f"{value:+.0%}" if percent else f"{value:+g}"
+
+
+SKILLS_ROOT_OPTION = click.option(
+    "--skills-root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Skills root (default: HARNESS_SKILLS_ROOT, else the nearest "
+    "pyproject.toml above the CWD).",
+)
+
+
+def _default_skills_executor(settings: Settings) -> Executor:
+    """The Docker executor that runs candidate tests for ``skills review``."""
+    from harness_builder.executor.docker import DockerExecutor
+
+    return DockerExecutor(image=settings.docker_image)
+
+
+SKILLS_EXECUTOR_FACTORY: Callable[[Settings], Executor] = _default_skills_executor
+"""Builds the candidate-test executor for ``harness skills review``; tests
+monkeypatch it with a ``FakeExecutor``."""
+
+FAKE_PROMOTION_MODEL = "fake/promotion"
+"""Promotion model name for ``skills propose --fake-llm`` without a model."""
+
+
+def _skills_store(skills_root: Path | None) -> SkillStore:
+    """The ``SkillStore`` for ``--skills-root`` (U4 resolution, no spec)."""
+    from harness_builder.skills.store import SkillStore, resolve_skills_root
+
+    return SkillStore(resolve_skills_root(None, skills_root))
+
+
+def _untrusted(text: str) -> Text:
+    """Skill text as a rich ``Text``: control characters escaped, no markup."""
+    from rich.text import Text
+
+    return Text(_untrusted_line(text))
+
+
+def _untrusted_line(text: str) -> str:
+    """``text`` with control characters escaped, for ``click.echo``."""
+    from harness_builder.skills.approval import printable
+
+    return printable(text)
+
+
+@main.group()
+def skills() -> None:
+    """Inspect, review and prune the skills library (FR-056).
+
+    Nothing is ever pruned automatically: prune is a dry run unless --apply
+    is given, and --apply asks for confirmation.
+    """
+
+
+@skills.command("list")
+@SKILLS_ROOT_OPTION
+def skills_list(skills_root: Path | None) -> None:
+    """List live skills with their usage counters."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from harness_builder.skills.hygiene import list_skills
+
+    with _exit_codes():
+        store = _skills_store(skills_root)
+        infos = list_skills(store)
+    table = Table(title=f"skills in {store.live}")
+    for column in ("name", "uses", "success", "last used", "description"):
+        table.add_column(column)
+    for info in infos:
+        last = info.stats.last_used
+        table.add_row(
+            _untrusted(info.name),
+            str(info.stats.usage_count),
+            _rate(info.success_rate),
+            "-" if last is None else last.strftime("%Y-%m-%d"),
+            _untrusted(info.description),
+        )
+    Console().print(table)
+    click.echo(f"skills: {len(infos)}")
+
+
+@skills.command("show")
+@click.argument("name")
+@SKILLS_ROOT_OPTION
+def skills_show(name: str, skills_root: Path | None) -> None:
+    """Show live skill NAME: description, triggers, stats, resources, body."""
+    from rich.console import Console
+
+    from harness_builder.skills.hygiene import show_skill
+
+    with _exit_codes():
+        detail = show_skill(_skills_store(skills_root), name)
+    info = detail.info
+    console = Console()
+    for label, value in (
+        ("name", info.name),
+        ("path", str(info.path)),
+        ("description", info.description),
+        ("triggers", ", ".join(detail.triggers) or "-"),
+        ("uses", f"{info.stats.usage_count} (success {_rate(info.success_rate)})"),
+        ("resources", ", ".join(detail.resources) or "-"),
+    ):
+        console.print(_untrusted(f"{label}: {value}"))
+    console.print(_untrusted(f"\n{detail.body}"))
+
+
+@skills.command("stats")
+@SKILLS_ROOT_OPTION
+def skills_stats(skills_root: Path | None) -> None:
+    """Usage counters per skill, never-used skills and orphaned counters."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from harness_builder.skills.hygiene import skill_stats
+
+    with _exit_codes():
+        report = skill_stats(_skills_store(skills_root))
+    table = Table(title="skill usage")
+    for column in ("name", "uses", "successes", "success", "last used"):
+        table.add_column(column)
+    for info in sorted(report.skills, key=lambda i: (-i.stats.usage_count, i.name)):
+        last = info.stats.last_used
+        table.add_row(
+            _untrusted(info.name),
+            str(info.stats.usage_count),
+            str(info.stats.success_count),
+            _rate(info.success_rate),
+            "-" if last is None else last.isoformat(timespec="seconds"),
+        )
+    Console().print(table)
+    click.echo(f"skills: {len(report.skills)}, total uses: {report.total_uses}")
+    click.echo(f"never used: {', '.join(report.never_used) or '-'}")
+    if report.orphans:
+        click.echo(f"counters without a live skill: {', '.join(report.orphans)}")
+
+
+@skills.command("dedup")
+@click.option(
+    "--threshold",
+    type=click.FloatRange(0.0, 1.0),
+    help="Description similarity that counts as a duplicate (default 0.7).",
+)
+@SKILLS_ROOT_OPTION
+def skills_dedup(threshold: float | None, skills_root: Path | None) -> None:
+    """Report near-duplicate live skills (report only; nothing is changed).
+
+    Remove one of a pair with ``harness skills prune NAME --apply``.
+    """
+    from harness_builder.skills.hygiene import find_duplicates
+    from harness_builder.skills.validation import DEDUP_THRESHOLD
+
+    limit = DEDUP_THRESHOLD if threshold is None else threshold
+    with _exit_codes():
+        pairs = find_duplicates(_skills_store(skills_root), limit)
+    if not pairs:
+        click.echo(f"no near-duplicate skills (similarity >= {limit:.2f})")
+        return
+    for pair in pairs:
+        click.echo(f"{pair.first} ~ {pair.second}: similarity {pair.similarity:.2f}")
+    click.echo(
+        f"{len(pairs)} pair(s); nothing changed. Prune one of a pair with "
+        "'harness skills prune NAME --apply'."
+    )
+
+
+@skills.command("prune")
+@click.argument("names", nargs=-1)
+@click.option(
+    "--dry-run/--apply",
+    default=True,
+    help="Only list what would be pruned (default), or move it to the trash.",
+)
+@click.option(
+    "--unused-days",
+    type=click.IntRange(min=1),
+    default=90,
+    show_default=True,
+    help="Select skills not used for this many days.",
+)
+@click.option(
+    "--min-success-rate",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.5,
+    show_default=True,
+    help="Select skills with a lower success rate ...",
+)
+@click.option(
+    "--min-uses",
+    type=click.IntRange(min=1),
+    default=5,
+    show_default=True,
+    help="... after at least this many uses.",
+)
+@SKILLS_ROOT_OPTION
+def skills_prune(
+    names: tuple[str, ...],
+    dry_run: bool,
+    unused_days: int,
+    min_success_rate: float,
+    min_uses: int,
+    skills_root: Path | None,
+) -> None:
+    """Move stale, failing or the named (NAMES) skills to the trash.
+
+    A dry run by default: nothing changes without --apply, and --apply asks
+    for confirmation (default no). Pruned skills stay recoverable in
+    .agents/skills-trash/.
+    """
+    from harness_builder.skills.hygiene import apply_prune, plan_prune
+
+    with _exit_codes():
+        store = _skills_store(skills_root)
+        plan = plan_prune(
+            store,
+            names,
+            unused_days=unused_days,
+            min_success_rate=min_success_rate,
+            min_uses=min_uses,
+        )
+    if not plan:
+        click.echo("nothing to prune")
+        return
+    for candidate in plan:
+        click.echo(f"{candidate.name}: {candidate.reason}")
+    if dry_run:
+        click.echo(f"dry run: {len(plan)} skill(s) would be pruned; rerun with --apply")
+        return
+    if not _confirm(f"Move {len(plan)} skill(s) to {store.trash}?"):
+        click.echo("nothing changed")
+        return
+    with _exit_codes():
+        pruned = apply_prune(store, plan)
+    for skill in pruned:
+        click.echo(f"pruned {skill.name} -> {skill.trashed}")
+
+
+def _confirm(question: str) -> bool:
+    """Ask yes/no (default no); EOF or Ctrl-C mean no."""
+    try:
+        return click.confirm(question, default=False)
+    except click.Abort:
+        return False
+
+
+@skills.command("review")
+@click.argument("cids", nargs=-1)
+@click.option("--replace", is_flag=True, help="Replace a live skill of the same name.")
+@click.option(
+    "--auto-approve",
+    is_flag=True,
+    help="Approve valid, unflagged candidates without asking (sandboxed eval "
+    "libraries with a .hb-sandbox-library marker only).",
+)
+@SKILLS_ROOT_OPTION
+def skills_review(
+    cids: tuple[str, ...], replace: bool, auto_approve: bool, skills_root: Path | None
+) -> None:
+    """Review pending candidates CIDS (default: every ready one) at the gate.
+
+    Each candidate is validated (test run in Docker), shown and promoted only
+    on an explicit yes. Exits 1 when a candidate is invalid.
+    """
+    import anyio
+    from rich.console import Console
+
+    from harness_builder.config import Settings
+    from harness_builder.skills.approval import ApprovalGate, CliPromotionApprover
+    from harness_builder.skills.hygiene import pending_candidates
+    from harness_builder.skills.validation import CandidateValidator
+
+    console = Console()
+    with _exit_codes():
+        store = _skills_store(skills_root)
+        pending = pending_candidates(store)
+        selected = list(cids) or [p.cid for p in pending if p.state == "ready"]
+        deferred = [p.cid for p in pending if p.state == "deferred"]
+        if not selected:
+            click.echo("no candidates ready for review")
+            if deferred:
+                click.echo(f"deferred (run 'harness skills propose'): {len(deferred)}")
+            return
+        validator = CandidateValidator(
+            store, SKILLS_EXECUTOR_FACTORY(Settings.from_env())
+        )
+        gate = ApprovalGate(
+            store,
+            validator,
+            CliPromotionApprover(console),
+            console=console,
+            auto_approve=auto_approve,
+        )
+
+        async def review_all() -> list[ReviewOutcome]:
+            return [await gate.review(cid, replace=replace) for cid in selected]
+
+        outcomes = anyio.run(review_all)
+    for outcome in outcomes:
+        where = f" -> {outcome.live_path}" if outcome.live_path else ""
+        reasons = f" ({'; '.join(outcome.reasons)})" if outcome.reasons else ""
+        click.echo(
+            _untrusted_line(f"{outcome.cid}: {outcome.decision}{where}{reasons}")
+        )
+    if any(outcome.decision == "invalid" for outcome in outcomes):
+        raise click.exceptions.Exit(EXIT_FAILED)
+
+
+@skills.command("propose")
+@click.argument("cids", nargs=-1)
+@SKILLS_ROOT_OPTION
+@FAKE_LLM_OPTION
+def skills_propose(
+    cids: tuple[str, ...], skills_root: Path | None, fake_llm: Path | None
+) -> None:
+    """Generate candidates for deferred CIDS (default: every deferred one).
+
+    One promotion LLM call per candidate (HARNESS_MODEL). Exits 1 when a
+    candidate could not be generated.
+    """
+    import anyio
+
+    from harness_builder.config import Settings
+    from harness_builder.core.types import ModelConfig
+    from harness_builder.errors import ConfigError
+    from harness_builder.skills.hygiene import pending_candidates
+    from harness_builder.skills.promotion import PromotionError, PromotionService
+
+    settings = Settings.from_env()
+    with _exit_codes():
+        store = _skills_store(skills_root)
+        selected = list(cids) or [
+            p.cid for p in pending_candidates(store) if p.state == "deferred"
+        ]
+        if not selected:
+            click.echo("no deferred candidates")
+            return
+        model = settings.model or (FAKE_PROMOTION_MODEL if fake_llm else None)
+        if model is None:
+            raise ConfigError("set HARNESS_MODEL for the promotion LLM")
+        service = PromotionService(
+            store, _run_llm(fake_llm, settings, None), ModelConfig(name=model)
+        )
+
+        async def propose_all() -> list[tuple[str, str | None]]:
+            results: list[tuple[str, str | None]] = []
+            for cid in selected:
+                try:
+                    await service.propose_deferred(cid)
+                    results.append((cid, None))
+                except (PromotionError, ConfigError) as exc:
+                    results.append((cid, str(exc)))
+            return results
+
+        results = anyio.run(propose_all)
+    for cid, error in results:
+        status = "proposed" if error is None else f"failed: {error}"
+        click.echo(_untrusted_line(f"{cid}: {status}"))
+    if any(error is not None for _, error in results):
+        raise click.exceptions.Exit(EXIT_FAILED)
 
 
 @main.command()

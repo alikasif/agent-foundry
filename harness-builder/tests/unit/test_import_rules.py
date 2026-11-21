@@ -69,6 +69,16 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
             f"{PKG}.generator.pipeline",
             f"{PKG}.generator.request",
             f"{PKG}.generator.validate",
+            # T053: `harness skills ...` drives hygiene, the approval gate and
+            # deferred promotion; `harness eval --skills-compare` installs the
+            # skills extension per library and runs the skills eval.
+            f"{PKG}.evals.skills_compare",
+            f"{PKG}.skills.approval",
+            f"{PKG}.skills.extension",
+            f"{PKG}.skills.hygiene",
+            f"{PKG}.skills.promotion",
+            f"{PKG}.skills.store",
+            f"{PKG}.skills.validation",
             # T030: `harness doctor` runs the Docker preflight checks.
             f"{PKG}.executor.docker_cli",
             f"{PKG}.executor.preflight",

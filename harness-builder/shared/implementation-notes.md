@@ -1512,3 +1512,38 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
 - **Interactive `new`.** Without `--non-interactive`, `ask_user` uses the T042 default rich `Prompt.ask` on stderr. The CLI passes no `ask=`. Tests use `--non-interactive`.
 - **Commit trailer.** As in T042/T044, commits carry the session's Opus trailer rather than the dispatch's Sonnet one.
 - **Verification.** `uv run ruff format --check .` and `uv run ruff check .` are clean. `uv run pyrefly check` reports 0 errors (53 suppressed, none new). Full `uv run pytest`: 2073 passed, 46 skipped, 3 xfailed.
+
+### T053
+
+Skills hygiene (`skills/hygiene.py`), the `harness skills` CLI group and the skills eval (`evals/skills_compare.py`, `harness eval --skills-compare`).
+
+- **Skills eval entry point: `harness eval TARGET --live --skills-compare [--skills-root PATH]`** (not a `skills eval` subcommand). It reuses `eval`'s `--runs`, `--live`, `--trust-tools`, `--allow-failed` and `--fake-llm`. `--skills-compare` without `--live` exits 2, because skills only affect TaskCases and without `--live` every TaskCase is `not_run`. `--skills-root` without `--skills-compare` also exits 2.
+- **How the two configurations differ.** Both install the skills extension the same way: same three tools, same `top_k` (the spec's `skills.top_k`, else 3), and `include_user_skills` forced off so `~/.agents/skills` cannot leak into the empty run. Only the library differs. "Empty" is a fresh temp root with an empty `.agents/skills`, not a disabled skills section, because a disabled section would compare tool sets rather than libraries. "Seeded" is a fresh temp root holding a **copy** of the seeded live library, so the runs' `post_tool` stats hook never changes the real `skills-meta/stats.json`. A scratch test checked that the real library is byte-for-byte unchanged afterwards.
+- **Seeded library resolution.** It is the spec's `skills.root` (checked with `resolve_inside`), else `--skills-root`, `HARNESS_SKILLS_ROOT`, or the nearest `pyproject.toml` above the CWD (U4).
+- **Installing outside the spec.** `SkillsConfig.root` from a spec must stay inside the harness dir (`spec.loader._skills`), and the temp roots are outside it. `_spec_builder(..., skills=cfg)` therefore drops the spec's skills section and calls `skills.extension.install_skills(cfg, builder)` after `builder_from_spec`. Consequence: the traces of a skills-compare run have a `spec_snapshot` without a skills section, so replaying them installs no skills. Replay of skills runs is not a goal of the comparison.
+- **Exit policy for `--skills-compare`.** It exits 0 when both runs completed, whatever the pass rates. A failing empty run is the expected baseline, not an error. It exits 3 when either side has an incomplete case. Per-case details (for example `docker unavailable`) go to stderr.
+- **Offline note.** The skills extension registers `run_skill_script`, an `ExecutorTool`, so the builder runs the Docker preflight. Without Docker every compare case is `incomplete` (exit 3). Tests must stub `DockerExecutor.preflight`, as the T043 tests already do for `no_docker`.
+- **`evals/skills_compare.py` layering.** It imports only `evals.*` and the `spec.models` leaf. The caller passes `runner_for(SkillsConfig) -> EvalRunner`, and the CLI does the composition, so the evals layer gets no cross-layer entry.
+- **Hygiene decisions (OQ-12, ASSUMED).**
+  - `dedup` is **report-only**. It has no `--apply`; to remove one skill of a pair, run `harness skills prune NAME --apply`. That keeps one destructive path, with one confirmation.
+  - `dedup` uses the T052 validator's threshold (0.7, `validation.DEDUP_THRESHOLD`) rather than designs.md's 0.8, so it agrees with what the approval gate reports. `--threshold` overrides it.
+  - `prune` selects skills **by name** (`prune NAME...`) or by policy. The policy defaults are: unused for 90 days (a never-used skill counts from its SKILL.md mtime), or a success rate below 50% over at least 5 uses. The CLI repeats these defaults as literals, because importing `hygiene` at CLI import time would load the skills layer in `harness --help`.
+  - `prune` is a dry run by default (`--dry-run/--apply`). `--apply` asks `click.confirm` with a default of no, and EOF or Ctrl-C mean no. There is no `--yes` flag, so pruning cannot be scripted; this is the strict reading of "never auto-prune".
+  - Pruning moves `live/<dir>` to `skills-trash/<dir>-<ts>` with `replace_path`. Only direct children of `.agents/skills` are eligible, so user skills are never touched. Stats entries are kept and show up as orphans in `skills stats`, so a restored skill keeps its counters.
+  - A dry run creates nothing, not even the meta or trash dirs. A scratch test compared `os.walk` snapshots (path, size, mtime) before and after, both on a seeded root and on a fresh one.
+- **`review` and `propose`.**
+  - `skills review [CID...] [--replace] [--auto-approve]` wraps `ApprovalGate` with `CandidateValidator(store, SKILLS_EXECUTOR_FACTORY(settings))`. The factory defaults to `DockerExecutor`; tests monkeypatch it with a `FakeExecutor`. The approver is `CliPromotionApprover`.
+  - With no CID, `review` reviews every **ready** candidate (one with `candidate.json`) in id order, and prints how many deferred candidates are waiting for `propose`.
+  - `review` exits 1 if any candidate is invalid. A denied candidate exits 0. `--auto-approve` without the sandbox marker raises the gate's `ConfigError`, which exits 2.
+  - `skills propose [CID...] [--fake-llm]` runs `PromotionService.propose_deferred` for the given or every deferred candidate. It makes one LLM call per candidate on `HARNESS_MODEL` and passes **no budget_factory**, which means exactly one call and avoids a `budget.ledger` allowlist entry.
+  - With `--fake-llm` and no model set, `propose` uses the model name `fake/promotion`. Without either it exits 2. A failed candidate is reported and the rest continue; the exit code is 1 if any failed.
+- **Untrusted text.** Skill names, descriptions and bodies are printed through `approval.printable`, as rich `Text` (never markup) or plain `click.echo`.
+- **Allowlist.** `CROSS_LAYER_ALLOWLIST[cli.main]` gained `evals.skills_compare`, `skills.approval`, `skills.extension`, `skills.hygiene`, `skills.promotion`, `skills.store` and `skills.validation`. It is in the same commit as the CLI.
+- **Tests.** No committed tests: `tests/skills/` belongs to T055. Scratch CliRunner tests (not committed) covered:
+  - list, show, stats and dedup;
+  - the prune dry-run invariance and `--apply` with n, EOF and y;
+  - review deny, promote, deferred hint and an invalid cid;
+  - propose with `--fake-llm`;
+  - `--skills-compare`: the empty run took 2 steps and the seeded run 1, and the real library was unchanged.
+- **Commit trailer.** As in T042-T044, the commit carries the session's Opus trailer.
+- **Verification.** `ruff check .` is clean. `ruff format --check .` flags only `tests/generator/test_domains.py`, an untracked file from a concurrent agent. `pyrefly check` reports 0 errors. Full `uv run pytest`: 2084 passed, 46 skipped, 3 xfailed.
