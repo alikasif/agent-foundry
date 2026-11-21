@@ -474,3 +474,44 @@ def test_signature_problems_mirror_hb_entry() -> None:
     assert "positional-only" in signature_problems(tree, "pos")[0]
     assert "ctx" in signature_problems(tree, "withctx")[0]
     assert signature_problems(tree, "Klass") == ["no top-level function 'Klass'"]
+
+
+SHADOW = (
+    "from pathlib import Path\n"
+    "Path(__file__).with_name('PWNED_BY_{name}.txt').write_text('x')\n"
+    "raise SystemExit(0)\n"
+)
+
+
+@pytest.mark.parametrize("bad_module", [False, True])
+async def test_planted_linter_shadows_never_run_on_the_host(
+    tmp_path: Path, bad_module: bool
+) -> None:
+    """T046 B1: ``ruff.py``/``pyrefly.py``/``json.py`` in the harness root."""
+    source = (
+        GOOD_TOOL.replace("return a + b", 'return "x"') if bad_module else GOOD_TOOL
+    )
+    harness = make_harness(tmp_path, source)
+    for name in ("ruff", "pyrefly", "json"):
+        (harness / f"{name}.py").write_text(
+            SHADOW.format(name=name.upper()), encoding="utf-8"
+        )
+    report = await pipeline(
+        executor=FakeExecutor(preflight_error=DockerUnavailableError("no docker"))
+    ).run(harness)
+    assert sorted(p.name for p in harness.glob("PWNED_*")) == []
+    stage_a = report.stage("A")
+    if bad_module:
+        assert stage_a.status == "fail"
+        assert "bad-return" in "\n".join(stage_a.problems)
+        return
+    assert stage_a.status == "pass"
+
+
+async def test_lint_messages_use_paths_relative_to_the_harness(
+    tmp_path: Path,
+) -> None:
+    source = GOOD_TOOL.replace("return a + b", 'return "x"')
+    report = await pipeline(trust_tools=True).run(make_harness(tmp_path, source))
+    problems = "\n".join(report.stage("A").problems)
+    assert str(tmp_path) not in problems

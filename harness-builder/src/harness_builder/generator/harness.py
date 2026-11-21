@@ -44,8 +44,15 @@ GENERATOR_BUDGET = BudgetLimits(max_steps=60)
 """Default limits; one ledger covers the draft and every repair attempt
 (ASSUMED). No cost cap by default, so an unpriced model still builds (U10)."""
 REPORTS_DIR = "reports"
+STAGING_MARKER = ".hb-staging"
+"""Ownership marker of a staging dir (holds the target path)."""
 RESERVED_PATHS: frozenset[str] = frozenset(
-    {REPORTS_DIR, META_FILE.casefold(), TOOLS_SCHEMA_FILE.casefold()}
+    {
+        REPORTS_DIR,
+        META_FILE.casefold(),
+        TOOLS_SCHEMA_FILE.casefold(),
+        STAGING_MARKER,
+    }
 )
 """Top-level names the pipeline writes (casefolded: NTFS ignores case)."""
 README_FILE = "readme.md"

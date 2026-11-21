@@ -62,6 +62,7 @@ from harness_builder.permissions.approvers import StaticApprover
 from harness_builder.safety.screen import screen
 from harness_builder.spec.loader import (
     builder_from_spec,
+    flagged_tool_names,
     load_eval_cases,
     load_spec,
     resolve_inside,
@@ -379,7 +380,7 @@ class ValidationPipeline:
         findings = _screen(files, trees, module_tools)
         lint_problems, lint_missing = _lint(base_dir, [files[m] for m in trees])
         problems += lint_problems
-        flagged = list(dict.fromkeys(t for f in findings for t in f.tools))
+        flagged = _flagged(spec, base_dir, source, findings)
         info = _Harness(
             spec=_host_runtime(spec) if self.trust_tools else spec,
             base_dir=base_dir,
@@ -708,32 +709,58 @@ def _screen(
     return findings
 
 
+def _flagged(
+    spec: HarnessSpec, base_dir: Path, source: str, findings: list[SafetyFinding]
+) -> list[str]:
+    """Flagged tool names: the loader's rule (shared with run time) + findings."""
+    try:
+        names = flagged_tool_names(spec, base_dir, source)
+    except SpecError:
+        names = []  # an unresolvable module is already a stage-A problem
+    return list(dict.fromkeys([*names, *(t for f in findings for t in f.tools)]))
+
+
 def _lint(base_dir: Path, files: list[Path]) -> tuple[list[str], list[str]]:
     """``(problems, unavailable)`` from ruff and pyrefly on ``files``.
 
     Both run from harness-builder's own environment with fixed settings
     (ruff ``--isolated``; pyrefly with a temporary config naming this
     interpreter), so the harness directory's location and any config files
-    around it do not change the result.
+    around it do not change the result. The generated code is untrusted, so
+    the linters run with ``-I`` from an empty temp directory and absolute
+    paths: nothing the generator wrote (``ruff.py``, ``json.py``) can land on
+    their import path (T046 B1). Output paths are shown relative to
+    ``base_dir``.
     """
     if not files:
         return [], []
-    rel = [p.relative_to(base_dir.resolve()).as_posix() for p in files]
-    ruff = [sys.executable, "-m", "ruff", "check", "--isolated", "--no-cache"]
-    ruff += ["--select", RUFF_SELECT, "--output-format", "concise", *rel]
+    targets = [str(p.resolve()) for p in files]
     with tempfile.TemporaryDirectory(prefix="hb-pyrefly-") as tmp:
-        config = Path(tmp) / "pyrefly.toml"
+        cwd = Path(tmp)
+        config = cwd / "pyrefly.toml"
         config.write_text(
             f"python-interpreter-path = {json.dumps(sys.executable)}\n",
             encoding="utf-8",
         )
-        pyrefly = [sys.executable, "-m", "pyrefly", "check", "-c", str(config)]
-        pyrefly += ["--output-format", "min-text", *rel]
-        results = [_run_linter("ruff", ruff, base_dir)]
-        results.append(_run_linter("pyrefly", pyrefly, base_dir))
-    problems = [p for p, _ in results if p]
-    missing = [m for _, m in results if m]
+        ruff = [sys.executable, "-I", "-m", "ruff", "check", "--isolated"]
+        ruff += ["--no-cache", "--select", RUFF_SELECT]
+        ruff += ["--output-format", "concise", *targets]
+        pyrefly = [sys.executable, "-I", "-m", "pyrefly", "check", "-c", str(config)]
+        pyrefly += ["--output-format", "min-text", *targets]
+        results = [
+            _run_linter(n, a, cwd) for n, a in (("ruff", ruff), ("pyrefly", pyrefly))
+        ]
+    prefixes = {f"{base_dir.resolve()}{sep}" for sep in ("/", "\\")}
+    problems = [_relativize(p, prefixes) for p, _ in results if p]
+    missing = [_relativize(m, prefixes) for _, m in results if m]
     return problems, missing
+
+
+def _relativize(text: str, prefixes: set[str]) -> str:
+    """Drop the harness-directory prefix from linter output paths."""
+    for prefix in prefixes:
+        text = text.replace(prefix, "")
+    return text
 
 
 def _run_linter(name: str, argv: list[str], cwd: Path) -> tuple[str | None, str | None]:

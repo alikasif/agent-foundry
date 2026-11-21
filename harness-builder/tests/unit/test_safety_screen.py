@@ -318,3 +318,44 @@ def test_generation_report_shape_for_a_flagged_tool(tmp_path: Path) -> None:
         ("delete", 6),
     ]
     assert all(f.detail for f in report.findings)
+
+
+# --- review T046 MJ1: wider stdlib coverage ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "category"),
+    [
+        ("import http.client\n", "network"),
+        ("import http.server\n", "network"),
+        ("from http import client\n", "network"),
+        ("from http.client import HTTPSConnection\n", "network"),
+        ("import ftplib\n", "network"),
+        ("import smtplib\n", "network"),
+        ("import poplib\n", "network"),
+        ("import imaplib\n", "network"),
+        ("import telnetlib\n", "network"),
+        ("import ssl\n", "network"),
+        ("import urllib3\n", "network"),
+        ("import xmlrpc.client\n", "network"),
+        ("import websocket\n", "network"),
+        ("import websockets\n", "network"),
+        ("import asyncio\nasyncio.open_connection('h', 1)\n", "network"),
+        ("from asyncio import start_server\nstart_server(f)\n", "network"),
+        ("import pty\n", "subprocess"),
+        ("import multiprocessing\n", "subprocess"),
+        ("import os\nos.fork()\n", "subprocess"),
+        ("import os\nos.forkpty()\n", "subprocess"),
+        ("import asyncio\nasyncio.create_subprocess_exec('ls')\n", "subprocess"),
+        ("import asyncio\nasyncio.create_subprocess_shell('ls')\n", "subprocess"),
+        ("import runpy\nrunpy.run_path('x.py')\n", "dynamic_exec"),
+        ("import runpy\nrunpy.run_module('x')\n", "dynamic_exec"),
+        ("import ctypes\n", "dynamic_exec"),
+    ],
+)
+def test_extended_stdlib_apis_are_flagged(source: str, category: str) -> None:
+    assert category in categories(source)
+
+
+def test_plain_http_status_import_is_not_network() -> None:
+    assert categories("from http import HTTPStatus\n") == set()

@@ -130,6 +130,9 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
             f"{PKG}.tools.registry",
         }
     ),
+    # T046 B2: the loader re-screens tool modules at build time so risky tools
+    # get `ask` rules without a validation report.
+    f"{PKG}.spec.loader": frozenset({f"{PKG}.safety.screen"}),
     # T042: one budget ledger covers every generator attempt; the meta file
     # name is the loader's.
     f"{PKG}.generator.pipeline": frozenset(

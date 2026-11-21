@@ -40,6 +40,7 @@ from harness_builder.generator.harness import (
     GENERATOR_BUDGET,
     GENERATOR_NAME,
     REPORTS_DIR,
+    STAGING_MARKER,
     TEMPLATE_DIR,
     AskFn,
     generator_builder,
@@ -156,8 +157,14 @@ class GeneratorPipeline:
         harness = builder.build()
         validator = self.validator or ValidationPipeline(settings=settings)
         if staging.exists():
+            if not (staging / STAGING_MARKER).is_file():
+                raise ConfigError(
+                    f"{staging} exists and is not a harness-builder staging "
+                    "directory; move it away or choose another -o"
+                )
             shutil.rmtree(staging)
         staging.mkdir(parents=True)
+        (staging / STAGING_MARKER).write_text(str(target), encoding="utf-8")
 
         ledger = BudgetLedger.from_limits(harness.config.budget, harness.price_lookup)
         attempts = 1
@@ -176,6 +183,7 @@ class GeneratorPipeline:
         report = report.model_copy(update={"attempts": attempts})
         _finalize(staging, target.name, request, report, harness, result.stop)
         await _move(staging, target)
+        (target / STAGING_MARKER).unlink(missing_ok=True)
         return GenerationResult(
             output_dir=target,
             status=report.status,
@@ -271,8 +279,14 @@ def _finalize(
 
 async def _move(staging: Path, target: Path) -> None:
     """Rename staging to ``target`` (an empty ``target`` is removed first)."""
-    if target.exists():
-        target.rmdir()
+    try:
+        if target.exists():
+            target.rmdir()
+    except OSError as exc:
+        raise ConfigError(
+            f"{target} appeared while generating and is not empty; "
+            f"the result stays in {staging}: {exc}"
+        ) from exc
     for attempt in range(MOVE_RETRIES):
         try:
             os.replace(staging, target)

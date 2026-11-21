@@ -696,10 +696,10 @@ def test_host_tool_load_errors_are_config_errors(harness: Path) -> None:
 @pytest.mark.timeout(300)
 @pytest.mark.anyio
 async def test_real_docker_schema_and_call_round_trip(
-    harness: Path, tmp_path: Path
+    harness: Path, tmp_path: Path, sandbox_image: str
 ) -> None:
-    """Needs the sandbox image for the current tag (``image_build``)."""
-    executor = DockerExecutor()
+    """Builds the sandbox image for the current tag if it is missing."""
+    executor = DockerExecutor(image=sandbox_image)
     await executor.preflight()
     workdir = tmp_path / "work"
     workdir.mkdir()

@@ -28,7 +28,7 @@ from harness_builder.core.types import (
     ToolCall,
     Usage,
 )
-from harness_builder.errors import DockerUnavailableError
+from harness_builder.errors import ConfigError, DockerUnavailableError
 from harness_builder.evals.models import (
     CaseResult,
     CaseStatus,
@@ -87,7 +87,9 @@ class EvalRunner:
     ``runs``, when set, overrides every ``TaskCase.runs``; ToolCases run once.
     PyAssert checks need ``executor``; Rubric checks need ``judge``. A missing
     executor or judge, or Docker being unavailable (at harness build or
-    executor preflight), makes the run ``incomplete``, never ``pass``.
+    executor preflight or while it runs the check), makes the run
+    ``incomplete``, never ``pass``; a ``ConfigError`` from the executor on a
+    PyAssert is a ``fail``.
     ``ConfigError`` from the factory propagates.
     """
 
@@ -221,6 +223,10 @@ class EvalRunner:
                     stdin=json.dumps(answer),
                 )
             )
+        except DockerUnavailableError as exc:
+            return "incomplete", f"docker unavailable: {exc}"
+        except ConfigError as exc:
+            return "fail", f"py_assert could not run: {exc}"
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
         if result.exit_code == 0 and not (result.timed_out or result.oom_killed):

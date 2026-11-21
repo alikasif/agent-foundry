@@ -3,20 +3,27 @@
 ``screen`` parses Python source (never imports or runs it) and reports risky
 constructs in five categories:
 
-- ``network``: imports of ``socket``, ``urllib``, ``requests``, ``httpx``,
-  ``aiohttp`` (and dynamic imports of them);
-- ``subprocess``: ``subprocess`` imports, ``os.system``, ``os.popen``,
-  ``os.exec*``, ``os.spawn*``;
+- ``network``: imports of ``socket``, ``ssl``, ``urllib``, ``urllib3``,
+  ``requests``, ``httpx``, ``aiohttp``, ``http.client``, ``http.server``,
+  ``ftplib``, ``smtplib``, ``poplib``, ``imaplib``, ``telnetlib``,
+  ``xmlrpc``, ``websocket(s)`` (and dynamic imports of them), plus
+  ``asyncio.open_connection`` / ``open_unix_connection`` / ``start_server``;
+- ``subprocess``: ``subprocess``, ``pty`` and ``multiprocessing`` imports,
+  ``os.system``, ``os.popen``, ``os.exec*``, ``os.spawn*``, ``os.fork*``,
+  ``asyncio.create_subprocess_exec`` / ``_shell``;
 - ``delete``: ``os.remove``, ``os.unlink``, ``os.rmdir``, ``os.removedirs``,
   ``shutil.rmtree`` and any ``.unlink()`` / ``.rmdir()`` method call;
 - ``dynamic_exec``: ``eval``, ``exec``, ``__import__``,
-  ``importlib.import_module``;
+  ``importlib.import_module``, ``runpy.run_path`` / ``run_module``, and
+  ``ctypes`` imports (native code is arbitrary execution);
 - ``secret``: key-like string literals, string literals assigned to
   secret-looking names, and high-entropy string literals.
 
 The screen is a heuristic. It cannot see through ``getattr`` tricks or data
 flow, and it flags every delete because "outside the workdir" is not
-decidable statically. Pure stdlib leaf module.
+decidable statically. Known limits: ``getattr(os, "system")`` style
+indirection, and overwriting moves (``shutil.move``, ``os.replace``,
+``os.rename``) are not reported. Pure stdlib leaf module.
 """
 
 import ast
@@ -31,10 +38,40 @@ __all__ = ["Category", "Finding", "ScreenReport", "screen"]
 
 Category = Literal["network", "subprocess", "delete", "dynamic_exec", "secret"]
 
-NETWORK_MODULES = frozenset({"socket", "urllib", "requests", "httpx", "aiohttp"})
-SUBPROCESS_MODULES = frozenset({"subprocess"})
-SUBPROCESS_CALLS = frozenset({"os.system", "os.popen"})
-SUBPROCESS_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn")
+NETWORK_MODULES = frozenset(
+    {
+        "socket",
+        "ssl",
+        "urllib",
+        "urllib3",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "ftplib",
+        "smtplib",
+        "poplib",
+        "imaplib",
+        "telnetlib",
+        "xmlrpc",
+        "websocket",
+        "websockets",
+    }
+)
+NETWORK_SUBMODULES = ("http.client", "http.server")
+NETWORK_CALLS = frozenset(
+    {"asyncio.open_connection", "asyncio.open_unix_connection", "asyncio.start_server"}
+)
+SUBPROCESS_MODULES = frozenset({"subprocess", "pty", "multiprocessing"})
+SUBPROCESS_CALLS = frozenset(
+    {
+        "os.system",
+        "os.popen",
+        "asyncio.create_subprocess_exec",
+        "asyncio.create_subprocess_shell",
+    }
+)
+SUBPROCESS_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn", "os.fork")
+DYNAMIC_EXEC_MODULES = frozenset({"ctypes"})
 DELETE_CALLS = frozenset(
     {"os.remove", "os.unlink", "os.rmdir", "os.removedirs", "shutil.rmtree"}
 )
@@ -48,6 +85,8 @@ DYNAMIC_EXEC_CALLS = frozenset(
         "builtins.exec",
         "builtins.__import__",
         "importlib.import_module",
+        "runpy.run_path",
+        "runpy.run_module",
     }
 )
 
@@ -140,6 +179,8 @@ class _Screener(ast.NodeVisitor):
             self._check_module(module, node.lineno, "from-import")
         for alias in node.names:
             origin = f"{module}.{alias.name}" if module else alias.name
+            if node.level == 0 and origin.startswith(NETWORK_SUBMODULES):
+                self._check_module(origin, node.lineno, "from-import")
             self.aliases[alias.asname or alias.name] = origin
         self.generic_visit(node)
 
@@ -184,16 +225,20 @@ class _Screener(ast.NodeVisitor):
 
     def _check_module(self, module: str, line: int, how: str) -> None:
         top = module.split(".")[0]
-        if top in NETWORK_MODULES:
+        if top in NETWORK_MODULES or module.startswith(NETWORK_SUBMODULES):
             self.findings.append(Finding("network", line, f"{how} {module}"))
         if top in SUBPROCESS_MODULES:
             self.findings.append(Finding("subprocess", line, f"{how} {module}"))
+        if top in DYNAMIC_EXEC_MODULES:
+            self.findings.append(Finding("dynamic_exec", line, f"{how} {module}"))
 
     def _check_call(self, name: str, node: ast.Call) -> None:
         if name in SUBPROCESS_CALLS or name.startswith(SUBPROCESS_PREFIXES):
             self._add("subprocess", node, f"call {name}()")
         if name in DELETE_CALLS:
             self._add("delete", node, f"call {name}()")
+        if name in NETWORK_CALLS:
+            self._add("network", node, f"call {name}()")
         if name not in DYNAMIC_EXEC_CALLS:
             return
         self._add("dynamic_exec", node, f"call {name}()")

@@ -57,9 +57,10 @@ from harness_builder.core.protocols import (
     ToolDefinition,
 )
 from harness_builder.core.types import ChildProfile, HookEvent, PermissionValue, Rule
-from harness_builder.errors import ConfigError, SpecError
+from harness_builder.errors import ConfigError, DockerUnavailableError, SpecError
 from harness_builder.evals.models import EVAL_CASES, EvalCase
 from harness_builder.executor.models import SandboxConfig
+from harness_builder.safety.screen import screen
 from harness_builder.spec.io import (
     find_spec_file,
     located_path,
@@ -317,8 +318,11 @@ def builder_from_spec(
     resolve in; ``source`` names the spec in errors. Each name in
     ``flagged_tools`` (the safety screen's flagged tools, FR-032) gets a
     prepended ``Rule(name, "ask", rule_id="safety:<name>")``, which wins over
-    the spec's own rules. Further code-only settings (``.llm``, ``.tools``,
-    ``.approver``) can be chained on the result.
+    the spec's own rules. With a ``base_dir`` every referenced tool module is
+    also screened here (whatever its runtime), so a risky tool is gated at run
+    time even when no validation report exists (``flagged_tool_names``).
+    Further code-only settings (``.llm``, ``.tools``, ``.approver``) can be
+    chained on the result.
     """
     if base_dir is not None and not builder.allow_failed:
         check_harness_meta(base_dir)
@@ -342,7 +346,8 @@ def builder_from_spec(
     if spec.context is not None:
         policy, options = _context(spec.context, source)
         builder.context(policy, **options)
-    rules = [*_safety_rules(flagged_tools), *_rules(spec.permissions.rules)]
+    flagged = [*flagged_tools, *flagged_tool_names(spec, base_dir, source)]
+    rules = [*_safety_rules(flagged), *_rules(spec.permissions.rules)]
     builder.permissions(rules, default=spec.permissions.default)
     builder.budget(**spec.budget.model_dump())
     for event, hook, priority, name in hooks:
@@ -360,6 +365,43 @@ def builder_from_spec(
     resolved = spec.model_copy(update={"prompts": PromptsSpec(system=system)})
     builder.spec_snapshot(resolved.model_dump(mode="json"))
     return builder
+
+
+def flagged_tool_names(
+    spec: HarnessSpec, base_dir: Path | None, source: str = "<spec>"
+) -> list[str]:
+    """Tool names whose module ``safety.screen`` flags (FR-032), in spec order.
+
+    Shared by validation stage A and ``builder_from_spec`` so both agree.
+    Fails closed: a module that cannot be read or parsed flags every tool it
+    provides. Returns ``[]`` without a ``base_dir``; a module path that leaves
+    the harness directory raises ``SpecError``.
+    """
+    if base_dir is None:
+        return []
+    flagged: list[str] = []
+    verdicts: dict[str, bool] = {}
+    for i, ref in enumerate(spec.tools):
+        if not isinstance(ref, ModuleToolRef):
+            continue
+        if ref.module not in verdicts:
+            path = _module_file(base_dir, ref.module, source, f"tools[{i}].module")
+            try:
+                verdicts[ref.module] = screen(path).flagged
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                verdicts[ref.module] = True
+        if verdicts[ref.module]:
+            flagged.append(ref.function)
+    return list(dict.fromkeys(flagged))
+
+
+def _meta_status(base_dir: Path) -> object:
+    """The ``status`` in ``.harness-meta.json``; None when absent or unreadable."""
+    try:
+        data = json.loads((base_dir / META_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data.get("status") if isinstance(data, dict) else None
 
 
 def check_harness_meta(base_dir: Path) -> None:
@@ -657,6 +699,14 @@ def _host_tool(
 
 
 def _schema_file(base_dir: Path, source: str, where: str) -> ToolSchemaFile:
+    if not (base_dir / TOOLS_SCHEMA_FILE).exists() and _meta_status(base_dir) == (
+        "incomplete"
+    ):
+        raise DockerUnavailableError(
+            f"{source}: {where}: this harness was generated without Docker "
+            f"(validation incomplete), so {TOOLS_SCHEMA_FILE} was never "
+            "extracted; start Docker and run `harness validate` on it"
+        )
     try:
         return ToolSchemaFile.load(base_dir / TOOLS_SCHEMA_FILE)
     except ConfigError as exc:

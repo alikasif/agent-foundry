@@ -156,6 +156,8 @@ def test_confine_rejects_paths_leaving_staging(tmp_path: Path, path: str) -> Non
         "tools.schema.json",
         "TOOLS.SCHEMA.JSON",
         "README.md/x",
+        ".hb-staging",
+        ".HB-STAGING",
     ],
 )
 def test_confine_reserves_pipeline_files_for_write(tmp_path: Path, path: str) -> None:
@@ -227,6 +229,7 @@ async def test_passing_generation_is_written_with_reports(tmp_path: Path) -> Non
     assert result.attempts == 1
     assert result.output_dir == out.resolve()
     assert not out.with_name("calc.staging").exists()
+    assert not (out / ".hb-staging").exists()
     meta = json.loads((out / ".harness-meta.json").read_text(encoding="utf-8"))
     assert meta["status"] == "pass"
     assert meta["attempts"] == 1
@@ -298,3 +301,31 @@ async def test_non_empty_output_dir_is_refused(tmp_path: Path) -> None:
 def test_default_output_dir_is_a_slug_under_harnesses() -> None:
     request = GenerationRequest(description="Triage CSV bug reports!")
     assert default_output_dir(request) == Path("harnesses/triage-csv-bug-reports")
+
+
+async def test_unmarked_staging_dir_is_refused_and_left_intact(
+    tmp_path: Path,
+) -> None:
+    """T046 MJ3: a user directory named ``<out>.staging`` is never deleted."""
+    staging = tmp_path / "foo.staging"
+    staging.mkdir()
+    (staging / "mine.txt").write_text("keep", encoding="utf-8")
+    with pytest.raises(ConfigError, match="staging"):
+        await pipeline(tmp_path, scripted_generator(GOOD_TOOL)).run(
+            REQUEST, tmp_path / "foo"
+        )
+    assert (staging / "mine.txt").read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "foo").exists()
+
+
+async def test_marked_stale_staging_dir_is_replaced(tmp_path: Path) -> None:
+    staging = tmp_path / "foo.staging"
+    staging.mkdir()
+    (staging / ".hb-staging").write_text(str(tmp_path / "foo"), encoding="utf-8")
+    (staging / "stale.txt").write_text("old", encoding="utf-8")
+    out = tmp_path / "foo"
+    result = await pipeline(tmp_path, scripted_generator(GOOD_TOOL)).run(REQUEST, out)
+    assert result.status == "pass", result.report.to_markdown()
+    assert not staging.exists()
+    assert not (out / "stale.txt").exists()
+    assert not (out / ".hb-staging").exists()

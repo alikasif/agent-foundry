@@ -312,14 +312,6 @@ def test_docker_lost_after_generation_eval_and_run_exit_3(
     assert ran.exit_code == 3, ran.output
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T045 defect: eval/run of a harness generated without Docker exit 2 "
-        "(ConfigError: tools.schema.json missing) instead of 3 (Docker "
-        "unavailable / incomplete)"
-    ),
-)
 @pytest.mark.parametrize("command", ["eval", "run"])
 def test_incomplete_generated_harness_eval_and_run_exit_3(
     invoke: Invoke,

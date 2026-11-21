@@ -574,18 +574,25 @@ class _RunRaises(FakeExecutor):
         raise DockerUnavailableError("daemon stopped mid-run")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DockerUnavailableError,
-    reason=(
-        "T044 source defect: EvalRunner._py_assert does not catch "
-        "DockerUnavailableError from executor.run (after a passing preflight), "
-        "so it escapes EvalRunner.run instead of making the run incomplete"
-    ),
-)
 async def test_docker_lost_during_py_assert_is_incomplete() -> None:
     case = ToolCase(
         id="p", tool="add", args={"a": 1, "b": 2}, check=PyAssert(code="pass")
     )
     report = await EvalRunner(make_factory(), [case], executor=_RunRaises()).run()
     assert report.cases[0].status == "incomplete"
+
+
+class _RunConfigError(FakeExecutor):
+    """Preflight passes; ``run`` raises ``ConfigError``."""
+
+    async def run(self, req: ExecRequest) -> ExecResult:
+        raise ConfigError("bad sandbox config")
+
+
+async def test_executor_config_error_in_py_assert_is_a_fail() -> None:
+    case = ToolCase(
+        id="p", tool="add", args={"a": 1, "b": 2}, check=PyAssert(code="pass")
+    )
+    report = await EvalRunner(make_factory(), [case], executor=_RunConfigError()).run()
+    assert report.cases[0].status == "fail"
+    assert "bad sandbox config" in (report.cases[0].detail or "")
