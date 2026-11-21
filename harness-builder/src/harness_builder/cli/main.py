@@ -498,6 +498,9 @@ def eval_command(
             from harness_builder.evals.skills_compare import compare_skills
 
             library = _seeded_library(spec.skills, base_dir, skills_root)
+            if not library.is_dir() or not any(p.is_dir() for p in library.iterdir()):
+                message = f"no skills to seed the comparison in {library}"
+                raise _fail(message, EXIT_USAGE)
             comparison = anyio.run(compare_skills, runner_for, library, spec.skills)
             _print_skills_comparison(comparison, library)
             if comparison.incomplete:

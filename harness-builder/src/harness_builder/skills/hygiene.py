@@ -25,7 +25,12 @@ from harness_builder.skills.promotion import (
     replace_path,
 )
 from harness_builder.skills.retriever import LexicalRetriever
-from harness_builder.skills.store import CANDIDATE_ID_RE, SkillStats, SkillStore
+from harness_builder.skills.store import (
+    CANDIDATE_ID_RE,
+    SKILL_NAME_RE,
+    SkillStats,
+    SkillStore,
+)
 from harness_builder.skills.validation import DEDUP_THRESHOLD
 
 UNUSED_DAYS = 90
@@ -229,8 +234,18 @@ def plan_prune(
 
 
 def _is_live(store: SkillStore, info: SkillInfo) -> bool:
-    """Only a direct child of ``store.live`` may be pruned (never user skills)."""
-    return info.path.parent == store.live and info.path.is_dir()
+    """Only a kebab-case direct child of ``store.live`` may be pruned.
+
+    User skills are never pruned, and a hand-placed directory whose name is
+    not kebab-case is skipped up front (``trash_dir`` would reject it midway
+    through an apply).
+    """
+    path = info.path
+    return (
+        path.parent == store.live
+        and SKILL_NAME_RE.fullmatch(path.name) is not None
+        and path.is_dir()
+    )
 
 
 def _prune_reason(
