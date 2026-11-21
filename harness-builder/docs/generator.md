@@ -105,8 +105,8 @@ the rest:
 |---|---|---|---|
 | A | static checks | no | Loads the spec and eval cases (located errors). Every module ref must resolve inside the directory, name a top-level function whose parameters are type-hinted (no `ctx`, `*args`, `**kwargs`, positional-only), and have at least one `examples` entry. Runs `ruff check` (rules `E9,F63,F7,F82`: syntax errors and undefined names) and `pyrefly check` on the referenced modules, and the [safety screen](#the-safety-screen). `runtime: host` tools and module hooks are rejected without `--trust-tools`. Never imports or runs harness code. |
 | B0 | schema extraction | yes, if any `runtime: docker` tool | Runs `hb_entry.py schema` in a container for each Docker tool and writes `tools.schema.json`. `not_run` when there are no Docker tools. |
-| B | smoke run | only for Docker tools | Builds the harness from the directory and drives it with a scripted model that calls every module tool once with its `examples[0]`, then finishes. Passes only if the run stops with `done`, every call has an `ok` observation and the trace round-trips through JSON. |
-| C | tool evals | for Docker tools and `py_assert` checks | Runs the ToolCases in `evals` ([evals.md](evals.md)). TaskCases run only with `--live`; otherwise they are `not_run`. `not_run` when there are no cases. |
+| B | smoke run | for Docker tools or `run_code` | Builds the harness from the directory and drives it with a scripted model that calls every module tool once with its `examples[0]`, then finishes. Passes only if the run stops with `done`, every call has an `ok` observation and the trace round-trips through JSON. |
+| C | tool evals | for Docker tools, `run_code` and `py_assert` checks | Runs the ToolCases in `evals` ([evals.md](evals.md)). TaskCases run only with `--live`; otherwise they are `not_run`. `not_run` when there are no cases. |
 
 If stage A fails, B0, B and C are `not_run`. Real output for a tool with a
 missing type hint, validated with `--trust-tools`:
@@ -151,7 +151,9 @@ later passing `validate`; `incomplete` is still runnable.
 | `--live` | Run TaskCases and Rubric checks with the real LLM (the default client, built from `HARNESS_MODEL`, or the spec's model when that is unset). One client serves every TaskCase run. |
 | `--trust-tools` | Run **every** module tool on the host instead of in Docker, and give `run_code` a fake executor. For hand-checked code. A ToolCase that targets a built-in tool (such as `run_code`) is then `incomplete`, because that tool is faked. |
 
-Without Docker, a Docker-runtime harness ends `incomplete`: stage B0 reports
+Without Docker, a harness that needs it (a Docker module tool, or the
+`run_code` built-in, which binds the sandbox executor at build time) ends
+`incomplete`. For a Docker module tool, stage B0 reports
 `Docker is unavailable; generated code runs only in Docker`, and B and C are
 `incomplete` with `stage B0 could not finish`. No fake executor stands in for
 generated tools. Run `uv run harness doctor` to diagnose
@@ -177,7 +179,7 @@ stage is `incomplete`, else `pass`. A report is `pass` even when stage C is
 | `new` | status `pass` | status `fail` | usage or config error (non-empty `-o`, no model, no API key) | status `incomplete` |
 | `validate` | `pass` | `fail` | usage error, unreadable path | `incomplete` |
 | `eval` | no case failed or incomplete | a case failed | usage or config error (including an untrusted `runtime: host` tool) | a case is `incomplete` and none failed |
-| `run` | run ended | run failed | config or spec error, including a `fail` harness without `--allow-failed` | Docker unavailable |
+| `run` | stopped `done` | stopped for any other reason | config or spec error, including a `fail` harness without `--allow-failed` | Docker unavailable |
 
 ## The repair loop
 

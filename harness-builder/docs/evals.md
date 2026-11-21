@@ -149,7 +149,7 @@ Output is a table on stdout, `trace:` lines on stderr and a totals line. A real
 offline run (host-runtime tool, `--trust-tools`, `--live`, a scripted model):
 
 ```text
-$ uv run harness eval wch --trust-tools --live --runs 2 --fake-llm fakeloop.json
+$ uv run harness eval word-counter --trust-tools --live --runs 2 --fake-llm scripted.json
                                  harness eval                                  
 +------------------------------------------------------------------------+
 | case        | kind | status | rate | steps | tokens | cost    | detail |
