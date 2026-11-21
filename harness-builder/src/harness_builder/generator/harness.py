@@ -44,8 +44,12 @@ GENERATOR_BUDGET = BudgetLimits(max_steps=60)
 """Default limits; one ledger covers the draft and every repair attempt
 (ASSUMED). No cost cap by default, so an unpriced model still builds (U10)."""
 REPORTS_DIR = "reports"
-RESERVED_PATHS: frozenset[str] = frozenset({REPORTS_DIR, META_FILE, TOOLS_SCHEMA_FILE})
-"""Top-level names the pipeline writes; the generator may not write them."""
+RESERVED_PATHS: frozenset[str] = frozenset(
+    {REPORTS_DIR, META_FILE.casefold(), TOOLS_SCHEMA_FILE.casefold()}
+)
+"""Top-level names the pipeline writes (casefolded: NTFS ignores case)."""
+README_FILE = "readme.md"
+"""May be written as a file, never used as a directory (finalize writes it)."""
 TOOL_NAMES: tuple[str, ...] = (
     "write_file",
     "read_file",
@@ -69,10 +73,12 @@ def confine(staging: Path, path: str, *, for_write: bool = False) -> Path:
     """Resolve ``path`` inside ``staging`` or raise ``StagingPathError``.
 
     Lexical checks come first (empty, backslash, ``:`` drive or stream,
-    absolute, ``..``), so Windows anchors and device paths never reach
+    absolute, ``..``, a component ending in ``.`` or a space, which Windows
+    silently strips), so Windows anchors and device paths never reach
     ``Path``. The joined path is then resolved (following links) and must lie
     strictly under the resolved staging directory. Writes may not target the
-    pipeline-owned ``RESERVED_PATHS``.
+    pipeline-owned ``RESERVED_PATHS`` (compared casefolded) or use
+    ``README.md`` as a directory.
     """
     rel = PurePosixPath(path)
     if (
@@ -86,7 +92,14 @@ def confine(staging: Path, path: str, *, for_write: bool = False) -> Path:
             f"{path!r}: use a relative POSIX path inside the harness directory "
             "(no absolute path, drive, '..' or backslash)"
         )
-    if for_write and rel.parts[0] in RESERVED_PATHS:
+    if not rel.parts or any(p.endswith((".", " ")) for p in rel.parts):
+        raise StagingPathError(
+            f"{path!r}: name a file; no path component may end in '.' or ' '"
+        )
+    first = rel.parts[0].casefold()
+    if for_write and (
+        first in RESERVED_PATHS or (first == README_FILE and len(rel.parts) > 1)
+    ):
         raise StagingPathError(f"{path!r}: {rel.parts[0]} is written by the pipeline")
     root = staging.resolve()
     target = root.joinpath(*rel.parts).resolve()

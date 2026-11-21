@@ -12,8 +12,10 @@ import pytest
 
 from harness_builder.config import Settings
 from harness_builder.core.types import ToolCall
-from harness_builder.errors import ConfigError
+from harness_builder.errors import ConfigError, DockerUnavailableError
+from harness_builder.executor.fake import FakeExecutor
 from harness_builder.generator.harness import (
+    MAX_QUESTIONS,
     TOOL_NAMES,
     StagingPathError,
     confine,
@@ -133,21 +135,46 @@ def pipeline(
         "tools\\x.py",
         "",
         ".",
+        "reports.",
+        "reports /x",
+        "tools/x.py ",
     ],
 )
 def test_confine_rejects_paths_leaving_staging(tmp_path: Path, path: str) -> None:
-    with pytest.raises(StagingPathError):
-        confine(tmp_path / "s", path)
+    for for_write in (False, True):
+        with pytest.raises(StagingPathError):
+            confine(tmp_path / "s", path, for_write=for_write)
 
 
 @pytest.mark.parametrize(
-    "path", ["reports/validation.json", ".harness-meta.json", "tools.schema.json"]
+    "path",
+    [
+        "reports/validation.json",
+        "Reports/x",
+        ".harness-meta.json",
+        ".Harness-Meta.json/x",
+        "tools.schema.json",
+        "TOOLS.SCHEMA.JSON",
+        "README.md/x",
+    ],
 )
 def test_confine_reserves_pipeline_files_for_write(tmp_path: Path, path: str) -> None:
     staging = tmp_path / "s"
     with pytest.raises(StagingPathError):
         confine(staging, path, for_write=True)
     assert confine(staging, path) == (staging / path).resolve()
+
+
+def test_readme_file_itself_is_writable(tmp_path: Path) -> None:
+    assert confine(tmp_path, "README.md", for_write=True).name == "README.md"
+
+
+async def test_ask_user_is_capped(tmp_path: Path) -> None:
+    ask_user = generator_tools(REQUEST, tmp_path, lambda q: f"answer to {q}")[4]
+    answers = [await ask_user.fn(question=f"q{i}") for i in range(MAX_QUESTIONS)]
+    assert answers[-1] == f"answer to q{MAX_QUESTIONS - 1}"
+    with pytest.raises(ValueError, match="question limit"):
+        await ask_user.fn(question="one more")
 
 
 async def test_write_file_body_cannot_escape_staging(tmp_path: Path) -> None:
@@ -231,6 +258,32 @@ async def test_failing_generation_is_written_as_fail(tmp_path: Path) -> None:
         and "failed validation" in r.messages[0].content
     ]
     assert repair_tasks and "needs a type hint" in repair_tasks[0]
+
+
+async def test_incomplete_validation_is_not_repaired_or_passed(
+    tmp_path: Path,
+) -> None:
+    """Docker down: the docker-runtime tool is never run; status incomplete."""
+    llm = scripted_generator(GOOD_TOOL)
+    settings = Settings(trace_dir=tmp_path / "traces")
+    down = FakeExecutor(preflight_error=DockerUnavailableError("daemon down"))
+    generator = GeneratorPipeline(
+        validator=ValidationPipeline(settings=settings, executor=down),
+        llm=llm,
+        model="test/model",
+        settings=settings,
+    )
+    out = tmp_path / "inc"
+    result = await generator.run(REQUEST, out)
+    assert result.status == "incomplete"
+    assert result.exit_code == 3
+    assert result.attempts == 1
+    assert not any("failed validation" in r.messages[0].content for r in llm.requests)
+    meta = json.loads((out / ".harness-meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "incomplete"
+    readme = (out / "README.md").read_text(encoding="utf-8")
+    assert readme.startswith(BANNERS["incomplete"])
+    assert not (out / "tools.schema.json").exists()
 
 
 async def test_non_empty_output_dir_is_refused(tmp_path: Path) -> None:
