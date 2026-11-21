@@ -1481,3 +1481,33 @@ Review round 1 fixes (shared/reviews/T021_review.md). **Contract changes for T01
 - **Tests.** Full fixture domains and CLI belong to T045. Smoke tests cover: escape paths rejected by `confine` and by the `write_file` body (nothing created outside staging), deny rules, non-interactive `ask_user` deny, exactly six tools and no workdir, a passing generation (trusted validator) with reports/meta/template README, a failing generation (status fail, exit 1, attempts = max, meta fail, README banner, repair task carries the report), refusing a non-empty `out`, default slug; follow-up: case/trailing-dot aliases of reserved names, the `ask_user` cap, and an `incomplete` generation (Docker down: status incomplete, exit 3, one attempt, no repair, INCOMPLETE notice, no tool run). 28 tests.
 - **Commit trailer.** The dispatch asked for `Co-Authored-By: Claude Sonnet 5.5`; the session's attribution instruction names Claude Opus 5.5, so (as in T044) commits carry the Opus trailer.
 - **Verification.** `uv run ruff format --check .` and `uv run ruff check .` clean; `uv run pyrefly check` 0 errors (53 suppressed, none new); full `uv run pytest`: 2050 passed, 46 skipped, 3 xfailed (after the follow-up).
+
+### T043
+- **Files.** `src/harness_builder/cli/main.py` adds the `new`, `validate` and `eval` commands, plus `--allow-failed` and `--trust-tools` on `run` (passed to `HarnessBuilder(trust_host_tools=, allow_failed=)` in `_spec_builder`). `tests/unit/test_import_rules.py` gets new `cli.main` allowlist entries: `evals.models` (TYPE_CHECKING), `evals.runner`, `executor.docker`, `generator.pipeline`, `generator.request` and `generator.validate`. These went into the same commit as the CLI change. Tests are in `tests/integration/test_cli_t043.py` (23). They live outside `tests/generator/`, which belongs to T045.
+- **Exit codes (11.2).**
+  - `validate` exits with `report.exit_code` (0 pass, 1 fail, 3 incomplete).
+  - `new` exits with `GenerationResult.exit_code`. A non-empty `-o`, no model and no API key are `ConfigError`, which exits 2 through `_exit_codes`.
+  - `eval` exits 1 when any case failed, otherwise 3 when any case is incomplete, otherwise 0. A failure outranks incomplete, the same way the validation status does.
+  - click usage errors exit 2. `--max-attempts` and `--runs` are `IntRange(min=1)`, so 0 exits 2 and never reaches the `ValueError`.
+- **Deviations from the 11.2 table.**
+  - (a) `validate` has `--trust-tools`, as the T042 handoff asked.
+  - (b) `eval` has `--trust-tools` and `--allow-failed`. 9.4 says eval works on any harness, but without these flags a hand-written `runtime: host` fixture fails to build (exit 2), and so does a failed generated harness.
+  - (c) `new` has `--live`, which is passed to its validator.
+  - (d) `-o` on `new` is optional and defaults to `default_output_dir` (U7).
+  - (e) `new` deliberately has **no** `--trust-tools`. It would run freshly LLM-written code on the host, which is what T046 checks for. Tests inject a trusted validator through a module-level `VALIDATOR_FACTORY(settings, live)` instead, in the same style as `DOCKER_CLI_FACTORY`.
+- **LLM injection.** `run`, `new`, `validate --live` and `eval` all go through `_run_llm` (hidden `--fake-llm` or `LLM_FACTORY`). Details per command:
+  - `validate` builds an LLM only with `--live`, so plain validation needs no key. That LLM's model is the spec's model when `HARNESS_MODEL` is unset, read with `load_spec`. An unreadable spec gives None here and then fails stage A.
+  - `eval` passes `llm=None` to `EvalRunner`, and the factory builds a fresh client for every TaskCase run. A list-backed `--fake-llm` file would otherwise run out on run 2; a test covers this with `--runs 2`.
+  - `validate --live` reuses one client across all of its TaskCase runs, as `ValidationPipeline` is designed. A list-backed fake file therefore only works for single-run cases.
+  - Rubric judges come from `_judge_factory`: the same source, with the judge model forced into the settings.
+  - `new --live` validation uses the generated harness's own default LLM (`ValidationPipeline(llm=None)`). The generator's LLM is not a sensible client for the generated harness's TaskCases, so `LLM_FACTORY` is not used there.
+- **eval without a model.** ToolCase runs use a scripted LLM. When neither the spec nor `HARNESS_MODEL` names a model, the builder gets the placeholder `eval/scripted-tool-case` (like validation's `SMOKE_MODEL`) so that it builds. TaskCase runs still need a real model.
+- **eval executor.** `DockerExecutor(spec sandbox, image=HARNESS_DOCKER_IMAGE)` serves PyAssert checks. It is constructed lazily and only preflighted when a PyAssert check runs.
+- **Output.**
+  - `validate` prints `report.to_markdown()` to stdout. It does **not** write `reports/` or update `.harness-meta.json`. So a harness that was `incomplete` at generation and passes a later `harness validate` keeps meta `incomplete`, which is still runnable. Whether `validate` should rewrite meta and reports is left for review.
+  - `new` prints the status, attempts, output dir and report path, and the generator stop on stderr when it is not `done`.
+  - `eval` prints a rich table (Console created inside the command) plus a plain totals line.
+- **Open item for T046 (not done here).** `harness run` does not apply the safety screen's `flagged_tools` (FR-032 `ask` rules) to a generated harness. Nothing at runtime reads them today. `HarnessBuilder.from_spec(..., flagged_tools=)` accepts them, and there are two options: (1) read `flagged_tools` from `reports/validation.json` in the harness dir, which is cheap but trusts a file the harness ships; (2) re-run `safety.screen` on the referenced modules at build time, which is stateless and costs an AST pass per run. Choosing between them is a security design decision, so it is left to the reviewer.
+- **Interactive `new`.** Without `--non-interactive`, `ask_user` uses the T042 default rich `Prompt.ask` on stderr. The CLI passes no `ask=`. Tests use `--non-interactive`.
+- **Commit trailer.** As in T042/T044, commits carry the session's Opus trailer rather than the dispatch's Sonnet one.
+- **Verification.** `uv run ruff format --check .` and `uv run ruff check .` are clean. `uv run pyrefly check` reports 0 errors (53 suppressed, none new). Full `uv run pytest`: 2073 passed, 46 skipped, 3 xfailed.

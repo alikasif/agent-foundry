@@ -1,13 +1,16 @@
 """Command line entry point for harness-builder (designs.md 11.2).
 
-Exit codes: 0 ok; 1 run failed (or replay diverged); 2 usage or config error;
-3 Docker unavailable. Every framework import happens inside a command, so
-``harness --help`` stays fast and never loads ADK, litellm or codeact_agent.
+Exit codes: 0 ok; 1 run, validation or eval failed (or replay diverged); 2
+usage or config error; 3 Docker unavailable (validation or eval incomplete).
+Every framework import happens inside a command, so ``harness --help`` stays
+fast and never loads ADK, litellm or codeact_agent.
 
-Tests inject an LLM by monkeypatching ``LLM_FACTORY`` or, for subprocess
-tests, with the hidden ``--fake-llm PATH`` option (a JSON list of scripted
-``LLMResponse`` objects). ``harness doctor`` builds its Docker CLI through
-``DOCKER_CLI_FACTORY``, which tests monkeypatch with a ``FakeDockerCli``.
+Tests inject an LLM (for ``run``, ``new``, ``validate --live`` and ``eval``)
+by monkeypatching ``LLM_FACTORY`` or, for subprocess tests, with the hidden
+``--fake-llm PATH`` option (a JSON list of scripted ``LLMResponse`` objects).
+``harness new`` builds its validator through ``VALIDATOR_FACTORY`` and
+``harness doctor`` its Docker CLI through ``DOCKER_CLI_FACTORY``; tests
+monkeypatch both.
 """
 
 from __future__ import annotations
@@ -26,8 +29,11 @@ if TYPE_CHECKING:
     from harness_builder.config import Settings
     from harness_builder.core.builder import Harness, HarnessBuilder
     from harness_builder.core.protocols import LLMClient
+    from harness_builder.evals.models import EvalReport
+    from harness_builder.evals.runner import JudgeFactory
     from harness_builder.executor.docker_cli import DockerCli
     from harness_builder.executor.preflight import DoctorReport
+    from harness_builder.generator.validate import ValidationPipeline
     from harness_builder.trace.models import Trace
     from harness_builder.trace.replay import ReplaySession
 
@@ -119,12 +125,24 @@ def main() -> None:
     hidden=True,
     help="JSON list of scripted LLMResponse objects (tests only).",
 )
+@click.option(
+    "--allow-failed",
+    is_flag=True,
+    help="Run a generated harness whose validation status is 'fail'.",
+)
+@click.option(
+    "--trust-tools",
+    is_flag=True,
+    help="Allow 'runtime: host' tools and module hooks (runs them on the host).",
+)
 def run(
     target: Path,
     task: str,
     strategy: str | None,
     trace_file: Path | None,
     fake_llm: Path | None,
+    allow_failed: bool,
+    trust_tools: bool,
 ) -> None:
     """Run TASK with the harness spec at TARGET (a spec file or directory)."""
     import anyio
@@ -134,7 +152,13 @@ def run(
 
     settings = Settings.from_env()
     with _exit_codes():
-        builder, model = _spec_builder(target, strategy, settings)
+        builder, model = _spec_builder(
+            target,
+            strategy,
+            settings,
+            trust_tools=trust_tools,
+            allow_failed=allow_failed,
+        )
         builder.llm(_run_llm(fake_llm, settings, model))
         if trace_file is not None:
             builder.trace_dir(None)
@@ -155,12 +179,19 @@ def run(
 
 
 def _spec_builder(
-    target: Path, strategy: str | None, settings: Settings
+    target: Path,
+    strategy: str | None,
+    settings: Settings,
+    *,
+    trust_tools: bool = False,
+    allow_failed: bool = False,
 ) -> tuple[HarnessBuilder, str | None]:
     """Builder for the spec at ``target`` plus the spec's model name.
 
     A ``--strategy`` override is applied to the spec itself, so the trace's
     ``spec_snapshot`` names the strategy that ran and replay matches.
+    ``trust_tools`` and ``allow_failed`` are the builder's
+    ``trust_host_tools`` and ``allow_failed`` flags.
     """
     from harness_builder.core.builder import HarnessBuilder
     from harness_builder.spec.io import find_spec_file, parse_spec, read_spec_data
@@ -173,7 +204,12 @@ def _spec_builder(
         spec = spec.model_copy(update={"strategy": StrategySpec(name=strategy)})
     builder = builder_from_spec(
         spec,
-        builder=HarnessBuilder(spec.name, settings),
+        builder=HarnessBuilder(
+            spec.name,
+            settings,
+            trust_host_tools=trust_tools,
+            allow_failed=allow_failed,
+        ),
         base_dir=file.parent,
         source=file.name,
     )
@@ -197,6 +233,259 @@ def _run_llm(fake_llm: Path | None, settings: Settings, model: str | None) -> LL
     if model is not None and not settings.model:
         settings = settings.model_copy(update={"model": model})
     return LLM_FACTORY(settings)
+
+
+def _judge_factory(fake_llm: Path | None, settings: Settings) -> JudgeFactory:
+    """Rubric judges: the ``--fake-llm`` script or ``LLM_FACTORY`` per model."""
+
+    def judge(model: str) -> LLMClient:
+        return _run_llm(fake_llm, settings.model_copy(update={"model": model}), None)
+
+    return judge
+
+
+FAKE_LLM_OPTION = click.option(
+    "--fake-llm",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    hidden=True,
+    help="JSON list of scripted LLMResponse objects (tests only).",
+)
+LIVE_HELP = "Also run TaskCases and Rubric checks with the real LLM."
+TRUST_HELP = "Run module tools on the host instead of Docker (hand-checked code)."
+
+
+@main.command()
+@click.argument("description")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Output directory (default ./harnesses/<slug of DESCRIPTION>).",
+)
+@click.option(
+    "--non-interactive",
+    is_flag=True,
+    help="Never ask clarifying questions; assumptions go in the README.",
+)
+@click.option(
+    "--max-attempts",
+    type=click.IntRange(min=1),
+    default=3,
+    show_default=True,
+    help="Generator runs, the first draft included.",
+)
+@click.option("--live", is_flag=True, help=LIVE_HELP)
+@FAKE_LLM_OPTION
+def new(
+    description: str,
+    output: Path | None,
+    non_interactive: bool,
+    max_attempts: int,
+    live: bool,
+    fake_llm: Path | None,
+) -> None:
+    """Generate a validated harness for DESCRIPTION.
+
+    Exits 0 when validation passed, 1 when it failed (the harness is still
+    written, marked failed) and 3 when it is incomplete (Docker unavailable).
+    """
+    import anyio
+
+    from harness_builder.config import Settings
+    from harness_builder.generator.pipeline import GeneratorPipeline
+    from harness_builder.generator.request import GenerationRequest
+
+    settings = Settings.from_env()
+    with _exit_codes():
+        request = GenerationRequest(
+            description=description, interactive=not non_interactive
+        )
+        pipeline = GeneratorPipeline(
+            max_attempts=max_attempts,
+            validator=VALIDATOR_FACTORY(settings, live),
+            llm=_run_llm(fake_llm, settings, None),
+            settings=settings,
+        )
+        result = anyio.run(pipeline.run, request, output)
+    reports = result.output_dir / "reports" / "validation.md"
+    click.echo(f"status: {result.status} after {result.attempts} attempt(s)")
+    click.echo(f"harness: {result.output_dir}")
+    click.echo(f"report: {reports}")
+    stop = result.generator_stop
+    if stop.reason != "done":
+        click.echo(f"generator stopped with {stop.reason}: {stop.detail}", err=True)
+    raise click.exceptions.Exit(result.exit_code)
+
+
+def _default_validator(settings: Settings, live: bool) -> ValidationPipeline:
+    """Docker validation; ``live`` TaskCases use the generated spec's LLM."""
+    from harness_builder.generator.validate import ValidationPipeline
+
+    return ValidationPipeline(live=live, settings=settings)
+
+
+VALIDATOR_FACTORY: Callable[[Settings, bool], ValidationPipeline] = _default_validator
+"""Builds the validator for ``harness new`` (settings, live); tests patch it."""
+
+
+@main.command()
+@click.argument("target", type=click.Path(exists=True, path_type=Path))
+@click.option("--live", is_flag=True, help=LIVE_HELP)
+@click.option("--trust-tools", is_flag=True, help=TRUST_HELP)
+@FAKE_LLM_OPTION
+def validate(
+    target: Path, live: bool, trust_tools: bool, fake_llm: Path | None
+) -> None:
+    """Validate the harness directory TARGET and print the report.
+
+    Exits 0 on pass, 1 on fail and 3 when incomplete (Docker unavailable).
+    """
+    import anyio
+
+    from harness_builder.config import Settings
+    from harness_builder.generator.validate import ValidationPipeline
+
+    settings = Settings.from_env()
+    with _exit_codes():
+        llm = None
+        judge = None
+        if live:
+            llm = _run_llm(fake_llm, settings, _spec_model(target))
+            judge = _judge_factory(fake_llm, settings)
+        pipeline = ValidationPipeline(
+            live=live, trust_tools=trust_tools, llm=llm, judge=judge, settings=settings
+        )
+        report = anyio.run(pipeline.run, target)
+    click.echo(report.to_markdown(), nl=False)
+    raise click.exceptions.Exit(report.exit_code)
+
+
+def _spec_model(target: Path) -> str | None:
+    """The spec's model name, or None (an unreadable spec fails stage A)."""
+    from harness_builder.errors import SpecError
+    from harness_builder.spec.loader import load_spec
+
+    try:
+        spec, _, _ = load_spec(target)
+    except (SpecError, OSError):
+        return None
+    return spec.model.name if spec.model is not None else None
+
+
+EVAL_TOOL_MODEL = "eval/scripted-tool-case"
+"""Model name for ToolCase runs when neither spec nor ``HARNESS_MODEL`` sets one."""
+
+
+@main.command("eval")
+@click.argument("target", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--runs",
+    type=click.IntRange(min=1),
+    help="Runs per TaskCase (overrides each case's runs).",
+)
+@click.option("--live", is_flag=True, help=LIVE_HELP)
+@click.option("--trust-tools", is_flag=True, help=TRUST_HELP)
+@click.option(
+    "--allow-failed",
+    is_flag=True,
+    help="Evaluate a generated harness whose validation status is 'fail'.",
+)
+@FAKE_LLM_OPTION
+def eval_command(
+    target: Path,
+    runs: int | None,
+    live: bool,
+    trust_tools: bool,
+    allow_failed: bool,
+    fake_llm: Path | None,
+) -> None:
+    """Run the eval cases of the harness at TARGET and print a summary.
+
+    Exits 0 when every decided case passed, 1 when a case failed and 3 when a
+    case is incomplete (Docker unavailable). Without --live, TaskCases and
+    Rubric checks are listed as not run.
+    """
+    import anyio
+    from rich.console import Console
+
+    from harness_builder.config import Settings
+    from harness_builder.evals.runner import EvalRunner
+    from harness_builder.executor.docker import DockerExecutor
+    from harness_builder.executor.models import SandboxConfig
+    from harness_builder.spec.loader import load_eval_cases, load_spec
+
+    settings = Settings.from_env()
+
+    def factory(llm: LLMClient | None) -> Harness:
+        """A fresh harness per run; None builds a fresh run LLM (TaskCases)."""
+        builder, model = _spec_builder(
+            target,
+            None,
+            settings,
+            trust_tools=trust_tools,
+            allow_failed=allow_failed,
+        )
+        if llm is None:
+            llm = _run_llm(fake_llm, settings, model)
+        elif model is None and not settings.model:
+            builder.model(EVAL_TOOL_MODEL)
+        return builder.llm(llm).build()
+
+    with _exit_codes():
+        spec, base_dir, source = load_spec(target)
+        sandbox = spec.sandbox
+        runner = EvalRunner(
+            factory,
+            load_eval_cases(spec, base_dir, source),
+            runs=runs,
+            live=live,
+            executor=DockerExecutor(
+                SandboxConfig(**sandbox.model_dump()) if sandbox else None,
+                image=settings.docker_image,
+            ),
+            judge=_judge_factory(fake_llm, settings),
+        )
+        report = anyio.run(runner.run)
+    Console().print(_eval_table(report))
+    totals = report.totals
+    rate = "-" if totals.success_rate is None else f"{totals.success_rate:.0%}"
+    click.echo(
+        f"cases: {totals.cases}, passed: {totals.passed}, failed: {totals.failed}, "
+        f"incomplete: {totals.incomplete}, not run: {totals.not_run}, "
+        f"success rate: {rate}"
+    )
+    if totals.failed:
+        raise click.exceptions.Exit(EXIT_FAILED)
+    if totals.incomplete:
+        raise click.exceptions.Exit(EXIT_DOCKER)
+
+
+def _eval_table(report: EvalReport) -> Table:
+    """Rich table: one row per case with status, success rate and detail."""
+    from rich.table import Table
+    from rich.text import Text
+
+    styles = {
+        "pass": "green",
+        "fail": "bold red",
+        "incomplete": "yellow",
+        "not_run": "dim",
+    }
+    table = Table(title="harness eval")
+    for column in ("case", "kind", "status", "rate", "steps", "detail"):
+        table.add_column(column)
+    for case in report.cases:
+        rate = "-" if case.success_rate is None else f"{case.success_rate:.0%}"
+        steps = "-" if case.mean_steps is None else f"{case.mean_steps:g}"
+        table.add_row(
+            case.id,
+            case.kind,
+            Text(case.status, style=styles[case.status]),
+            rate,
+            steps,
+            Text(case.detail or "-"),
+        )
+    return table
 
 
 @main.command()

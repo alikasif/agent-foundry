@@ -61,6 +61,14 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
     f"{PKG}.cli.main": frozenset(
         {
             f"{PKG}.core.builder",
+            # T043: `harness eval` runs EvalRunner with a Docker executor for
+            # PyAssert checks; `new` and `validate` drive the generator.
+            f"{PKG}.evals.models",
+            f"{PKG}.evals.runner",
+            f"{PKG}.executor.docker",
+            f"{PKG}.generator.pipeline",
+            f"{PKG}.generator.request",
+            f"{PKG}.generator.validate",
             # T030: `harness doctor` runs the Docker preflight checks.
             f"{PKG}.executor.docker_cli",
             f"{PKG}.executor.preflight",
