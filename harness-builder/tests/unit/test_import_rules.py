@@ -99,6 +99,28 @@ CROSS_LAYER_ALLOWLIST: dict[str, frozenset[str]] = {
             f"{PKG}.tools.container_tool",
         }
     ),
+    # T042: the generator is a harness built with the framework (builder,
+    # @tool, auto-deny approver); its tools describe builtins, the spec and
+    # eval schemas and the pipeline-owned file names.
+    f"{PKG}.generator.harness": frozenset(
+        {
+            f"{PKG}.core.builder",
+            f"{PKG}.evals.models",
+            f"{PKG}.permissions.approvers",
+            f"{PKG}.spec.loader",
+            f"{PKG}.tools.container_tool",
+            f"{PKG}.tools.registry",
+        }
+    ),
+    # T042: one budget ledger covers every generator attempt; the meta file
+    # name is the loader's.
+    f"{PKG}.generator.pipeline": frozenset(
+        {
+            f"{PKG}.budget.ledger",
+            f"{PKG}.core.builder",
+            f"{PKG}.spec.loader",
+        }
+    ),
 }
 """Explicit, reviewed exceptions: importing module -> allowed target modules.
 
