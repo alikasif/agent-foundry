@@ -4,10 +4,12 @@ A layered agent-harness framework in Python. You compose a harness from small,
 swappable layers (LLM client, strategy, tools, permissions, hooks, context policy,
 budget, trace), run it, and get a complete, replayable trace of what it did.
 
-Status: milestone M3 (M1 framework core, spec loader, trace replay and diff, the
+Status: milestone M4 (M1 framework core, spec loader, trace replay and diff, the
 Docker sandbox, the `run_code` tool, the CodeAct strategy and `harness doctor`,
 plus the harness generator `harness new`, validation, evals and the full
-HarnessSpec v1). Skills are a later milestone and are not documented here yet.
+HarnessSpec v1, plus the skills layer: BM25 retrieval, skill tools, deferred or
+in-process promotion and a human approval gate, see
+[docs/skills.md](docs/skills.md)).
 **No live LLM run has been made yet, and the Docker sandbox has not been run
 against a real Docker daemon yet**; everything below was exercised offline with a
 scripted fake model, a fake Docker CLI and `--trust-tools`.
@@ -54,7 +56,7 @@ cp .env.example .env
 | `OPENROUTER_API_KEY` | API key for OpenRouter (required for live runs; never needed offline). |
 | `HARNESS_MODEL` | Default OpenRouter model id, for example `openai/gpt-4o-mini`. A spec's own `model` wins. |
 | `HARNESS_TRACE_DIR` | Where traces are written. Default `.harness/traces`. |
-| `HARNESS_SKILLS_ROOT` | Reserved for the skills layer (later milestone). |
+| `HARNESS_SKILLS_ROOT` | Skills root (the directory holding `.agents/`) when neither the spec nor `--skills-root` sets one. Falls back to the nearest `pyproject.toml` ancestor. Read from the real environment only. |
 | `HARNESS_DOCKER_IMAGE` | Sandbox image tag. Default: the content-hash tag `harness-builder-sandbox:<hash>` that `harness doctor` prints. |
 
 Real environment variables take precedence over `.env`. The file is read from the
@@ -204,8 +206,18 @@ and check formats).
   `--trust-tools`, output layout.
 - [docs/evals.md](docs/evals.md): ToolCase and TaskCase, checks, the runner and
   `harness eval`.
+- [docs/skills.md](docs/skills.md): skill format, storage, retrieval, promotion,
+  the approval workflow (`harness skills review`), hygiene commands and
+  `harness eval --skills-compare`.
 
-## Known limitations (M1 to M3)
+## Known limitations (M1 to M4)
+
+- Skills (M4) have never run against a live model or a real Docker daemon. Skill
+  scripts and candidate tests have not run in a container, and without Docker
+  `harness skills review` marks every candidate invalid (it cannot be approved).
+  Whether skills improve results is unmeasured: `--skills-compare` is tested
+  offline for mechanics only. `on_stop` promotion is builder-API only; a spec can
+  enable `deferred`. Details: [docs/skills.md](docs/skills.md#known-issues-and-limits).
 
 - No live OpenRouter run has been made; `AdkLiteLlmClient` is tested against a
   stubbed ADK only.

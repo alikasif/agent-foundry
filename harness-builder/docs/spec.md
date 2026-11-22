@@ -264,9 +264,11 @@ There is no `image` key: the image is an environment choice
 (`HARNESS_DOCKER_IMAGE`; [docker.md](docker.md)).
 
 **`skills`** (`enabled`, `root`, `top_k`, `include_user_skills`,
-`include_bundled`) configures the skills extension. Skills are a later
-milestone and are **not documented here**. `include_bundled: true` is always an
-error.
+`include_bundled`, `promotion`) configures the skills extension; the full guide
+is [skills.md](skills.md). `include_bundled: true` is always an error.
+`promotion` is `{mode: deferred}` only (`on_stop` is builder-API only). The skill
+tools are not allowed by default: list `activate_skill`, `read_skill_resource` and
+`run_skill_script` in `permissions.rules`.
 
 **`evals`** is either `{file: evals/cases.yaml}` or an inline list of cases. The
 case format is in [evals.md](evals.md).

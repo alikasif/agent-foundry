@@ -87,7 +87,7 @@ executed and get a "not executed" error observation.
 | `HookManager` | `hooks.manager.HookManager` | none needed |
 | `TokenCounter` | `llm.tokens.HeuristicCounter` (chars / 4) | `LiteLlmCounter` is the real tokenizer |
 | `Executor` | `executor.docker.DockerExecutor` ([docker.md](docker.md), [isolation.md](isolation.md)) | `executor.fake.FakeExecutor` |
-| `Retriever` | not implemented in M1 (the `skills/` modules are stubs) | - |
+| `Retriever` | `skills.retriever.LexicalRetriever` (BM25F; [skills.md](skills.md)) | any `Retriever` implementation |
 
 ## Layer details
 
@@ -284,5 +284,5 @@ All numbers below are design placeholders (**ASSUMED**) unless stated otherwise.
   M2 features, documented in [docker.md](docker.md), [isolation.md](isolation.md)
   and [strategies.md](strategies.md). Docker has not been exercised against a
   real daemon yet.
-- The skills layer (`Retriever`, skill store, promotion), the generator and the
-  eval runner are stubs.
+- The skills layer (`Retriever`, skill store, promotion) is implemented since M4
+  and documented in [skills.md](skills.md); it has not run against real Docker.
