@@ -2,6 +2,7 @@
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -53,7 +54,7 @@ def test_edited_and_removed_skills_invalidate_the_cache(store: SkillStore) -> No
 def test_frontmatter_is_parsed_once_per_skill(
     store: SkillStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manager = store.manager()
+    manager: Any = store.manager()
     parsed: list[Path] = []
     original = type(manager)._parse_skill_md
 
