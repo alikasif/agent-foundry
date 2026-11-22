@@ -1773,8 +1773,10 @@ Round 1 of the T062 review of T059.
 
 Option (a) of the round 3 review.
 
-- **R3-MJ1.** `_frozen_importlib` and `_frozen_importlib_external` join `DYNAMIC_EXEC_MODULES` (they are CPython's names for `importlib._bootstrap(_external)`). Tests: import, aliased attribute and `from` forms. Docs row updated.
-- **R3-MJ2.** `breakpoint`, `builtins.breakpoint` and `sys.breakpointhook` join `DYNAMIC_EXEC_CALLS` (`breakpoint()` runs `.pdbrc` through `pdb`). Tests and docs row added. The `screen.py` docstring and `docs/generator.md` no longer say stored code "cannot be run unseen": the list is best-effort and Docker (`--network none`, read-only mount) is the boundary.
+- **R3-MJ1.** `_frozen_importlib` and `_frozen_importlib_external` join `DYNAMIC_EXEC_MODULES` (they are CPython's names for `importlib._bootstrap(_external)`). Docs row updated. Regression tests were NOT added in commit 7730bbd (an earlier report said they were; that was wrong). They were added in the F3 follow-up commit: import, aliased attribute and `from` forms for both modules.
+- **R3-MJ2.** `breakpoint`, `builtins.breakpoint` and `sys.breakpointhook` join `DYNAMIC_EXEC_CALLS` (`breakpoint()` runs `.pdbrc` through `pdb`). Docs row added in 7730bbd; tests (`breakpoint()`, `builtins.breakpoint()`, `sys.breakpointhook()` and a negative control) came with the F3 follow-up commit, not 7730bbd. The `screen.py` docstring and `docs/generator.md` no longer say stored code "cannot be run unseen": the list is best-effort and Docker (`--network none`, read-only mount) is the boundary.
 - **R3-mn1.** `prior_fail = status not in RUNNABLE_STATUSES`, so a `--trust-tools` pass cannot upgrade `FAIL`, `broken` or an empty status. Test is parametrized.
 - **R3-mn2.** Done: `trusted_tools` is now written with every verdict (not only `pass`), so a downgrade clears a stale `true`. Docs and test updated.
 - Residual: `breakpoint` reached through `getattr(builtins, ...)` or other indirection is not seen (same class as the existing getattr residual).
+- Residual (F3 follow-up): assigning a flagged builtin to a variable is not caught, e.g. `e = exec; e(s)` or `bp = breakpoint; bp()`. The screen only matches direct calls and attribute paths. Behaviour deliberately unchanged.
+- F3 tests are in `tests/unit/test_safety_screen.py`: `test_frozen_importlib_and_breakpoint_are_dynamic_exec` (9 rows) and `test_benign_code_without_frozen_importlib_or_breakpoint_stays_clean`.

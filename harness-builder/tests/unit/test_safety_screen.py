@@ -566,3 +566,36 @@ def test_common_clean_code_stays_clean() -> None:
         "    return str(pathlib.Path('a') / 'b') + str(hints) + str(conn)\n"
     )
     assert categories(source) == set()
+
+
+# --- T062 round 3 follow-up (F3): frozen importlib and breakpoint --------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import _frozen_importlib\n",
+        "import _frozen_importlib_external\n",
+        "import _frozen_importlib as f\nf._load(spec)\n",
+        "import _frozen_importlib_external as f\nf.SourceFileLoader\n",
+        "from _frozen_importlib import _load\n",
+        "from _frozen_importlib_external import SourceFileLoader\n",
+        "breakpoint()\n",
+        "import builtins\nbuiltins.breakpoint()\n",
+        "import sys\nsys.breakpointhook()\n",
+    ],
+)
+def test_frozen_importlib_and_breakpoint_are_dynamic_exec(source: str) -> None:
+    assert "dynamic_exec" in categories(source)
+
+
+def test_benign_code_without_frozen_importlib_or_breakpoint_stays_clean() -> None:
+    """Negative control: similar names that are not the flagged APIs."""
+    source = (
+        "import builtins\nimport sys\n"
+        "def breakpoints(xs: list[int]) -> list[int]:\n"
+        "    return [x for x in xs if x > 0]\n"
+        "total = len(breakpoints([1, 2])) + builtins.len([]) + len(sys.argv)\n"
+        "hook = 'breakpoint'\n"
+    )
+    assert categories(source) == set()

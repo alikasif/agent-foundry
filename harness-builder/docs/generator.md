@@ -238,7 +238,8 @@ delete them.
 
 It is still a best-effort heuristic, not a proof that stored code cannot run: it cannot see through `getattr`/`setattr` string
 indirection or data flow, and other deserialisers (`shelve`, `dill`) are not
-reported. Residual string indirection is advisory only: `getattr`,
+reported. Residual string indirection is advisory only: aliasing a builtin
+to a variable (`e = exec; e(s)`, `bp = breakpoint`), `getattr`,
 `vars(builtins)["exec"]`, building a function from a code object with
 `type(f)(code, {})()`, and `typing.get_type_hints` / `inspect.get_annotations(eval_str=True)`
 over string annotations read from a file. The container

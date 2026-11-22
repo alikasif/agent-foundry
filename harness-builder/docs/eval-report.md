@@ -84,7 +84,7 @@ result came from calling `compare_skills` directly with a scripted model.
 
 ## Test-suite state (T060, same host)
 
-From the T060 notes, and re-run for this report on the same host: `uv run pytest tests` gave 2368 passed, 52 skipped, 0 failed;
+From the T060 notes, refreshed after the T062 round 3 follow-up (F5) with a full `uv run pytest -q` on the same host: 2456 passed, 52 skipped, 0 failed;
 `ruff format --check`, `ruff check` and `pyrefly check` were clean. The 52 skips,
 each with a reason:
 
@@ -114,7 +114,7 @@ T060 notes.
   image was not rebuilt in T060. Run `uv run harness doctor`, then the printed
   `docker build` command, before expecting the docker-marked tests to pass.
 - **The safety screen is a heuristic.** `safety/screen.py` is a static AST check.
-  Indirection through `getattr`/`setattr`, `vars(builtins)['exec']`, `pydoc.locate`,
+  Indirection through `getattr`/`setattr`, assigning a builtin to a variable (`e = exec; e(s)`, `bp = breakpoint`), `vars(builtins)['exec']`, `pydoc.locate`,
   data flow and other deserialisers stay out of reach. A finding in any `.py` file
   of the mounted harness tree (or an unparsable or unscreenable file such as
   `.pth`, `.pyc`, `.so`) flags every module tool, which then gets an `ask` rule.
