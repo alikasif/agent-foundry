@@ -8,7 +8,6 @@ writers are exercised.
 
 import hashlib
 import json
-import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
@@ -314,18 +313,9 @@ def test_concurrent_writers_never_tear_the_file(tmp_path: Path) -> None:
         assert 1 <= stats.usage_count <= 40, name
 
 
-@pytest.mark.xfail(
-    sys.platform == "win32",
-    strict=False,
-    reason=(
-        "T054 source finding: on Windows os.replace onto stats.json raises "
-        "PermissionError (WinError 5) while another writer or reader has it "
-        "open; write_stats has no retry (promotion.replace_path has one) and "
-        "the skills:stats hook error is swallowed by HookManager, so the use "
-        "is lost"
-    ),
-)
 def test_concurrent_writers_do_not_fail(tmp_path: Path) -> None:
     store = SkillStore(tmp_path)
     errors, _ = hammer(store)
     assert errors == [], [repr(e) for e in errors[:3]]
+    final = store.read_stats()
+    assert [final[f"w{i}"].usage_count for i in range(4)] == [40] * 4  # none lost

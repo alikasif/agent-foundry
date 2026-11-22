@@ -363,8 +363,15 @@ def builder_from_spec(
     if installer is not None:
         installer(skills, builder)
     resolved = spec.model_copy(update={"prompts": PromptsSpec(system=system)})
-    builder.spec_snapshot(resolved.model_dump(mode="json"))
+    # An unset skills.promotion is left out, so snapshots written before the
+    # field existed stay identical (T056 MJ1).
+    unset = {"skills": {"promotion"}} if _promotion_unset(spec) else None
+    builder.spec_snapshot(resolved.model_dump(mode="json", exclude=unset))
     return builder
+
+
+def _promotion_unset(spec: HarnessSpec) -> bool:
+    return spec.skills is not None and spec.skills.promotion is None
 
 
 def flagged_tool_names(

@@ -281,9 +281,15 @@ def test_name_is_split_on_hyphen() -> None:
     [
         ("CAFÉ Menu", ["café", "menu"]),
         ("ﬁle", ["file"]),  # NFKC: the fi ligature
-        ("Straße", ["strasse"]),  # casefold
-        ("snake_case-and.dots", ["snake", "case", "dot"]),
+        ("Straße", ["strass"]),  # casefold, then a trailing e is stripped
+        ("snake_case-and.dots", ["snak", "case", "dot"]),
         ("files processes class bus", ["file", "process", "class", "bus"]),
+        ("uuid4 mp3", ["uuid", "4", "mp", "3"]),  # letter/digit split
+        (
+            "queries extracting formatted validation",
+            ["query", "extract", "format", "validat"],
+        ),
+        ("create validates installing", ["creat", "validat", "install"]),
         ("データ 解析", ["データ", "解析"]),
     ],
 )

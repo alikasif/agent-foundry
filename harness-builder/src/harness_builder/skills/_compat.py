@@ -46,8 +46,8 @@ class ScopedManager(Protocol):
         """Names of every discovered skill."""
         ...
 
-    def _parse_skill_md(self, path: Path) -> tuple[dict[str, object], str]:
-        """Inherited sibling parser: ``(frontmatter, body)``."""
+    def frontmatter(self, path: Path) -> dict[str, object]:
+        """Frontmatter of the SKILL.md at ``path``, as the catalog parses it."""
         ...
 
 
@@ -80,6 +80,10 @@ def scoped_skill_manager_class() -> type:
         def search_paths(self) -> list[Path]:
             """Resolved search paths, in increasing priority (later wins)."""
             return list(self._search_paths)
+
+        def frontmatter(self, path: Path) -> dict[str, object]:
+            """Frontmatter of the SKILL.md at ``path`` (sibling parser)."""
+            return self._parse_skill_md(path)[0]
 
         def _find_project_root(self) -> Path:
             if not self._search_paths:

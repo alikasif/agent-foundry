@@ -26,8 +26,9 @@ B = 0.75
 SCORE_DIGITS = 9
 """Scores are rounded so float noise cannot reorder equal documents."""
 
-_TOKEN_RE = re.compile(r"[^\W_]+")
-"""Runs of letters/digits in any script; ``-``, ``_`` and punctuation split."""
+_TOKEN_RE = re.compile(r"[^\W\d_]+|\d+")
+"""Runs of letters or of digits in any script; ``-``, ``_``, punctuation and a
+letter/digit boundary (``uuid4`` -> ``uuid``, ``4``) split."""
 
 STOPWORDS: frozenset[str] = frozenset(
     "a an and are as at be by can do for from how i in into is it its me my "
@@ -39,9 +40,8 @@ def tokenize(text: str) -> list[str]:
     """Split ``text`` into normalised index terms.
 
     NFKC normalisation and ``casefold`` make ``CAFÉ``/``café`` and the ``ﬁ``
-    ligature/``fi`` equal. Stopwords are dropped and a plural ``s`` is
-    stripped from words longer than three letters (not ``ss``/``us``/``is``;
-    ``sses`` becomes ``ss``).
+    ligature/``fi`` equal. Letters and digits split apart, stopwords are
+    dropped and words are lightly stemmed (see ``_stem``).
     Text in scripts without spaces (for example CJK) becomes one term per run.
     """
     words = _TOKEN_RE.findall(unicodedata.normalize("NFKC", text).casefold())
@@ -49,11 +49,43 @@ def tokenize(text: str) -> list[str]:
 
 
 def _stem(word: str) -> str:
+    """Light suffix stripping so inflected forms share one term.
+
+    Plural (``-sses``, ``-ies``, ``-s``), then one of ``-ing``/``-ed``/``-ion``
+    (with a minimum stem length and a doubled final consonant undone), then a
+    trailing ``e``, so ``making``/``make`` and ``validation``/``validate``
+    meet. Words in scripts without these suffixes pass through unchanged.
+    """
+    word = _stem_plural(word)
+    for suffix in ("ing", "ed", "ion"):
+        stem = word[: -len(suffix)]
+        if word.endswith(suffix) and len(stem) >= _MIN_STEM[suffix]:
+            word = _undouble(stem)
+            break
+    if len(word) > 4 and word.endswith("e"):
+        return word[:-1]
+    return word
+
+
+_MIN_STEM = {"ing": 4, "ed": 4, "ion": 4}
+"""Shortest stem left after stripping a suffix (``sing``/``bed`` stay whole)."""
+
+
+def _stem_plural(word: str) -> str:
     if word.endswith("sses"):
         return word[:-2]
+    if len(word) > 4 and word.endswith("ies"):
+        return f"{word[:-3]}y"
     if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
         return word[:-1]
     return word
+
+
+def _undouble(stem: str) -> str:
+    """``formatt`` -> ``format``; ``ll``/``ss``/``zz`` stay (``install``)."""
+    if stem[-1] == stem[-2] and stem[-1] not in "lsz":
+        return stem[:-1]
+    return stem
 
 
 def _weighted_terms(entry: SkillEntry) -> dict[str, float]:
@@ -134,7 +166,7 @@ class LexicalRetriever:
     def similarity(self, text_a: str, text_b: str) -> float:
         """Return an IDF-weighted cosine similarity of two texts in ``[0, 1]``.
 
-        Used for dedup (designs.md 10.3, threshold 0.8). Neither text has to
+        Used for dedup (designs.md 10.3, threshold 0.7). Neither text has to
         be indexed: IDF comes from the current index, a term it has not seen
         gets the largest IDF, and with an empty index every term weighs the
         same. Identical texts give 1.0; a text without terms gives 0.0.
@@ -146,8 +178,10 @@ class LexicalRetriever:
         doc_count = len(self._entries)
 
         def weight(term: str) -> float:
+            # An unseen term weighs as much as one seen in a single entry, so
+            # one extra word cannot dominate in a tiny library.
             postings = self._postings.get(term)
-            return _idf(doc_count, len(postings) if postings else 0)
+            return _idf(doc_count, len(postings) if postings else 1)
 
         weights = {term: weight(term) for term in sorted(terms_a | terms_b)}
         dot = sum(

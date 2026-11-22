@@ -22,7 +22,6 @@ from harness_builder.skills.promotion import (
     CANDIDATE_FILE,
     SOURCE_FILE,
     CandidateMeta,
-    replace_path,
 )
 from harness_builder.skills.retriever import LexicalRetriever
 from harness_builder.skills.store import (
@@ -30,6 +29,7 @@ from harness_builder.skills.store import (
     SKILL_NAME_RE,
     SkillStats,
     SkillStore,
+    replace_path,
 )
 from harness_builder.skills.validation import DEDUP_THRESHOLD
 

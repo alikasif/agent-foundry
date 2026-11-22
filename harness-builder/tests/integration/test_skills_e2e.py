@@ -348,3 +348,28 @@ def test_skills_compare_refuses_an_empty_seeded_library(summer: Path) -> None:
         cli_main.main, ["eval", str(summer), "--live", "--skills-compare"], env=CLI_ENV
     )
     assert result.exit_code == 2 and "no skills to seed" in result.output
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        "",  # no rules: the default is deny
+        "    - {tool: activate_skill, decision: allow}\n"
+        "    - {tool: read_skill_resource, decision: allow}\n",  # one missing
+        "    - {tool: run_skill_script, decision: ask}\n"
+        "    - {tool: '*', decision: allow}\n",  # ask is not allow
+    ],
+)
+def test_skills_compare_exits_2_when_skill_tools_are_not_allowed(
+    summer: Path, rules: str
+) -> None:
+    head, _ = SPEC.split("permissions:\n")
+    tail = SPEC[SPEC.index("evals:") :]
+    permissions = "permissions:\n  rules:\n" + rules if rules else ""
+    (summer / "harness.yaml").write_text(head + permissions + tail, encoding="utf-8")
+    result = CliRunner().invoke(
+        cli_main.main, ["eval", str(summer), "--live", "--skills-compare"], env=CLI_ENV
+    )
+    assert result.exit_code == 2, result.output
+    assert "do not allow" in result.output
+    assert "would measure nothing" in result.output

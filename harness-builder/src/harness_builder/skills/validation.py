@@ -7,11 +7,11 @@ check adds a reason, and ``ok`` is True only with no reasons. Order:
 1. layout and confinement: ``candidate.json`` names one skill dir holding
    exactly ``SKILL.md``, ``scripts/<name>.py`` and ``tests/test_<name>.py``;
    no symlink or junction, nothing resolving outside the candidate dir;
-2. frontmatter as the catalog parses it: ``name == dir``, kebab-case,
-   description of 1-200 characters (OQ-18), no ``---`` in values;
-3. ``ast.parse`` of the script and the test;
-4. a throwaway ``ScopedSkillManager([pending/<cid>])`` discovers exactly this
+2. a throwaway ``ScopedSkillManager([pending/<cid>])`` discovers exactly this
    skill and records zero warnings;
+3. frontmatter as the catalog parses it: ``name == dir``, kebab-case,
+   description of 1-200 characters (OQ-18), no ``---`` in values;
+4. ``ast.parse`` of the script and the test;
 5. ``safety.screen`` of script and test: a ``secret`` finding rejects, other
    findings are shown to the approver (and block auto-approve);
 6. dedup against the live library (informational, proposes an action);
@@ -418,7 +418,7 @@ def _manager_check(
         frontmatter: dict[str, object] = {}
         found = [entry for entry in entries if entry.skill_dir.name == name]
         if found:
-            frontmatter, _ = manager._parse_skill_md(found[0].location)
+            frontmatter = manager.frontmatter(found[0].location)
     messages = tuple(str(w.message) for w in caught)
     problems = [f"SkillManager warning: {message}" for message in messages]
     names = sorted(entry.name for entry in entries)

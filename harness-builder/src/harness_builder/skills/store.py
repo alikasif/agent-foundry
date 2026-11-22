@@ -13,10 +13,13 @@ imported lazily there. It is re-exported here lazily by name.
 """
 
 import json
+import logging
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+import threading
+import time
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,6 +34,8 @@ from harness_builder.skills._compat import (
     scoped_skill_manager_class,
 )
 
+logger = logging.getLogger(__name__)
+
 SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 """Kebab-case skill and directory names (designs.md 4.7)."""
 
@@ -38,6 +43,39 @@ CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 """Pending candidate ids: a single safe path segment."""
 
 SKILLS_ROOT_ENV = ENV_VARS["skills_root"]
+
+REPLACE_RETRY_DELAYS_S = (0.05, 0.1, 0.2, 0.4)
+"""Backoff between ``os.replace`` attempts on ``PermissionError`` (0.75 s total).
+Windows refuses a rename while another process (indexer, antivirus, a
+concurrent test run) briefly holds a handle on the source or target."""
+
+
+STATS_RETRY_DELAYS_S = (0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.5)
+"""Longer backoff (about 2 s) for ``stats.json``, which many hooks and readers
+touch at once; a lost use is silent, so it is worth waiting longer."""
+
+
+def replace_path(
+    src: Path,
+    dst: Path,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    delays: tuple[float, ...] = REPLACE_RETRY_DELAYS_S,
+) -> None:
+    """``os.replace(src, dst)``, retried with backoff on ``PermissionError``.
+
+    Atomicity is unchanged: each attempt is one ``os.replace``, and a failed
+    attempt leaves both paths as they were. After the last attempt the
+    ``PermissionError`` is re-raised; any other ``OSError`` is raised at once.
+    """
+    for delay in delays:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            logger.debug("os.replace(%s, %s) denied; retrying", src, dst)
+            sleep(delay)
+    os.replace(src, dst)
 
 
 def __getattr__(name: str) -> object:
@@ -94,6 +132,7 @@ class SkillStats(BaseModel):
     last_used: datetime | None = None
 
 
+_STATS_LOCK = threading.Lock()
 _STATS_ADAPTER = TypeAdapter(dict[str, SkillStats])
 
 
@@ -167,12 +206,11 @@ class SkillStore:
         mgr = manager if manager is not None else self.manager()
         entries: list[SkillEntry] = []
         for found in mgr.discover_skills():
-            frontmatter, _ = mgr._parse_skill_md(found.location)
             entries.append(
                 SkillEntry(
                     name=found.name,
                     description=found.description,
-                    triggers=_triggers(frontmatter.get("triggers")),
+                    triggers=_triggers(mgr.frontmatter(found.location).get("triggers")),
                     path=str(found.location),
                 )
             )
@@ -213,7 +251,7 @@ class SkillStore:
                 json.dump(data, fh, indent=2)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(tmp, self.stats_path)
+            replace_path(Path(tmp), self.stats_path, delays=STATS_RETRY_DELAYS_S)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
@@ -222,15 +260,16 @@ class SkillStore:
         self, name: str, success: bool, now: datetime | None = None
     ) -> SkillStats:
         """Increment ``name``'s usage (and success) count and persist it."""
-        stats = self.read_stats()
-        old = stats.get(name, SkillStats())
-        new = SkillStats(
-            usage_count=old.usage_count + 1,
-            success_count=old.success_count + int(success),
-            last_used=now or datetime.now(UTC),
-        )
-        stats[name] = new
-        self.write_stats(stats)
+        with _STATS_LOCK:  # in-process writers take turns (no lost increments)
+            stats = self.read_stats()
+            old = stats.get(name, SkillStats())
+            new = SkillStats(
+                usage_count=old.usage_count + 1,
+                success_count=old.success_count + int(success),
+                last_used=now or datetime.now(UTC),
+            )
+            stats[name] = new
+            self.write_stats(stats)
         return new
 
 

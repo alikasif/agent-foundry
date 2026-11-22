@@ -58,7 +58,11 @@ from harness_builder.errors import ConfigError, DockerUnavailableError
 from harness_builder.executor.models import ExecRequest, ExecResult, SandboxConfig
 from harness_builder.executor.paths import confine_ro_source
 from harness_builder.skills._compat import ScopedManager
-from harness_builder.skills.promotion import PROMOTION_HOOK_PRIORITY, PromotionHook
+from harness_builder.skills.promotion import (
+    PROMOTION_HOOK_PRIORITY,
+    PromotionHook,
+    deferred_promotion_hook,
+)
 from harness_builder.skills.retriever import LexicalRetriever
 from harness_builder.skills.store import SkillStore, resolve_skills_root
 from harness_builder.spec.models import SkillsConfig
@@ -123,13 +127,18 @@ def install_skills(
     The ``spec.loader`` hook point calls this with ``root`` already resolved
     (or None, which resolves the skills root now: ``HARNESS_SKILLS_ROOT``,
     then the nearest ``pyproject.toml`` above the CWD). ``promotion`` is for
-    code callers that own an LLM and a promotion budget; specs never enable
-    it. Does nothing when ``config.enabled`` is false.
+    code callers that own an LLM and a promotion budget (``on_stop`` mode). A
+    spec may set ``promotion: {mode: deferred}``: the hook then only records
+    verified snippets, and ``harness skills propose`` generates candidates.
+    An explicit ``promotion`` argument wins over the spec. Does nothing when
+    ``config.enabled`` is false.
     """
     if not config.enabled:
         return
     root = resolve_skills_root(None if config.root is None else Path(config.root))
     store = SkillStore(root, include_user_skills=config.include_user_skills)
+    if promotion is None and config.promotion is not None:
+        promotion = deferred_promotion_hook(store)
     SkillsExtension(store, top_k=config.top_k, promotion=promotion).install(builder)
 
 
@@ -213,10 +222,11 @@ class SkillsExtension:
         chosen = [hit.entry for hit in retriever.search(task, k=self.top_k)]
         mentioned = set(_NAME_TOKEN_RE.findall(task.lower()))
         chosen_names = {entry.name for entry in chosen}
-        chosen += sorted(
+        named = sorted(
             (e for e in entries if e.name in mentioned and e.name not in chosen_names),
             key=lambda e: e.name,
         )
+        chosen += named[: self.top_k]  # bounded: a task naming many skills (m6)
         offered = {e.name: Path(e.path or "").parent for e in chosen}
         return _RunSkills(manager=manager, offered=offered), chosen
 

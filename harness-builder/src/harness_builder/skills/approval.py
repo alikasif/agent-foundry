@@ -39,8 +39,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 from harness_builder.errors import ConfigError
-from harness_builder.skills.promotion import replace_path
-from harness_builder.skills.store import SkillStore
+from harness_builder.skills.store import SkillStore, replace_path
 from harness_builder.skills.validation import (
     CandidateValidator,
     ValidationReport,
@@ -241,7 +240,12 @@ class ApprovalGate:
         try:
             replace_path(staging, target)
         except BaseException:
-            replace_path(trashed, target)
+            try:
+                replace_path(trashed, target)
+            except OSError:
+                logger.exception(
+                    "rollback of %s failed; the old skill is in %s", target, trashed
+                )
             raise
         return trashed
 

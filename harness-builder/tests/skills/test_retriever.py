@@ -24,8 +24,9 @@ from harness_builder.skills.store import SkillStore
 
 HIT_RATE_THRESHOLD = 0.90
 """FR-051 top-3 hit rate (ASSUMED, OQ-14)."""
-REGRESSION_FLOOR = 46 / 52 - 1e-9
-"""Hit rate measured at cc3f78d (46 of 52); a drop below it is a regression."""
+REGRESSION_FLOOR = 48 / 52 - 1e-9
+"""Hit rate measured after the T056 stemmer (48 of 52; it was 46 of 52 at
+cc3f78d); a drop below it is a regression."""
 LATENCY_THRESHOLD_S = 0.100
 """PRD performance target for one search over 1,000 skills (ASSUMED)."""
 TOP_K = 3
@@ -108,15 +109,6 @@ def measure_hit_rate(
     return 1 - len(misses) / len(queries), misses
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Measured 46/52 = 88.5% < 90% (ASSUMED OQ-14) on the independent "
-        "fixture at cc3f78d: no stemming of -ies/-ing/-ion forms, letters and "
-        "digits glued ('uuid4'), no synonyms. Decision for the lead; XPASS "
-        "(strict) flags the day the retriever meets the bar."
-    ),
-)
 def test_top3_hit_rate_meets_the_assumed_threshold(
     fixture_store: SkillStore,
     labelled_queries: list[tuple[str, str]],

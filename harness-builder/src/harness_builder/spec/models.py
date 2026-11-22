@@ -249,6 +249,19 @@ class SandboxSpec(_Spec):
     state_mode: Literal["stateless"] = "stateless"
 
 
+class PromotionSpec(_Spec):
+    """Skill promotion of a harness (FR-053, D3).
+
+    ``deferred`` writes ``skills-pending/<cid>/source.json`` after a verified
+    successful run, and ``harness skills propose`` generates the candidate
+    later, so a run never waits on the extra LLM call. ``on_stop`` (generate
+    at the end of the run) needs an LLM client owned by the caller, so it is
+    available through the builder API only and is not accepted in a spec.
+    """
+
+    mode: Literal["deferred"] = "deferred"
+
+
 class SkillsConfig(_Spec):
     """The skills extension of a harness (designs.md 10, FR-050..052).
 
@@ -258,6 +271,8 @@ class SkillsConfig(_Spec):
     above the CWD; U4). ``top_k`` entries are retrieved per run. Bundled
     skills are never included (designs.md 10.1), so ``include_bundled`` must
     stay false. ``enabled: false`` keeps the section but installs nothing.
+    ``promotion`` (default None: no promotion) enables deferred candidate
+    capture after verified successful runs.
     """
 
     enabled: bool = True
@@ -265,6 +280,7 @@ class SkillsConfig(_Spec):
     top_k: int = Field(default=3, ge=1, le=50)
     include_user_skills: bool = False
     include_bundled: bool = False
+    promotion: PromotionSpec | None = None
 
     @field_validator("include_bundled")
     @classmethod

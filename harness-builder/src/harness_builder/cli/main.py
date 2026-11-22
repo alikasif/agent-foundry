@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from harness_builder.generator.validate import ValidationPipeline
     from harness_builder.skills.approval import ReviewOutcome
     from harness_builder.skills.store import SkillStore
-    from harness_builder.spec.models import SkillsConfig
+    from harness_builder.spec.models import PermissionsSpec, SkillsConfig
     from harness_builder.trace.models import Trace
     from harness_builder.trace.replay import ReplaySession
 
@@ -501,6 +501,14 @@ def eval_command(
             if not library.is_dir() or not any(p.is_dir() for p in library.iterdir()):
                 message = f"no skills to seed the comparison in {library}"
                 raise _fail(message, EXIT_USAGE)
+            denied = _denied_skill_tools(spec.permissions)
+            if denied:
+                message = (
+                    f"the spec's permissions do not allow {', '.join(denied)}; "
+                    "add allow rules for them (the default is deny) or the "
+                    "comparison would measure nothing"
+                )
+                raise _fail(message, EXIT_USAGE)
             comparison = anyio.run(compare_skills, runner_for, library, spec.skills)
             _print_skills_comparison(comparison, library)
             if comparison.incomplete:
@@ -559,6 +567,29 @@ def _eval_table(report: EvalReport) -> Table:
 def _usd(cost: float | None) -> str:
     """``$0.0012`` style, or ``unknown`` when a model price is unknown."""
     return "unknown" if cost is None else f"${cost:.4f}"
+
+
+def _denied_skill_tools(permissions: PermissionsSpec) -> list[str]:
+    """Skill tool names the spec's rules do not plainly ``allow``.
+
+    First match wins, as in ``RulePermissionPolicy``. A call is checked
+    without arguments, so a rule that needs arg globs does not count as a
+    match; ``ask`` counts as not allowed (an eval has no approver).
+    """
+    from harness_builder.core.types import Rule, ToolCall
+    from harness_builder.skills.extension import SKILL_TOOL_NAMES
+
+    rules = [Rule(**rule.model_dump()) for rule in permissions.rules]
+    denied = []
+    for name in SKILL_TOOL_NAMES:
+        call = ToolCall(id="check", name=name, args={})
+        decision = next(
+            (rule.decision for rule in rules if rule.matches(call)),
+            permissions.default,
+        )
+        if decision != "allow":
+            denied.append(name)
+    return denied
 
 
 def _seeded_library(
@@ -994,6 +1025,8 @@ def skills_propose(
                     results.append((cid, None))
                 except (PromotionError, ConfigError) as exc:
                     results.append((cid, str(exc)))
+                except Exception as exc:  # transport errors vary
+                    results.append((cid, f"{type(exc).__name__}: {exc}"))
             return results
 
         results = anyio.run(propose_all)

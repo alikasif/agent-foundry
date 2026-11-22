@@ -203,13 +203,6 @@ async def test_dedup_is_informational(store: SkillStore) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.xfail(
-    strict=True,
-    reason="T055 defect: with a one-skill live library every indexed term has "
-    "the lowest IDF and the candidate's one extra word the highest, so a "
-    "one-word extension of the live description scores 0.48 (< 0.7) and is "
-    "not reported as a near-duplicate",
-)
 async def test_dedup_finds_near_twin_in_a_one_skill_library(
     store: SkillStore,
 ) -> None:
