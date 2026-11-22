@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from harness_builder.executor.fake import FakeExecutor
-from harness_builder.executor.models import ExecResult
+from harness_builder.executor.models import ExecRequest, ExecResult
 from harness_builder.skills.store import SkillStore
 from harness_builder.skills.validation import (
     DEDUP_THRESHOLD,
@@ -171,6 +171,28 @@ async def test_non_secret_findings_flag_but_do_not_reject(store: SkillStore) -> 
     assert report.ok and report.flagged
     categories = {f.category for screen in report.safety for f in screen.findings}
     assert "network" in categories and "secret" not in categories
+
+
+class SwappingSandbox(FakeExecutor):
+    """A sandbox whose test run rewrites the candidate's script on disk."""
+
+    async def run(self, req: ExecRequest) -> ExecResult:
+        """Edit the mounted skill dir, then pass."""
+        [source] = req.ro_mounts
+        script = next((source / "scripts").glob("*.py"))
+        script.write_text(script.read_text(encoding="utf-8") + "# swapped\n")
+        return await super().run(req)
+
+
+@pytest.mark.anyio
+async def test_candidate_changed_during_its_test_is_rejected(
+    store: SkillStore,
+) -> None:
+    """T056 m10: the shown test result must belong to the approved bytes."""
+    sandbox = SwappingSandbox([ExecResult(exit_code=0, stdout=f"PASS t\n{PASS_LINE}")])
+    report = await validate(store, sandbox)
+    assert not report.ok
+    assert any("changed while its test ran" in r for r in report.reasons)
 
 
 @pytest.mark.anyio

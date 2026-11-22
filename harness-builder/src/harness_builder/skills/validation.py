@@ -242,6 +242,8 @@ class CandidateValidator:
             test = await self._run_test(skill_dir, name)
             if not test.passed:
                 reasons.append(_test_reason(test))
+            if tree_digest(skill_dir) != digest:  # T056 m10
+                reasons.append("candidate changed while its test ran")
         return ValidationReport(
             cid=cid,
             name=name,

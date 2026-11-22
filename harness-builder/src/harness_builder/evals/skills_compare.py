@@ -111,7 +111,9 @@ async def compare_skills(
         else:
             (seeded_root / LIVE_SUBDIR).mkdir(parents=True)
         seeded_skills = sum(
-            1 for path in (seeded_root / LIVE_SUBDIR).iterdir() if path.is_dir()
+            1
+            for path in (seeded_root / LIVE_SUBDIR).iterdir()
+            if path.is_dir() and not path.is_symlink()  # T056 m12
         )
         empty = await runner_for(
             config.model_copy(update={"root": str(empty_root)})
