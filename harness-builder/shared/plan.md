@@ -348,3 +348,8 @@ Other PRD items that remain **ASSUMED** (baked in at these defaults):
   - The extension hook point is a per-run `PromptContributor` protocol in `core/protocols.py`. Its output enters the step-0 messages, so replay fingerprints cover it, and its identity enters `HarnessConfig`.
 - **`on_stop` hooks run only on a proposed final answer**, not on `budget`, `error` or pre_tool `veto` stops. designs.md 1.1 and 5 should be updated to match.
 - **M3 interface stability: GO** after T024 round 2 (B1 and B2 verified at `661da25`).
+
+### 2026-11-22 - T063 (final review), recorded by the architecture reviewer
+- **Project acceptance: NO-GO until the Docker close-out (T063 F1) passes.** The architecture is approved and the project is offline code-complete. PRD AC 5 has never run, because the Docker daemon was down for the whole project.
+- **The real-Docker run is a closing condition.** Every FR-032 screen major deferred from T048 MA1 to T062 R3 was accepted on the premise that "Docker `--network none` plus a read-only mount is the boundary". F1 step 6 re-runs those probes inside a container to verify that premise.
+- **Screen changes need a test in the same commit.** T062 R3's screen rules (`_frozen_importlib*`, `breakpoint`) shipped without tests, although the notes claimed tests (T063 F3). Future rule additions to `safety/screen.py` must land with a `test_safety_screen.py` row in the same commit.
