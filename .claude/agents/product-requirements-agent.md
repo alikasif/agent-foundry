@@ -1,7 +1,7 @@
 ---
 name: "product-requirements-agent"
 description: "Use this agent when the software-team-orchestrator needs to translate user requirements into a structured product requirements document (PRD) before planning and task assignment. This agent asks clarifying functional and non-functional questions and writes `shared/product_requirements.md` with a validated PRD."
-model: sonnet
+model: opus
 memory: project
 ---
 

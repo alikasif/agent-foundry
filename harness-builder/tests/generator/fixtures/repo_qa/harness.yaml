@@ -1,0 +1,26 @@
+schema_version: 1
+name: repo-qa
+description: Answers questions about the bundled repo/ folder.
+prompts:
+  system:
+    file: prompts/system.md
+tools:
+  - module: tools/repo_search.py
+    function: list_files
+    examples:
+      - {}
+  - module: tools/repo_search.py
+    function: search_repo
+    examples:
+      - {query: install}
+  - module: tools/repo_search.py
+    function: read_repo_file
+    examples:
+      - {path: docs/setup.md}
+permissions:
+  rules:
+    - {tool: list_files, decision: allow}
+    - {tool: search_repo, decision: allow}
+    - {tool: read_repo_file, decision: allow}
+evals:
+  file: evals/cases.yaml

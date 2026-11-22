@@ -1,0 +1,28 @@
+- kind: tool
+  id: groups-by-severity
+  tool: triage_by_severity
+  args:
+    csv_text: "id,title,severity,status\nB1,Crash on save,high,open\nB2,Typo,low,closed\nB3,Data loss,Critical,open\nB4,Odd,urgent,open\n"
+  check:
+    type: equals
+    value:
+      critical: [B3]
+      high: [B1]
+      medium: []
+      low: [B2]
+      unknown: [B4]
+- kind: tool
+  id: counts-by-status
+  tool: count_by_status
+  args:
+    csv_text: "id,title,severity,status\nB1,Crash on save,high,open\nB2,Typo,low,Closed\nB3,Data loss,critical,open\n"
+  check: {type: equals, value: {closed: 1, open: 2}}
+- kind: tool
+  id: empty-export
+  tool: count_by_status
+  args: {csv_text: "id,title,severity,status\n"}
+  check: {type: equals, value: {}}
+- kind: task
+  id: worst-first
+  input: "Triage: id,title,severity,status\nB9,Login fails,critical,open\n"
+  check: {type: contains, text: "B9"}

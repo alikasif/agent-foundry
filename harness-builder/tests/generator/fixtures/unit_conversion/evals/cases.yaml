@@ -1,0 +1,24 @@
+- kind: tool
+  id: km-to-m
+  tool: convert_length
+  args: {value: 1, from_unit: km, to_unit: m}
+  check: {type: equals, value: 1000}
+- kind: tool
+  id: mile-to-km
+  tool: convert_length
+  args: {value: 1, from_unit: mi, to_unit: km}
+  check: {type: equals, value: 1.609344}
+- kind: tool
+  id: freezing-in-f
+  tool: convert_temperature
+  args: {value: 0, from_unit: C, to_unit: F}
+  check: {type: equals, value: 32}
+- kind: tool
+  id: boiling-in-k
+  tool: convert_temperature
+  args: {value: 100, from_unit: C, to_unit: K}
+  check: {type: regex, pattern: "^373\\.15$"}
+- kind: task
+  id: marathon
+  input: "How many kilometres is 26.2 miles?"
+  check: {type: contains, text: "42.16"}

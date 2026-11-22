@@ -1,0 +1,11 @@
+schema_version: 1
+name: demo
+description: Minimal ReAct harness with no tools.
+model:
+  name: openai/gpt-4o-mini
+strategy:
+  name: react
+prompts:
+  system: You are a concise assistant.
+budget:
+  max_steps: 5

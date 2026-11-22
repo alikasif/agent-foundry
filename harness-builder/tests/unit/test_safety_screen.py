@@ -1,0 +1,601 @@
+"""Static safety screen (T037; FR-032, FR-054): categories, aliases, secrets.
+
+The screen parses source and never imports or runs it, so every fixture here
+is plain text. Secret fixtures are fake values built at runtime where a
+literal would look like a real credential.
+"""
+
+from pathlib import Path
+
+import pytest
+
+from harness_builder.safety.screen import Finding, ScreenReport, screen
+
+# Fake key-shaped values (never real credentials).
+AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNOP"
+SK_KEY = "sk-" + "abcdefghij0123456789ABCD"
+GH_TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+SLACK_TOKEN = "xoxb-" + "1234567890-abcdef"
+GOOGLE_KEY = "AIza" + "SyA1234567890abcdefghijklmnopqrstu"
+PEM_HEADER = "-----BEGIN RSA " + "PRIVATE KEY-----"
+TOKEN_SECRET = "Zq8xR2mN7pL4vK9wT3yB6cH1dF5gJ0sA"
+HEX_SECRET = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+
+
+def categories(source: str) -> set[str]:
+    """The distinct finding categories of ``source``."""
+    return set(screen(source).categories)
+
+
+# --- clean code -------------------------------------------------------------
+
+
+def test_clean_module_has_no_findings() -> None:
+    source = '''\
+"""Pure helper module."""
+
+import json
+import math
+from pathlib import Path
+
+URL = "https://example.com/api/v1/items"
+ALPHABET = "abcdefghijklmnopqrstuvwxyz"
+NAME = "a_plain_identifier_like_value"
+password_hint = "short"
+api_key_doc = "set the env var before running"
+
+
+def area(r: float) -> float:
+    """Circle area."""
+    return math.pi * r * r
+
+
+def read(path: Path) -> dict:
+    return json.loads(path.read_text())
+'''
+    report = screen(source)
+    assert report.findings == ()
+    assert not report.flagged
+    assert report.categories == frozenset()
+    assert report.path is None
+
+
+# --- per category -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "category"),
+    [
+        ("import socket\n", "network"),
+        ("import urllib.request\n", "network"),
+        ("from urllib.parse import urlparse\n", "network"),
+        ("import requests as r\n", "network"),
+        ("import httpx\n", "network"),
+        ("from aiohttp import ClientSession\n", "network"),
+        ("import subprocess\n", "subprocess"),
+        ("import subprocess as sp\n", "subprocess"),
+        ("from subprocess import run\n", "subprocess"),
+        ("import os\nos.system('ls')\n", "subprocess"),
+        ("import os\nos.popen('ls')\n", "subprocess"),
+        ("import os\nos.execv('/bin/ls', ['ls'])\n", "subprocess"),
+        ("import os\nos.spawnl(0, 'x')\n", "subprocess"),
+        ("import os\nos.posix_spawn('x', [], {})\n", "subprocess"),
+        ("from os import system as s\ns('ls')\n", "subprocess"),
+        ("import os as o\no.system('ls')\n", "subprocess"),
+        ("import os\nos.remove('f')\n", "delete"),
+        ("import os\nos.unlink('f')\n", "delete"),
+        ("import os\nos.rmdir('d')\n", "delete"),
+        ("import os\nos.removedirs('d')\n", "delete"),
+        ("import shutil\nshutil.rmtree('d')\n", "delete"),
+        ("from shutil import rmtree as nuke\nnuke('d')\n", "delete"),
+        ("from pathlib import Path\nPath('f').unlink()\n", "delete"),
+        ("p = something()\np.rmdir()\n", "delete"),
+        ("eval('1+1')\n", "dynamic_exec"),
+        ("exec('x = 1')\n", "dynamic_exec"),
+        ("__import__('json')\n", "dynamic_exec"),
+        ("import builtins\nbuiltins.eval('1')\n", "dynamic_exec"),
+        ("import importlib\nimportlib.import_module('json')\n", "dynamic_exec"),
+        (
+            "from importlib import import_module\nimport_module('json')\n",
+            "dynamic_exec",
+        ),
+        (
+            "import importlib.util\n"
+            "s = importlib.util.spec_from_file_location('h', 'h.py')\n",
+            "dynamic_exec",
+        ),
+        (
+            "from importlib.util import module_from_spec\nmodule_from_spec(s)\n",
+            "dynamic_exec",
+        ),
+        ("m = load()\ns.loader.exec_module(m)\n", "dynamic_exec"),
+        (
+            "from importlib.machinery import SourceFileLoader\n"
+            "SourceFileLoader('h', 'h.py').load_module()\n",
+            "dynamic_exec",
+        ),
+        ("compile('x = 1', 'f', 'exec')\n", "dynamic_exec"),
+        ("import types\ntypes.FunctionType(code, {})\n", "dynamic_exec"),
+        ("import pickle\npickle.loads(b'')\n", "dynamic_exec"),
+        ("import marshal\nmarshal.loads(b'')\n", "dynamic_exec"),
+    ],
+)
+def test_each_category_is_detected(source: str, category: str) -> None:
+    report = screen(source)
+    assert report.flagged
+    assert category in report.categories, report.findings
+
+
+def test_import_is_flagged_once_per_import_not_per_call() -> None:
+    source = "import socket\ns = socket.socket()\ns.connect(('h', 1))\n"
+    findings = screen(source).findings
+    assert findings == (Finding("network", 1, "import socket"),)
+
+
+def test_dynamic_import_of_a_risky_module_yields_both_categories() -> None:
+    report = screen("mod = __import__('socket')\n")
+    assert report.categories == frozenset({"dynamic_exec", "network"})
+    lines = {f.line for f in report.findings}
+    assert lines == {1}
+
+
+def test_dynamic_import_of_subprocess_via_importlib() -> None:
+    source = "import importlib\nm = importlib.import_module('subprocess')\n"
+    assert categories(source) == {"dynamic_exec", "subprocess"}
+
+
+def test_relative_import_named_like_a_risky_module_is_only_a_relative_import() -> None:
+    """Not network (it is the sibling), but any relative import is dynamic_exec."""
+    source = "from . import socket\nfrom .requests import get\n"
+    assert categories(source) == {"dynamic_exec"}
+
+
+def test_unrelated_attribute_calls_are_not_flagged() -> None:
+    source = "import os\nos.path.join('a', 'b')\nos.getcwd()\nx.remove(1)\n"
+    assert screen(source).findings == ()
+
+
+def test_delete_via_os_is_reported_once_not_also_as_method() -> None:
+    findings = screen("import os\nos.unlink('f')\n").findings
+    assert [f.category for f in findings] == ["delete"]
+
+
+# --- secrets ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value", [AWS_KEY, SK_KEY, GH_TOKEN, SLACK_TOKEN, GOOGLE_KEY, PEM_HEADER]
+)
+def test_key_patterns_are_secrets_and_redacted(value: str) -> None:
+    report = screen(f"VALUE = {value!r}\n")
+    assert report.categories == frozenset({"secret"})
+    for finding in report.findings:
+        assert value not in finding.detail
+        assert f"({len(value)} chars)" in finding.detail
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "api_key = 'hunter22hunter'\n",
+        "MY_SECRET: str = 'abcdefgh'\n",
+        "self.token = 'abcdefgh1'\n",
+        "connect(password='p4ssw0rd!')\n",
+        "config = {'credential': 'abcdefghij'}\n",
+        "PASSWD = 'abcdefgh'\n",
+    ],
+)
+def test_literals_assigned_to_secret_names_are_flagged(source: str) -> None:
+    report = screen(source)
+    assert report.categories == frozenset({"secret"})
+    assert "literal assigned to" in report.findings[0].detail
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "api_key = 'short'\n",  # under 8 chars
+        "token = 'has white space'\n",
+        "password = ''\n",
+        "token = 12345678901\n",  # not a string
+        "token = os.environ['TOKEN']\n",  # not a literal
+        "description = 'abcdefghij'\n",  # not a secret-looking name
+    ],
+)
+def test_named_secret_rule_skips_non_secrets(source: str) -> None:
+    assert screen(source).findings == ()
+
+
+def test_named_secret_detail_never_contains_the_value() -> None:
+    value = "hunter22hunter"
+    [finding] = screen(f"api_key = {value!r}\n").findings
+    assert value not in finding.detail
+    assert finding.detail.startswith("literal assigned to 'api_key'")
+    assert "'hunt...' (14 chars)" in finding.detail
+
+
+@pytest.mark.parametrize("value", [TOKEN_SECRET, HEX_SECRET])
+def test_high_entropy_literals_are_secrets(value: str) -> None:
+    [finding] = screen(f"X = {value!r}\n").findings
+    assert finding.category == "secret"
+    assert finding.detail.startswith("high-entropy literal")
+    assert value not in finding.detail
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://Zq8xR2mN7pL4vK9wT3yB6cH1dF5gJ0sA.example.com",  # URL
+        "abcdefghijklmnopqrstuvwxyz",  # letters only
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",  # low entropy
+        "0000000000000000000000000000000000000000",  # low-entropy hex
+        "short1A",
+        "Zq8xR2mN7pL4 vK9wT3yB6cH1dF5gJ0sA",  # whitespace
+    ],
+)
+def test_low_entropy_or_url_literals_are_not_secrets(value: str) -> None:
+    assert screen(f"X = {value!r}\n").findings == ()
+
+
+def test_secret_rules_do_not_double_report_one_literal() -> None:
+    # A key pattern wins; the high-entropy rule is not also reported.
+    findings = screen(f"X = {SK_KEY!r}\n").findings
+    assert len(findings) == 1
+
+
+# --- report shape -----------------------------------------------------------
+
+
+def test_findings_are_deduplicated_and_sorted_by_line_then_category() -> None:
+    source = (
+        "import os\n"
+        "os.system('a'); os.system('a')\n"
+        "eval(__import__('socket'))\n"
+        "import socket\n"
+    )
+    findings = screen(source).findings
+    assert findings == tuple(sorted(set(findings), key=lambda f: (f.line, f.category)))
+    assert len(findings) == len(set(findings))
+    assert [f.line for f in findings] == sorted(f.line for f in findings)
+    line3 = [f.category for f in findings if f.line == 3]
+    assert line3 == sorted(line3)
+    assert sum(f == Finding("subprocess", 2, "call os.system()") for f in findings) == 1
+
+
+def test_lines_are_one_based() -> None:
+    [finding] = screen("\n\nimport subprocess\n").findings
+    assert finding.line == 3
+
+
+def test_report_properties() -> None:
+    report = ScreenReport(
+        findings=(Finding("network", 1, "x"), Finding("network", 2, "y"))
+    )
+    assert report.flagged
+    assert report.categories == frozenset({"network"})
+
+
+# --- inputs -----------------------------------------------------------------
+
+
+def test_path_input_is_read_and_kept(tmp_path: Path) -> None:
+    module = tmp_path / "tool.py"
+    module.write_text("x = 1\nimport subprocess\n", encoding="utf-8")
+    report = screen(module)
+    assert report.path == module
+    assert report.findings == (Finding("subprocess", 2, "import subprocess"),)
+
+
+def test_str_input_is_always_source_never_a_path(tmp_path: Path) -> None:
+    module = tmp_path / "tool.py"
+    module.write_text("import subprocess\n", encoding="utf-8")
+    # The path text parses as an expression only if quoted; as raw source it
+    # is a syntax error, proving the str was not opened as a file.
+    with pytest.raises(SyntaxError):
+        screen(str(module))
+    assert screen(repr(str(module))).findings == ()
+
+
+def test_path_input_is_utf8(tmp_path: Path) -> None:
+    module = tmp_path / "tool.py"
+    module.write_text("GREETING = 'héllo wörld'\n", encoding="utf-8")
+    assert screen(module).findings == ()
+
+
+def test_syntax_error_raises() -> None:
+    with pytest.raises(SyntaxError):
+        screen("def broken(:\n")
+
+
+def test_missing_file_raises_os_error(tmp_path: Path) -> None:
+    with pytest.raises(OSError):
+        screen(tmp_path / "absent.py")
+
+
+def test_screen_never_executes_the_source(tmp_path: Path) -> None:
+    marker = tmp_path / "ran.txt"
+    source = f"open({str(marker)!r}, 'w').write('x')\nraise SystemExit(3)\n"
+    screen(source)
+    assert not marker.exists()
+
+
+def test_generation_report_shape_for_a_flagged_tool(tmp_path: Path) -> None:
+    """A realistic generated tool: every risky construct is listed (FR-032)."""
+    module = tmp_path / "fetch.py"
+    module.write_text(
+        "import os\n"
+        "import requests\n"
+        "API_KEY = 'abcd1234efgh'\n"
+        "\n"
+        "def fetch(url: str) -> str:\n"
+        "    os.remove('/tmp/cache')\n"
+        "    return requests.get(url).text\n",
+        encoding="utf-8",
+    )
+    report = screen(module)
+    assert [(f.category, f.line) for f in report.findings] == [
+        ("network", 2),
+        ("secret", 3),
+        ("delete", 6),
+    ]
+    assert all(f.detail for f in report.findings)
+
+
+# --- review T046 MJ1: wider stdlib coverage ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "category"),
+    [
+        ("import http.client\n", "network"),
+        ("import http.server\n", "network"),
+        ("from http import client\n", "network"),
+        ("from http.client import HTTPSConnection\n", "network"),
+        ("import ftplib\n", "network"),
+        ("import smtplib\n", "network"),
+        ("import poplib\n", "network"),
+        ("import imaplib\n", "network"),
+        ("import telnetlib\n", "network"),
+        ("import ssl\n", "network"),
+        ("import urllib3\n", "network"),
+        ("import xmlrpc.client\n", "network"),
+        ("import websocket\n", "network"),
+        ("import websockets\n", "network"),
+        ("import asyncio\nasyncio.open_connection('h', 1)\n", "network"),
+        ("from asyncio import start_server\nstart_server(f)\n", "network"),
+        ("import pty\n", "subprocess"),
+        ("import multiprocessing\n", "subprocess"),
+        ("import os\nos.fork()\n", "subprocess"),
+        ("import os\nos.forkpty()\n", "subprocess"),
+        ("import asyncio\nasyncio.create_subprocess_exec('ls')\n", "subprocess"),
+        ("import asyncio\nasyncio.create_subprocess_shell('ls')\n", "subprocess"),
+        ("import runpy\nrunpy.run_path('x.py')\n", "dynamic_exec"),
+        ("import runpy\nrunpy.run_module('x')\n", "dynamic_exec"),
+        ("import ctypes\n", "dynamic_exec"),
+    ],
+)
+def test_extended_stdlib_apis_are_flagged(source: str, category: str) -> None:
+    assert category in categories(source)
+
+
+def test_plain_http_status_import_is_not_network() -> None:
+    assert categories("from http import HTTPStatus\n") == set()
+
+
+# --- import-system mutation (T046 MJ5b) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib.machinery as m\nm.SOURCE_SUFFIXES.append('.txt')\n",
+        "import importlib.machinery\nx = importlib.machinery.BYTECODE_SUFFIXES\n",
+        "from importlib import machinery\nmachinery.EXTENSION_SUFFIXES.clear()\n",
+        "from importlib.machinery import SOURCE_SUFFIXES\n",
+        "import sys\nsys.meta_path.insert(0, object())\n",
+        "import sys\nsys.path_hooks.append(object())\n",
+        "import sys\nsys.path_importer_cache.clear()\n",
+        "import sys\nsys.path.insert(0, 'x')\n",
+        "import sys\nsys.path.append('x')\n",
+        "import sys\nsys.path.extend(['x'])\n",
+        "import sys\nsys.path = ['x']\n",
+        "import sys\nsys.path += ['x']\n",
+        "import sys\nsys.path[0] = 'x'\n",
+        "import sys as s\ns.path.insert(0, 'x')\n",
+        "from sys import path\npath.insert(0, 'x')\n",
+    ],
+)
+def test_import_system_mutation_is_dynamic_exec(source: str) -> None:
+    assert "dynamic_exec" in categories(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import sys\nprint(sys.version, sys.argv, sys.modules)\n",
+        "import os\nos.path.join('a', 'b')\n",
+        "import sys\nsys.modules.get('json')\n",
+        "import pathlib\npathlib.Path('x').parent\n",
+    ],
+)
+def test_unrelated_sys_and_path_attributes_stay_clean(source: str) -> None:
+    assert categories(source) == set()
+
+
+# --- T048 MA1: plain-text sys.path and site forms ----------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import sys\nfirst = sys.path[0]\n",
+        "import sys\nprint(list(sys.path))\n",
+        "import sys\np = sys.path\np.insert(0, d)\nimport helper\n",
+        "import sys\nlist.insert(sys.path, 0, d)\nimport helper\n",
+        "import sys\n[sys.path][0].insert(0, d)\n",
+        "from sys import path\n",
+        "from sys import path as p\np.insert(0, d)\n",
+        "import site\nsite.addsitedir(d)\nimport helper\n",
+        "import site as s\ns.addsitedir(d)\n",
+        "from site import addsitedir\n",
+        "import sitecustomize\n",
+        "import usercustomize\n",
+    ],
+)
+def test_sys_path_reference_and_site_use_are_dynamic_exec(source: str) -> None:
+    assert categories(source) == {"dynamic_exec"}
+
+
+# --- T062 MJ1/MJ2: sibling reach and exec-of-string stdlib modules -------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from . import risky\n",
+        "from .pkg import risky\n",
+        "__path__ = ['x']\n",
+        "__package__ = __name__\n",
+        "__spec__ = None\n",
+        "import timeit\ntimeit.timeit(open('d.txt').read(), number=1)\n",
+        "import code\ncode.InteractiveInterpreter().runsource(src, symbol='exec')\n",
+        "import codeop\nf.__code__ = codeop.compile_command(src, symbol='exec')\n",
+        "import zipimport\nf.__code__ = zipimport.zipimporter('d.txt').get_code('m')\n",
+        "import cProfile\ncProfile.run(src)\n",
+        "import profile\nprofile.run(src)\n",
+        "import pdb\npdb.run(src)\n",
+        "import bdb\n",
+        "import trace\ntrace.Trace().run(src)\n",
+        "import doctest\ndoctest.run_docstring_examples(src, {})\n",
+        "from timeit import timeit\n",
+        "from pdb import run\n",
+        "import importlib._bootstrap\n",
+        "import importlib._bootstrap_external\n",
+        "from importlib._bootstrap import _load\n",
+        "from importlib import _bootstrap\n",
+        "import importlib\nimportlib._bootstrap._load(spec)\n",
+        "import logging.config\nlogging.config.fileConfig('x.ini')\n",
+        "from logging.config import fileConfig\n",
+        "from logging import config\n",
+        "import logging\nlogging.config.fileConfig('x.ini')\n",
+    ],
+)
+def test_sibling_reach_and_exec_of_string_modules_are_dynamic_exec(
+    source: str,
+) -> None:
+    assert categories(source) == {"dynamic_exec"}
+
+
+def test_plain_logging_and_importlib_metadata_stay_clean() -> None:
+    """Negative control: only ``logging.config`` and ``importlib._bootstrap*``."""
+    source = (
+        "import logging\nimport importlib.metadata\nfrom importlib import resources\n"
+        "log = logging.getLogger(__name__)\npath = 'a'\npackage = 1\n"
+    )
+    assert categories(source) == set()
+
+
+# --- T062 round 2: code objects from files, loader classes, more modules -------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib.abc\nimportlib.abc.InspectLoader.source_to_code(t)\n",
+        "from importlib.abc import InspectLoader as L\nL.source_to_code(t)\n",
+        "from importlib import abc\n",
+        "loader.get_code('n')\n",
+        "loader.source_to_code(text)\n",
+        "loader.get_source('n')\n",
+        (
+            "import importlib.machinery as m\n"
+            "finder = m.FileFinder(d, (m.SourceFileLoader, ['.txt']))\n"
+            "f.__code__ = finder.find_spec('n').loader.get_code('n')\n"
+        ),
+        "import importlib.machinery\nx = importlib.machinery.SourceFileLoader\n",
+        "import importlib\nx = importlib.machinery.FileFinder\n",
+        "from importlib.machinery import FileFinder\n",
+        "from importlib.machinery import ExtensionFileLoader as E\n",
+        "import importlib.machinery as m\nx = [m.SourcelessFileLoader]\n",
+    ],
+)
+def test_code_object_from_file_apis_are_dynamic_exec(source: str) -> None:
+    assert categories(source) == {"dynamic_exec"}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import posix\nposix.system('x')\n",
+        "import nt\nnt.system('x')\n",
+        "import _posixsubprocess\n",
+        "from posix import system\n",
+    ],
+)
+def test_os_module_aliases_are_subprocess(source: str) -> None:
+    assert "subprocess" in categories(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import typing\ntyping.ForwardRef(s)._evaluate(g, l, frozenset())\n",
+        "import pkgutil\npkgutil.resolve_name('os:system')\n",
+        "import pydoc\npydoc.pipepager(text, 'cmd')\n",
+        "import pydoc\npydoc.locate('os.system')\n",
+        "import webbrowser\nwebbrowser.get('cmd %s').open(u)\n",
+        "import _ctypes\n_ctypes.dlopen('x.dat')\n",
+        "import sqlite3\nsqlite3.connect(':memory:').load_extension('x.dat')\n",
+        "import sqlite3\nconn.enable_load_extension(True)\n",
+    ],
+)
+def test_further_string_exec_and_native_load_forms_are_dynamic_exec(
+    source: str,
+) -> None:
+    assert "dynamic_exec" in categories(source)
+
+
+def test_common_clean_code_stays_clean() -> None:
+    """Negative control for the round-2 rules."""
+    source = (
+        "import importlib.metadata\nimport inspect\nimport pathlib\nimport typing\n"
+        "import sqlite3\nimport os.path\n"
+        "def f(x: typing.Any) -> str:\n"
+        "    hints = typing.get_type_hints(f)\n"
+        "    conn = sqlite3.connect(':memory:')\n"
+        "    return str(pathlib.Path('a') / 'b') + str(hints) + str(conn)\n"
+    )
+    assert categories(source) == set()
+
+
+# --- T062 round 3 follow-up (F3): frozen importlib and breakpoint --------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import _frozen_importlib\n",
+        "import _frozen_importlib_external\n",
+        "import _frozen_importlib as f\nf._load(spec)\n",
+        "import _frozen_importlib_external as f\nf.SourceFileLoader\n",
+        "from _frozen_importlib import _load\n",
+        "from _frozen_importlib_external import SourceFileLoader\n",
+        "breakpoint()\n",
+        "import builtins\nbuiltins.breakpoint()\n",
+        "import sys\nsys.breakpointhook()\n",
+    ],
+)
+def test_frozen_importlib_and_breakpoint_are_dynamic_exec(source: str) -> None:
+    assert "dynamic_exec" in categories(source)
+
+
+def test_benign_code_without_frozen_importlib_or_breakpoint_stays_clean() -> None:
+    """Negative control: similar names that are not the flagged APIs."""
+    source = (
+        "import builtins\nimport sys\n"
+        "def breakpoints(xs: list[int]) -> list[int]:\n"
+        "    return [x for x in xs if x > 0]\n"
+        "total = len(breakpoints([1, 2])) + builtins.len([]) + len(sys.argv)\n"
+        "hook = 'breakpoint'\n"
+    )
+    assert categories(source) == set()

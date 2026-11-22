@@ -38,23 +38,24 @@ software-team-orchestrator
 
 Core agents
 
-- `software-team-orchestrator`: Lead orchestrator. Runs 4 phases (requirements → design → planning → execution). All `shared/` files go inside `<project_dir>/shared/`.
-- `product-requirements-agent`: Asks clarifying questions, writes `<project_dir>/shared/prd.md`, prints `PRD_COMPLETE`. Invoked by orchestrator Phase 1.
-- `design-architecture-agent`: Writes `<project_dir>/shared/designs.md`, prints `DESIGN_COMPLETE`. Invoked by orchestrator Phase 2 only for complex/multi-service scope.
-- `arch-reviewer`: Dispatched by ralph for `architecture_reviewer` tasks. Reviews overall design. Writes results to `<project_dir>/shared/reviews/<task_id>_arch_review.md`.
-- `planning-subagent`: Researches codebase + PRD, **writes** `<project_dir>/shared/plan.md` and `<project_dir>/shared/task_list.json`. Invoked by orchestrator Phase 3.
-- `ralph-execution-engine`: Execution loop. Reads `<project_dir>/shared/task_list.json`, dispatches specialists in parallel, resolves dependencies, writes `<project_dir>/shared/execution_summary.md`, prints `RALPH_COMPLETE`.
-- `project-scaffolder`: Dispatched by ralph for `project_structure` tasks. Creates directories and stub configs. Local commits only — no git push.
-- `python-backend-coder`: Dispatched by ralph for `python_coder` tasks. Implements Python source files. Local commits only.
-- `python-test-runner`: Dispatched by ralph for `python_test` tasks. Writes and runs pytest tests (anyio for async).
-- `backend-code-reviewer`: Dispatched by ralph for `backend_reviewer` tasks. Reviews python_coder output. Writes results to `<project_dir>/shared/reviews/<task_id>_review.md`.
-- `docs-writer`: Dispatched by ralph for `documentation` tasks. Produces READMEs, API docs, user guides.
+- `software-team-orchestrator` (opus): Lead orchestrator. Runs 4 phases (requirements → design → planning → execution). All `shared/` files go inside `<project_dir>/shared/`.
+- `product-requirements-agent` (opus): Asks clarifying questions, writes `<project_dir>/shared/prd.md`, prints `PRD_COMPLETE`. Invoked by orchestrator Phase 1.
+- `design-architecture-agent` (opus): Writes `<project_dir>/shared/designs.md`, prints `DESIGN_COMPLETE`. Invoked by orchestrator Phase 2 only for complex/multi-service scope.
+- `arch-reviewer` (opus): Dispatched by ralph for `architecture_reviewer` tasks. Reviews overall design. Writes results to `<project_dir>/shared/reviews/<task_id>_arch_review.md`.
+- `planning-subagent` (opus): Researches codebase + PRD, **writes** `<project_dir>/shared/plan.md` and `<project_dir>/shared/task_list.json`. Invoked by orchestrator Phase 3.
+- `ralph-execution-engine` (sonnet): Execution loop. Reads `<project_dir>/shared/task_list.json`, dispatches specialists in parallel, resolves dependencies, writes `<project_dir>/shared/execution_summary.md`, prints `RALPH_COMPLETE`.
+- `project-scaffolder` (sonnet): Dispatched by ralph for `project_structure` tasks. Creates directories and stub configs. Local commits only — no git push.
+- `python-backend-coder` (sonnet): Dispatched by ralph for `python_coder` tasks. Implements Python source files. Local commits only.
+- `python-test-runner` (sonnet): Dispatched by ralph for `python_test` tasks. Writes and runs pytest tests (anyio for async).
+- `backend-code-reviewer` (opus): Dispatched by ralph for `backend_reviewer` tasks. Reviews python_coder output. Writes results to `<project_dir>/shared/reviews/<task_id>_review.md`.
+- `docs-writer` (sonnet): Dispatched by ralph for `documentation` tasks. Produces READMEs, API docs, user guides.
 
 Notes
 
 - **`git-remote-pusher` is excluded from all operations.** Never invoke it. Never mention it. Local commits are the only git operations allowed.
 - All coordination files (`prd.md`, `designs.md`, `plan.md`, `task_list.json`, `learnings.md`, `execution_summary.md`, `reviews/`) live under `<project_dir>/shared/` — always project-local, never in a global directory.
 - Agent definitions are stored in `.claude/agents/` as markdown files with YAML frontmatter.
+- Model routing rule lives in `.claude/skills/model-router/SKILL.md`; keep each agent's `model:` line consistent with it.
 - If you add or change agents, update `.claude/agents/<agent>.md` and this section in `CLAUDE.md`.
 
 ## Agent skills

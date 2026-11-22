@@ -1,0 +1,23 @@
+# HarnessSpec v1 skeleton. Replace every <...> placeholder.
+schema_version: 1
+name: <harness-name>            # lowercase letters, digits and dashes
+description: <one sentence: what the harness does>
+strategy:
+  name: react                   # react | codeact (codeact needs builtin run_code)
+prompts:
+  system:
+    file: prompts/system.md
+tools:
+  - module: tools/<module>.py   # relative POSIX path inside the harness dir
+    function: <function_name>   # top-level def, every parameter annotated
+    examples:                   # at least one args object per tool
+      - {<arg>: <value>}
+    # runtime: docker           # default; generated code runs only in Docker
+permissions:
+  default: deny
+  rules:
+    - {tool: <function_name>, decision: allow}
+budget:
+  max_steps: 10
+evals:
+  file: evals/cases.yaml

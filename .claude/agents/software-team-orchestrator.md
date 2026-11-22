@@ -1,7 +1,7 @@
 ---
 name: "software-team-orchestrator"
 description: "Use this agent when a user has a software development requirement that needs to be broken down, planned, and executed by a coordinated team of specialist agents. This includes new features, full application builds, API development, database schema design, frontend implementation, documentation, and multi-layer tasks spanning database, backend, and frontend layers.\\n\\n<example>\\nContext: The user wants to build a new REST API with a database and frontend dashboard.\\nuser: \"Build me a bookmark organizer app with a FastAPI backend, SQLite database, and a React frontend\"\\nassistant: \"I'll use the software-team-orchestrator agent to analyze this requirement, plan the implementation, and coordinate the specialist agents.\"\\n<commentary>\\nThis is a multi-layer software development task spanning database, backend, and frontend. Launch the software-team-orchestrator agent to research the codebase, create a plan, get user approval, and coordinate all specialist agents.\\n</commentary>\\n</example>\\n\\n<example>\\nContext: The user wants to add a new feature to an existing Python service.\\nuser: \"Add pagination support to the bookmarks API endpoint\"\\nassistant: \"Let me launch the software-team-orchestrator to analyze the requirement and coordinate the right agents.\"\\n<commentary>\\nEven for a focused backend task, the orchestrator should be used to identify which agents are relevant (likely python-backend-coder, backend-code-reviewer, python-test-runner) and create a plan before execution.\\n</commentary>\\n</example>"
-model: sonnet
+model: opus
 memory: project
 ---
 
