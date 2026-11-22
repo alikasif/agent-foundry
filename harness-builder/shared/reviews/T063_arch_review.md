@@ -261,3 +261,32 @@ passed. The current figure is 2446 passed and 52 skipped. Refresh it after F1.
    approvers). **Yes.**
 7. Duplicated logic: none at the structural level. The screen's name lists are the only
    repeated-pattern area (F4). **Acceptable.**
+
+---
+
+## Addendum (2026-11-22): F1 closed, acceptance condition met
+
+Recorded by the lead after the review, not a re-review. The verdict above is left as written.
+
+**F1 (Docker close-out) is closed.** Commit `8a00660` fixed a real image defect that only real Docker
+could reveal: `COPY --chmod=0644` also set `/opt/hb` to 0644, so the non-root sandbox user could not
+open `hb_entry.py` (38 of 42 docker tests failed). Fix: `RUN install -d -m 0755 /opt/hb`.
+- `pytest -m docker`: 42 passed, 1 skipped (live stage C), 0 failed. Re-run independently by the lead
+  on Docker engine 29.9.3 (the coder ran it on 29.5.3). No isolation assertion was changed.
+- Six bypass payloads (including the screen-clean ones) were run inside the real container:
+  all executed, all contained (no network, read-only `/tools` and `/etc`, nothing on the host).
+  The T048 MA1 probe scripts were not re-run in the container.
+- AC 5 is now evidenced on Windows/Docker Desktop. POSIX behaviour (uid mapping, fcntl lock) is unverified.
+
+**F3 closed** (commit `8cef52f`): the R3-MJ1/MJ2 screen tests now exist. F5 closed (suite counts refreshed).
+
+**First live-LLM evidence (partial, F2 not closed).** With a real model: `harness run` answered
+correctly; `harness new` generated and validated a unit-converter harness on attempt 1 (tool
+runtime Docker); the generated harness answered a real task correctly; `harness eval --live --runs 1`
+passed 19 of 19 cases (25,368 tokens, cost reported `unknown`). One domain, one run each.
+Still **not measured**: OQ-15 / skills-on vs skills-off (`--skills-compare --live`), repeated runs,
+rubric variance, other domains.
+
+**Still accepted as residuals:** F4 (builtin aliasing such as `e = exec; e(s)` screens clean; contained
+by Docker), case-insensitive Windows bind mounts, two unexplained one-off flakes
+(`test_concurrent_writers_do_not_fail`, `test_findings_are_deduplicated_and_sorted_by_line_then_category`).

@@ -388,8 +388,11 @@ Setup: a copy of `tests/generator/fixtures/unit_conversion`. `tools/units.py` ge
 
 ```python
 import importlib.machinery as m, sys
-m.SOURCE_SUFFIXES.append(".txt"); sys.path_importer_cache.clear()
-sys.path.insert(0, str(Path(__file__).parent)); import helper   # loads tools/helper.txt
+
+m.SOURCE_SUFFIXES.append(".txt")
+sys.path_importer_cache.clear()
+sys.path.insert(0, str(Path(__file__).parent))
+import helper  # loads tools/helper.txt
 ```
 
 The screen reports nothing for this module. `unreferenced_py_files` only globs `*.py`, so `helper.txt` is never screened. Round 2 asked for "a non-`.py` file never matters" as a test, and this vector defeats that. It is plain text, needs no `getattr` trick, and is not a documented limit.

@@ -9,7 +9,7 @@
       "FR-061"
     ],
     "assigned_to": "project_structure",
-    "status": "in_progress",
+    "status": "done",
     "blocked_by": [],
     "output_files": [
       "harness-builder/pyproject.toml",
@@ -50,7 +50,7 @@
       "FR-045"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T001"
     ],
@@ -85,7 +85,7 @@
       "FR-009"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -117,7 +117,7 @@
       "FR-006"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -144,7 +144,7 @@
       "FR-008"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -171,7 +171,7 @@
       "FR-009"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -197,7 +197,7 @@
       "FR-010"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -223,7 +223,7 @@
       "FR-007"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -254,7 +254,7 @@
       "FR-014"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -284,7 +284,7 @@
       "FR-003"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -313,7 +313,7 @@
       "FR-016"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T003",
       "T004",
@@ -349,7 +349,7 @@
       "FR-011"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T011"
     ],
@@ -376,7 +376,7 @@
       "FR-013"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T011"
     ],
@@ -403,7 +403,7 @@
       "FR-030"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T012"
     ],
@@ -434,7 +434,7 @@
       "FR-016"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T013",
       "T014"
@@ -465,7 +465,7 @@
       "FR-012"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002",
       "T003",
@@ -499,7 +499,7 @@
       "FR-010"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T005",
       "T006",
@@ -530,7 +530,7 @@
       "FR-014"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T009",
       "T010"
@@ -562,7 +562,7 @@
       "FR-016"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T011",
       "T012",
@@ -591,7 +591,7 @@
       "FR-013"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T015"
     ],
@@ -625,7 +625,7 @@
       "FR-015"
     ],
     "assigned_to": "backend_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002",
       "T003",
@@ -657,7 +657,7 @@
       "FR-016"
     ],
     "assigned_to": "backend_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T011",
       "T012",
@@ -681,7 +681,7 @@
       "FR-060"
     ],
     "assigned_to": "documentation",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T015"
     ],
@@ -708,7 +708,7 @@
       "FR-061"
     ],
     "assigned_to": "architecture_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T016",
       "T017",
@@ -736,7 +736,7 @@
       "FR-044"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -765,7 +765,7 @@
       "FR-045"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T001"
     ],
@@ -797,7 +797,7 @@
       "FR-045"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T025",
       "T026"
@@ -826,7 +826,7 @@
       "FR-045"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T027",
       "T014"
@@ -855,7 +855,7 @@
       "FR-061"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T010"
     ],
@@ -884,7 +884,7 @@
       "FR-044"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T025",
       "T015"
@@ -915,7 +915,7 @@
       "FR-045"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T027",
       "T028",
@@ -949,7 +949,7 @@
       "FR-046"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T027",
       "T028"
@@ -976,7 +976,7 @@
       "FR-061"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T028",
       "T029",
@@ -1009,7 +1009,7 @@
       "FR-045"
     ],
     "assigned_to": "backend_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T025",
       "T026",
@@ -1035,7 +1035,7 @@
       "FR-060"
     ],
     "assigned_to": "documentation",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T028",
       "T029",
@@ -1064,7 +1064,7 @@
       "FR-061"
     ],
     "assigned_to": "architecture_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T024",
       "T031",
@@ -1090,7 +1090,7 @@
       "FR-054"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T002"
     ],
@@ -1115,7 +1115,7 @@
       "FR-033"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T024",
       "T036"
@@ -1145,7 +1145,7 @@
       "FR-005"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T036"
     ],
@@ -1173,7 +1173,7 @@
       "FR-016"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T039",
       "T028"
@@ -1204,7 +1204,7 @@
       "FR-034"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T037",
       "T038",
@@ -1234,7 +1234,7 @@
       "FR-034"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T041"
     ],
@@ -1264,7 +1264,7 @@
       "FR-033"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T042",
       "T030"
@@ -1294,7 +1294,7 @@
       "FR-005"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T037",
       "T038",
@@ -1325,7 +1325,7 @@
       "FR-035"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T041",
       "T042",
@@ -1355,7 +1355,7 @@
       "FR-035"
     ],
     "assigned_to": "backend_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T037",
       "T038",
@@ -1383,7 +1383,7 @@
       "FR-035"
     ],
     "assigned_to": "documentation",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T043",
       "T035"
@@ -1409,7 +1409,7 @@
       "FR-034"
     ],
     "assigned_to": "architecture_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T044",
       "T045",
@@ -1434,7 +1434,7 @@
       "FR-061"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T024",
       "T036"
@@ -1462,7 +1462,7 @@
       "FR-051"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T049"
     ],
@@ -1488,7 +1488,7 @@
       "FR-052"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T050",
       "T040"
@@ -1517,7 +1517,7 @@
       "FR-055"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T049",
       "T050",
@@ -1548,7 +1548,7 @@
       "FR-057"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T051",
       "T052",
@@ -1581,7 +1581,7 @@
       "FR-052"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T049",
       "T050",
@@ -1611,7 +1611,7 @@
       "FR-057"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T052",
       "T053"
@@ -1644,7 +1644,7 @@
       "FR-057"
     ],
     "assigned_to": "backend_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T049",
       "T050",
@@ -1670,7 +1670,7 @@
       "FR-055"
     ],
     "assigned_to": "documentation",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T053",
       "T047"
@@ -1695,7 +1695,7 @@
       "FR-061"
     ],
     "assigned_to": "architecture_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T054",
       "T055",
@@ -1712,14 +1712,14 @@
   {
     "id": "T059",
     "title": "[M5] Hardening pass: repo-wide lint/types, review follow-ups, Windows checks",
-    "description": "Resolve open minor/major findings from shared/reviews/ not yet addressed; make `uv run ruff format --check .`, `uv run ruff check .` and `uv run pyrefly check` clean repo-wide; verify Windows bind-mount behaviour and, if T032 recorded latency over the 3 s target, implement the U8 fallback (docker run --rm with exit-137 OOM inference) behind SandboxConfig and record it; finalize .env.example; confirm `harness --help` cold start does not import ADK/openai-agents. Do not implement option B sibling refactors (U2/U3) unless the user approved them. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T059` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push.",
+    "description": "Resolve open minor/major findings from shared/reviews/ not yet addressed; make `uv run ruff format --check .`, `uv run ruff check .` and `uv run pyrefly check` clean repo-wide; verify Windows bind-mount behaviour and, if T032 recorded latency over the 3 s target, implement the U8 fallback (docker run --rm with exit-137 OOM inference) behind SandboxConfig and record it; finalize .env.example; confirm `harness --help` cold start does not import ADK/openai-agents. Do not implement option B sibling refactors (U2/U3) unless the user approved them. Conventions: paths are relative to D:\\GitHub\\agent-foundry\\harness-builder\\; uv only (never pip; do NOT run `uv add` - all deps were added in T001, record any missing dep in implementation-notes and ask via review instead); type hints and docstrings on all public APIs; ruff 88 cols; anyio for async. Do not edit core/protocols.py or the frozen leaf models (core/types.py, llm/types.py, executor/models.py, trace/models.py) unless this task owns them; if a change is needed, record it in implementation-notes and let the reviewer decide. Append a `### T059` section to shared/implementation-notes.md (decisions not in the spec, deviations, tradeoffs). Commit locally on branch feat/harness-builder, staging only harness-builder/ paths (never `git add -A`); local commits only, no push. ALSO (carried from shared/reviews/T048_arch_review.md): MA1 make the safety screen cover everything mounted into the container (screen the whole harness tree and fail closed on .pth/.pyc/.so/.zip, or mount only screened code dirs; flag any sys.path reference and any site module use; add the probes as tests; fix docstrings/notes claiming the gap is closed in practice). MA2 fix docs that contradict current behaviour (harness run DOES apply flagged-tool ask rules: docs/generator.md x2, docs/spec.md x2, README.md; update the screen table; staging dir deleted only with .hb-staging marker; document eval ask handling; state incomplete harnesses stay runnable). Also T046 m3/mn5 (validate should update the meta file) if cheap, and T056 deferred minors. ALSO (T056 round 3 minors): m3 stats write runs synchronously on the event loop (offload or document), m15 fcntl.flock has no timeout on POSIX (add one), m16 write_stats is public and unlocked (make private or lock), plus T056 deferred m4, m7, m9-m14 where cheap and docs notes for m7, m11, m14. ALSO: all majors MA-1..MA-5 and carried minors in shared/reviews/T058_arch_review.md (docs/skills.md stale on stats behaviour; catalog/index caching for ~2s run-start; stats hook off the event loop with POSIX lock deadline; exclude .agents/ from the ContainerTool mount or require skills.root outside it, with a probe test; new screen categories must reach skills/validation as at least flagged), and add the missing `### T054` implementation-notes section.",
     "milestone": "M5",
     "fr_refs": [
       "FR-060",
       "FR-061"
     ],
     "assigned_to": "python_coder",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T048",
       "T058"
@@ -1747,7 +1747,7 @@
       "FR-057"
     ],
     "assigned_to": "python_test",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T059"
     ],
@@ -1771,7 +1771,7 @@
       "FR-060"
     ],
     "assigned_to": "documentation",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T060",
       "T023",
@@ -1800,7 +1800,7 @@
       "FR-061"
     ],
     "assigned_to": "backend_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T059"
     ],
@@ -1821,7 +1821,7 @@
       "FR-061"
     ],
     "assigned_to": "architecture_reviewer",
-    "status": "not_started",
+    "status": "done",
     "blocked_by": [
       "T060",
       "T061",
