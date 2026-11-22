@@ -20,6 +20,7 @@ from harness_builder.skills import _compat
 from harness_builder.skills.store import (
     SkillStats,
     SkillStore,
+    StatsCorruptError,
     resolve_skills_root,
     validate_skill_name,
 )
@@ -335,17 +336,19 @@ def test_record_use_persists_counts(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "content",
-    [None, b"", b"{not json", b'{"x": {"usage_count": "a"}}', b"\xff\xfe{"],
+    [b"", b"{not json", b'{"x": {"usage_count": "a"}}', b"\xff\xfe{"],
 )
-def test_missing_or_corrupt_stats_read_as_empty(
-    tmp_path: Path, content: bytes | None
-) -> None:
+def test_corrupt_stats_raise(tmp_path: Path, content: bytes) -> None:
     store = SkillStore(tmp_path)
-    if content is not None:
-        store.meta.mkdir(parents=True)
-        store.stats_path.write_bytes(content)
+    store.meta.mkdir(parents=True)
+    store.stats_path.write_bytes(content)
 
-    assert store.read_stats() == {}
+    with pytest.raises(StatsCorruptError):
+        store.read_stats()
+
+
+def test_missing_stats_read_as_empty(tmp_path: Path) -> None:
+    assert SkillStore(tmp_path).read_stats() == {}
 
 
 def test_failed_replace_keeps_old_stats_and_no_temp(
@@ -363,7 +366,10 @@ def test_failed_replace_keeps_old_stats_and_no_temp(
         store.record_use("a", success=True)
 
     assert store.stats_path.read_bytes() == before
-    assert sorted(p.name for p in store.meta.iterdir()) == ["stats.json"]
+    assert sorted(p.name for p in store.meta.iterdir()) == [
+        "stats.json",
+        "stats.lock",
+    ]
 
 
 def test_failed_write_before_replace_leaves_no_temp(
@@ -378,7 +384,7 @@ def test_failed_write_before_replace_leaves_no_temp(
     with pytest.raises(ValueError, match="cannot serialize"):
         store.record_use("a", success=True)
 
-    assert list(store.meta.iterdir()) == []
+    assert [p.name for p in store.meta.iterdir()] == ["stats.lock"]
 
 
 # --- lazy import -------------------------------------------------------------

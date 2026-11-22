@@ -29,6 +29,7 @@ from harness_builder.skills.store import (
     SKILL_NAME_RE,
     SkillStats,
     SkillStore,
+    StatsCorruptError,
     replace_path,
 )
 from harness_builder.skills.validation import DEDUP_THRESHOLD
@@ -129,9 +130,21 @@ class PendingCandidate:
     state: Literal["ready", "deferred", "incomplete"]
 
 
+def _read_stats(store: SkillStore) -> dict[str, SkillStats]:
+    """Read the stats, or raise ``ConfigError('stats unreadable: ...')``.
+
+    Unreadable stats must never read as "never used": that would offer every
+    skill for prune.
+    """
+    try:
+        return store.read_stats()
+    except (OSError, StatsCorruptError) as exc:
+        raise ConfigError(f"stats unreadable: {exc}") from exc
+
+
 def list_skills(store: SkillStore) -> list[SkillInfo]:
     """Live skills the catalog discovers, sorted by name, with their stats."""
-    stats = store.read_stats()
+    stats = _read_stats(store)
     infos = [
         SkillInfo(
             name=entry.name,
@@ -154,7 +167,7 @@ def show_skill(store: SkillStore, name: str) -> SkillDetail:
             name=entry.name,
             description=entry.description,
             path=Path(entry.path or "").parent,
-            stats=store.read_stats().get(name, SkillStats()),
+            stats=_read_stats(store).get(name, SkillStats()),
         )
         return SkillDetail(
             info=info,
@@ -171,7 +184,7 @@ def skill_stats(store: SkillStore) -> StatsReport:
     live = {info.name for info in skills}
     orphans = {
         name: value
-        for name, value in sorted(store.read_stats().items())
+        for name, value in sorted(_read_stats(store).items())
         if name not in live
     }
     return StatsReport(skills=tuple(skills), orphans=orphans)

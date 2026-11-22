@@ -269,6 +269,41 @@ def test_pending_candidates_without_pending_dir(store: SkillStore) -> None:
     assert pending_candidates(store) == []
 
 
+# --- unreadable stats ---------------------------------------------------------
+
+
+def corrupt_stats(store: SkillStore) -> None:
+    store.stats_path.write_bytes(b'{"csv-merge": {"usage_count": ')
+
+
+def deny_stats_reads(store: SkillStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied(*args: object, **kwargs: object) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(SkillStore, "read_stats", denied)
+
+
+@pytest.mark.parametrize("how", ["corrupt", "denied"])
+def test_unreadable_stats_are_reported_not_read_as_never_used(
+    seeded: SkillStore, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    for skill in seeded.live.iterdir():
+        set_mtime(skill, OLD)  # would all be prune candidates if stats read as {}
+    if how == "corrupt":
+        corrupt_stats(seeded)
+    else:
+        deny_stats_reads(seeded, monkeypatch)
+    before = tree_snapshot(seeded.root)
+    for call in (list_skills, skill_stats, plan_prune):
+        with pytest.raises(ConfigError, match="stats unreadable"):
+            call(seeded)
+    with pytest.raises(ConfigError, match="stats unreadable"):
+        show_skill(seeded, "csv-merge")
+    with pytest.raises(ConfigError, match="stats unreadable"):
+        plan_prune(seeded, ("csv-join",))
+    assert tree_snapshot(seeded.root) == before
+
+
 # --- CLI ------------------------------------------------------------------------
 
 
@@ -296,6 +331,21 @@ def test_cli_list_show_stats(seeded: SkillStore) -> None:
     assert stats.exit_code == 0
     assert "total uses: 5" in stats.output
     assert "never used: csv-join, image-resize" in stats.output
+
+
+@pytest.mark.usefixtures("cli")
+@pytest.mark.parametrize("command", ["list", "stats", "prune"])
+def test_cli_unreadable_stats_exit_2_and_prune_nothing(
+    seeded: SkillStore, command: str
+) -> None:
+    for skill in seeded.live.iterdir():
+        set_mtime(skill, OLD)
+    corrupt_stats(seeded)
+    before = tree_snapshot(seeded.root)
+    result = harness(seeded, command)
+    assert result.exit_code == 2
+    assert "stats unreadable" in result.output
+    assert tree_snapshot(seeded.root) == before
 
 
 @pytest.mark.usefixtures("cli")

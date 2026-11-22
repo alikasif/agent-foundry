@@ -16,10 +16,12 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -53,6 +55,14 @@ concurrent test run) briefly holds a handle on the source or target."""
 STATS_RETRY_DELAYS_S = (0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.5)
 """Longer backoff (about 2 s) for ``stats.json``, which many hooks and readers
 touch at once; a lost use is silent, so it is worth waiting longer."""
+
+
+STATS_LOCK_TIMEOUT_S = 10.0
+"""How long ``record_use`` waits for the cross-process stats lock."""
+
+
+class StatsCorruptError(ValueError):
+    """``stats.json`` exists but is not a valid stats mapping."""
 
 
 def replace_path(
@@ -231,13 +241,36 @@ class SkillStore:
         stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%S%fZ")
         return self.trash / f"{validate_skill_name(name)}-{stamp}"
 
-    def read_stats(self) -> dict[str, SkillStats]:
-        """Read the stats sidecar; a missing or unreadable file reads as empty."""
+    def read_stats(
+        self, *, delays: tuple[float, ...] = STATS_RETRY_DELAYS_S
+    ) -> dict[str, SkillStats]:
+        """Read the stats sidecar.
+
+        Only a missing file reads as empty. Any other ``OSError`` (on Windows a
+        ``PermissionError`` while another process's ``os.replace`` is in flight)
+        is retried with backoff and then raised, so a caller never mistakes an
+        unreadable file for an empty one. A file that is not valid stats raises
+        :class:`StatsCorruptError`.
+        """
+        for delay in delays:
+            try:
+                return self._parse_stats()
+            except FileNotFoundError:
+                return {}
+            except OSError:
+                logger.debug("reading %s failed; retrying", self.stats_path)
+                time.sleep(delay)
+        try:
+            return self._parse_stats()
+        except FileNotFoundError:
+            return {}
+
+    def _parse_stats(self) -> dict[str, SkillStats]:
         try:
             raw = self.stats_path.read_text(encoding="utf-8")
             return _STATS_ADAPTER.validate_json(raw)
-        except (OSError, ValueError):  # ValidationError and bad UTF-8 included
-            return {}
+        except ValueError as exc:  # bad UTF-8 and ValidationError included
+            raise StatsCorruptError(f"{self.stats_path} is corrupt: {exc}") from exc
 
     def write_stats(self, stats: Mapping[str, SkillStats]) -> None:
         """Write the stats sidecar atomically (temp file + ``os.replace``)."""
@@ -259,9 +292,23 @@ class SkillStore:
     def record_use(
         self, name: str, success: bool, now: datetime | None = None
     ) -> SkillStats:
-        """Increment ``name``'s usage (and success) count and persist it."""
-        with _STATS_LOCK:  # in-process writers take turns (no lost increments)
-            stats = self.read_stats()
+        """Increment ``name``'s usage (and success) count and persist it.
+
+        Raises ``OSError`` when the stats cannot be read or locked; the file
+        is then left untouched (one use is dropped, no other skill's counters
+        are lost). A corrupt file is moved aside to
+        ``stats.json.corrupt-<UTC timestamp>`` and counting restarts.
+        """
+        self.meta.mkdir(parents=True, exist_ok=True)
+        with _STATS_LOCK, _process_lock(self.meta / "stats.lock"):
+            try:
+                stats = self.read_stats()
+            except StatsCorruptError as exc:
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+                aside = self.stats_path.with_name(f"stats.json.corrupt-{stamp}")
+                logger.warning("%s; moving it to %s", exc, aside.name)
+                replace_path(self.stats_path, aside)
+                stats = {}
             old = stats.get(name, SkillStats())
             new = SkillStats(
                 usage_count=old.usage_count + 1,
@@ -271,6 +318,40 @@ class SkillStore:
             stats[name] = new
             self.write_stats(stats)
         return new
+
+
+@contextmanager
+def _process_lock(path: Path) -> Generator[None, None, None]:
+    """Hold an exclusive cross-process lock on ``path`` (created if missing).
+
+    Windows: ``msvcrt.locking`` on byte 0, polled until
+    ``STATS_LOCK_TIMEOUT_S`` (then ``TimeoutError``, an ``OSError``).
+    POSIX: blocking ``fcntl.flock``. The OS drops the lock if the process dies.
+    """
+    with path.open("ab") as fh:
+        if sys.platform == "win32":
+            import msvcrt
+
+            deadline = time.monotonic() + STATS_LOCK_TIMEOUT_S
+            while True:
+                fh.seek(0)
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"timed out locking {path}") from None
+                    time.sleep(0.005)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # pyrefly: ignore[missing-attribute]
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _triggers(value: object) -> list[str]:

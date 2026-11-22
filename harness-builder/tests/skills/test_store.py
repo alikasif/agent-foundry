@@ -21,11 +21,13 @@ from harness_builder.skills.store import (
     SKILLS_ROOT_ENV,
     SkillStats,
     SkillStore,
+    StatsCorruptError,
     resolve_skills_root,
 )
 from harness_builder.spec.models import SkillsConfig
 
 Writer = Callable[..., Path]
+STATS_FILES = ["stats.json", "stats.lock"]
 
 
 class RecordingBuilder:
@@ -183,7 +185,7 @@ def test_many_writes_leave_no_temp_files(tmp_path: Path) -> None:
     store = SkillStore(tmp_path)
     for i in range(25):
         store.record_use(f"skill-{i % 4}", i % 2 == 0)
-    assert sorted(p.name for p in store.meta.iterdir()) == ["stats.json"]
+    assert sorted(p.name for p in store.meta.iterdir()) == STATS_FILES
     assert sum(s.usage_count for s in store.read_stats().values()) == 25
 
 
@@ -208,40 +210,38 @@ def test_extra_keys_in_stats_are_ignored(tmp_path: Path) -> None:
     ],
     ids=["list", "one-bad-entry", "null-entry", "truncated", "empty", "binary"],
 )
-def test_corrupt_stats_read_as_empty_as_a_whole(tmp_path: Path, content: bytes) -> None:
+def test_corrupt_stats_raise_as_a_whole(tmp_path: Path, content: bytes) -> None:
     store = SkillStore(tmp_path)
     store.meta.mkdir(parents=True)
     store.stats_path.write_bytes(content)
-    assert store.read_stats() == {}
+    with pytest.raises(StatsCorruptError):
+        store.read_stats()
 
 
-def test_next_record_after_corruption_resets_every_counter(tmp_path: Path) -> None:
-    """Documented T049 tradeoff: counters are advisory."""
+def test_next_record_after_corruption_moves_the_bad_file_aside(
+    tmp_path: Path,
+) -> None:
     store = SkillStore(tmp_path)
     store.meta.mkdir(parents=True)
-    store.stats_path.write_bytes(
-        b'{"kept": {"usage_count": 9}, "bad": {"usage_count": -1.5}}'
-    )
+    bad = b'{"kept": {"usage_count": 9}, "bad": {"usage_count": -1.5}}'
+    store.stats_path.write_bytes(bad)
     store.record_use("new", True)
     assert set(store.read_stats()) == {"new"}
+    (aside,) = store.meta.glob("stats.json.corrupt-*")
+    assert aside.read_bytes() == bad
 
 
-def test_transient_read_error_resets_every_counter_on_next_write(
+def test_transient_read_error_is_retried_and_keeps_every_counter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pins current behaviour (T049 'unreadable reads as empty').
-
-    On Windows a reader gets a transient PermissionError while another
-    writer's ``os.replace`` is in flight (T054 measured 234 of 5,442 reads),
-    so concurrent ``record_use`` calls can wipe every other skill's counters.
-    """
+    """A PermissionError while another process replaces the file is retried."""
     store = SkillStore(tmp_path)
     store.record_use("kept", True)
     real_read_text = Path.read_text
     calls = {"n": 0}
 
     def flaky_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
-        if self == store.stats_path and calls["n"] == 0:
+        if self == store.stats_path and calls["n"] < 2:
             calls["n"] += 1
             raise PermissionError(13, "Access is denied")
         return real_read_text(self, *args, **kwargs)
@@ -249,16 +249,42 @@ def test_transient_read_error_resets_every_counter_on_next_write(
     monkeypatch.setattr(Path, "read_text", flaky_read_text)
     store.record_use("other", True)
     monkeypatch.undo()
-    assert set(store.read_stats()) == {"other"}
+    assert calls["n"] == 2
+    assert set(store.read_stats()) == {"kept", "other"}
 
 
-def test_stats_path_that_is_a_directory(tmp_path: Path) -> None:
+def test_persistent_read_error_raises_and_never_overwrites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SkillStore(tmp_path)
+    store.record_use("kept", True)
+    before = store.stats_path.read_bytes()
+
+    def denied(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr("harness_builder.skills.store.time.sleep", lambda _: None)
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        store.read_stats()
+    with pytest.raises(PermissionError):
+        store.record_use("other", True)
+    monkeypatch.undo()
+    assert store.stats_path.read_bytes() == before
+    assert sorted(p.name for p in store.meta.iterdir()) == STATS_FILES
+
+
+def test_stats_path_that_is_a_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = SkillStore(tmp_path)
     store.stats_path.mkdir(parents=True)
-    assert store.read_stats() == {}
+    monkeypatch.setattr("harness_builder.skills.store.time.sleep", lambda _: None)
+    with pytest.raises(OSError):
+        store.read_stats()
     with pytest.raises(OSError):
         store.record_use("x", True)
-    assert [p.name for p in store.meta.iterdir()] == ["stats.json"]
+    assert sorted(p.name for p in store.meta.iterdir()) == STATS_FILES
 
 
 def hammer(store: SkillStore) -> tuple[list[BaseException], list[str]]:
@@ -306,7 +332,7 @@ def test_concurrent_writers_never_tear_the_file(tmp_path: Path) -> None:
     store = SkillStore(tmp_path)
     _, torn = hammer(store)
     assert torn == []
-    assert sorted(p.name for p in store.meta.iterdir()) == ["stats.json"]
+    assert sorted(p.name for p in store.meta.iterdir()) == STATS_FILES
     final = store.read_stats()
     assert final["seed"].usage_count == 1
     for name, stats in final.items():
