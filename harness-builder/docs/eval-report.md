@@ -125,8 +125,9 @@ T060 notes.
 - **Generator quality unknown.** No live model has written a harness. The repair
   loop's usefulness depends on the model reading the validation report.
 - **Failed-harness gate.** `.harness-meta.json` is written at generation time.
-  `harness validate` updates it, but only upgrades `fail` to `pass` on a strong run
-  (no trusted host tools, no `not_run` case; `validation_strength` in the meta). A
+  `harness validate` updates it, but never upgrades `fail` to `pass` on a
+  `--trust-tools` run, nor on a run with `not_run` cases when the failing run ran
+  them all (`all_cases_ran` in the meta; unknown values fail closed). A
   harness with a TaskCase failed under `new --live` can only be cleared by
   `validate --live` on Docker, or run with `--allow-failed`. A harness edited after
   validation is not re-gated.
