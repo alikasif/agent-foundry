@@ -493,3 +493,76 @@ def test_plain_logging_and_importlib_metadata_stay_clean() -> None:
         "log = logging.getLogger(__name__)\npath = 'a'\npackage = 1\n"
     )
     assert categories(source) == set()
+
+
+# --- T062 round 2: code objects from files, loader classes, more modules -------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib.abc\nimportlib.abc.InspectLoader.source_to_code(t)\n",
+        "from importlib.abc import InspectLoader as L\nL.source_to_code(t)\n",
+        "from importlib import abc\n",
+        "loader.get_code('n')\n",
+        "loader.source_to_code(text)\n",
+        "loader.get_source('n')\n",
+        (
+            "import importlib.machinery as m\n"
+            "finder = m.FileFinder(d, (m.SourceFileLoader, ['.txt']))\n"
+            "f.__code__ = finder.find_spec('n').loader.get_code('n')\n"
+        ),
+        "import importlib.machinery\nx = importlib.machinery.SourceFileLoader\n",
+        "import importlib\nx = importlib.machinery.FileFinder\n",
+        "from importlib.machinery import FileFinder\n",
+        "from importlib.machinery import ExtensionFileLoader as E\n",
+        "import importlib.machinery as m\nx = [m.SourcelessFileLoader]\n",
+    ],
+)
+def test_code_object_from_file_apis_are_dynamic_exec(source: str) -> None:
+    assert categories(source) == {"dynamic_exec"}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import posix\nposix.system('x')\n",
+        "import nt\nnt.system('x')\n",
+        "import _posixsubprocess\n",
+        "from posix import system\n",
+    ],
+)
+def test_os_module_aliases_are_subprocess(source: str) -> None:
+    assert "subprocess" in categories(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import typing\ntyping.ForwardRef(s)._evaluate(g, l, frozenset())\n",
+        "import pkgutil\npkgutil.resolve_name('os:system')\n",
+        "import pydoc\npydoc.pipepager(text, 'cmd')\n",
+        "import pydoc\npydoc.locate('os.system')\n",
+        "import webbrowser\nwebbrowser.get('cmd %s').open(u)\n",
+        "import _ctypes\n_ctypes.dlopen('x.dat')\n",
+        "import sqlite3\nsqlite3.connect(':memory:').load_extension('x.dat')\n",
+        "import sqlite3\nconn.enable_load_extension(True)\n",
+    ],
+)
+def test_further_string_exec_and_native_load_forms_are_dynamic_exec(
+    source: str,
+) -> None:
+    assert "dynamic_exec" in categories(source)
+
+
+def test_common_clean_code_stays_clean() -> None:
+    """Negative control for the round-2 rules."""
+    source = (
+        "import importlib.metadata\nimport inspect\nimport pathlib\nimport typing\n"
+        "import sqlite3\nimport os.path\n"
+        "def f(x: typing.Any) -> str:\n"
+        "    hints = typing.get_type_hints(f)\n"
+        "    conn = sqlite3.connect(':memory:')\n"
+        "    return str(pathlib.Path('a') / 'b') + str(hints) + str(conn)\n"
+    )
+    assert categories(source) == set()

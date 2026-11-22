@@ -373,7 +373,10 @@ def validate(
         )
         report = anyio.run(pipeline.run, target)
         update_harness_meta_status(
-            target, report.status, trusted_tools=report.trusted, strong=report.strong
+            target,
+            report.status,
+            trusted_tools=report.trusted,
+            all_cases_ran=report.all_cases_ran,
         )
     click.echo(report.to_markdown(), nl=False)
     raise click.exceptions.Exit(report.exit_code)

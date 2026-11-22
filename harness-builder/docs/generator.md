@@ -143,11 +143,16 @@ $ uv run harness validate bad --trust-tools
 (it writes only `tools.schema.json`, from stage B0). When a
 `.harness-meta.json` already exists it updates its `status` to the new verdict,
 so a harness that now fails stops being runnable. A `fail` to `pass` upgrade is
-written only when the run is at least as strong as the one that recorded the
-`fail` (`validation_strength` in the meta): every case ran (no `not_run`, so
-`--live` when TaskCases exist) and B0, B and C used Docker, not `--trust-tools`.
-A weaker pass leaves the `fail` in place (use `--allow-failed` to run it). A
-hand-written harness has no meta file and gets none.
+**refused** when the run used `--trust-tools` (a host run never clears a `fail`),
+or when it left cases `not_run` while the run that recorded the `fail` ran them
+all. The meta stores `all_cases_ran` with each verdict (a non-live `harness new`
+with TaskCases stores `false`, so a non-live Docker `validate` can clear it, but
+a `--trust-tools` one cannot). Only a stored `false` counts as "skipped cases";
+a missing or any other value counts as "all ran", so legacy and malformed metas
+fail closed (they need a run with every case executed, `--live` when TaskCases
+exist). A refused upgrade leaves the `fail` in place (use `--allow-failed` to run
+it). `trusted_tools` is informational. A hand-written harness has no meta file
+and gets none.
 
 ### Options
 
@@ -212,9 +217,9 @@ risky constructs in five categories:
 | Category | Flags |
 |---|---|
 | `network` | imports of `socket`, `ssl`, `urllib`, `urllib3`, `requests`, `httpx`, `aiohttp`, `http.client`, `http.server`, `ftplib`, `smtplib`, `poplib`, `imaplib`, `telnetlib`, `xmlrpc`, `websocket(s)` (also through dynamic imports), `asyncio.open_connection` / `open_unix_connection` / `start_server` |
-| `subprocess` | imports of `subprocess`, `pty`, `multiprocessing`; `os.system`, `os.popen`, `os.exec*`, `os.spawn*`, `os.fork*`; `asyncio.create_subprocess_exec` / `_shell` |
+| `subprocess` | imports of `subprocess`, `pty`, `multiprocessing`, `posix`, `nt`, `_posixsubprocess`; `os.system`, `os.popen`, `os.exec*`, `os.spawn*`, `os.fork*`; `asyncio.create_subprocess_exec` / `_shell` |
 | `delete` | `os.remove`, `os.unlink`, `os.rmdir`, `os.removedirs`, `shutil.rmtree`, `.unlink()`, `.rmdir()` |
-| `dynamic_exec` | `eval`, `exec`, `compile`, `__import__`, `importlib.import_module`, the `importlib.util` / `importlib.machinery` loaders, `.exec_module()` / `.load_module()`, `runpy`, `pickle` / `marshal` loads, `types.FunctionType`, `ctypes`; the import-system hooks (`sys.meta_path`, `sys.path_hooks`, `sys.path_importer_cache`, `importlib.machinery.*_SUFFIXES`); **any reference to `sys.path`** (reads, aliases, `from sys import path`, mutation); any import of `site`, `sitecustomize` or `usercustomize`; relative imports and any binding of `__path__`, `__package__` or `__spec__`; imports of stdlib modules that run a string or file (`timeit`, `code`, `codeop`, `pdb`, `bdb`, `cProfile`, `profile`, `trace`, `doctest`, `zipimport`, `importlib._bootstrap*`, `logging.config`) |
+| `dynamic_exec` | `eval`, `exec`, `compile`, `__import__`, `importlib.import_module`, the `importlib.util` / `importlib.machinery` loaders, `.exec_module()` / `.load_module()`, `runpy`, `pickle` / `marshal` loads, `types.FunctionType`, `ctypes`; the import-system hooks (`sys.meta_path`, `sys.path_hooks`, `sys.path_importer_cache`, `importlib.machinery.*_SUFFIXES`); **any reference to `sys.path`** (reads, aliases, `from sys import path`, mutation); any import of `site`, `sitecustomize` or `usercustomize`; relative imports and any binding of `__path__`, `__package__` or `__spec__`; imports of stdlib modules that run a string or file (`timeit`, `code`, `codeop`, `pdb`, `bdb`, `cProfile`, `profile`, `trace`, `doctest`, `zipimport`, `importlib._bootstrap*`, `importlib.abc`, `logging.config`, `webbrowser`, `_ctypes`); any reference to `importlib.machinery` `SourceFileLoader`, `SourcelessFileLoader`, `ExtensionFileLoader` or `FileFinder`; calls to `.get_code()`, `.source_to_code()`, `.get_source()`, `.load_extension()`, `typing.ForwardRef`, `pkgutil.resolve_name`, `pydoc.locate` / `pipepager` |
 | `secret` | key-like literals, secret-looking assignments, high-entropy strings |
 
 **Scope.** `ContainerTool` mounts the whole harness directory read-only at
@@ -234,7 +239,9 @@ delete them.
 It is still a heuristic: it cannot see through `getattr`/`setattr` string
 indirection or data flow, and other deserialisers (`shelve`, `dill`) are not
 reported. Residual string indirection is advisory only: `getattr`,
-`vars(builtins)["exec"]`, `pydoc.locate("os.system")`. The container
+`vars(builtins)["exec"]`, building a function from a code object with
+`type(f)(code, {})()`, and `typing.get_type_hints` / `inspect.get_annotations(eval_str=True)`
+over string annotations read from a file. The container
 (`--network none`, read-only mount) is the boundary;
 the screen only decides what asks for approval.
 
@@ -290,6 +297,7 @@ asks; either way a flagged tool never executes silently.
   "model": "openai/gpt-4o-mini",
   "generator_stop": "done",
   "trusted_tools": false,
+  "all_cases_ran": true,
   "created_at": "2026-11-21T13:12:11+00:00",
   "request": {
     "description": "A greeter",
@@ -412,7 +420,7 @@ harness does not build.
 - Nothing here has run against a live LLM or a real Docker daemon.
 - `harness validate` does not rewrite `reports/`. It only updates `status` in an
   existing `.harness-meta.json`, so the failed-harness gate follows the latest
-  verdict (T046 mn5); a `fail` is cleared only by an equally strong run (T062 MJ3).
+  verdict (T046 mn5); a `fail` is never cleared by a `--trust-tools` run, nor by a run with `not_run` cases when the failing run ran them all (T062 MJ3, R2-MJ1).
 - `--live` with `validate` reuses one client for all TaskCase runs, so a
   list-backed fake script works only for single-run cases.
 - `allowed_tools` is advisory: the pipeline does not reject a spec that

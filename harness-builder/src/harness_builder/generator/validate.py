@@ -158,14 +158,14 @@ class ValidationReport(BaseModel):
     live: bool = False
 
     @property
-    def strong(self) -> bool:
-        """True when every eval case ran and B0, B and C used Docker tools.
+    def all_cases_ran(self) -> bool:
+        """True when no eval case is ``not_run`` (TaskCases need ``live``).
 
-        Compared by ``update_harness_meta_status``: a weaker run (``not_run``
-        TaskCases, trusted host tools) must not unlock a harness a stronger
-        run failed.
+        Recorded in the meta, next to ``trusted``, and compared by
+        ``update_harness_meta_status`` so a run that skipped cases cannot
+        clear a ``fail`` recorded by a run that ran them.
         """
-        return not self.trusted and all(c.status != "not_run" for c in self.eval_cases)
+        return all(c.status != "not_run" for c in self.eval_cases)
 
     @property
     def exit_code(self) -> int:

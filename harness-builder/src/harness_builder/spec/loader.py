@@ -528,22 +528,29 @@ def check_harness_meta(base_dir: Path) -> None:
 
 
 def update_harness_meta_status(
-    base_dir: Path, status: str, *, trusted_tools: bool, strong: bool
+    base_dir: Path, status: str, *, trusted_tools: bool, all_cases_ran: bool
 ) -> bool:
     """Record a later ``pass`` or ``fail`` verdict in an existing meta file.
 
     ``harness validate`` calls this, so the failed-harness gate follows the
     latest verdict (T046 mn5). A downgrade (``pass`` to ``fail``) is always
-    written. An upgrade (``fail`` to ``pass``) is written only when the new run
-    is at least as strong as the one that recorded the ``fail`` (T062 MJ3):
-    ``strong`` means every case ran (no ``not_run``) on Docker tools, no
-    trusted host B0. The meta stores it as ``validation_strength``; a ``fail``
-    without that key counts as strong. A verdict also records
-    ``trusted_tools``. ``incomplete`` is never written: a validation that
-    could not finish (Docker down) must not turn a ``fail`` into something
-    runnable. Returns True when the file changed. A missing file (hand-written
-    harness) is not created, and an unreadable or non-object file is left
-    alone (``check_harness_meta`` keeps failing closed on it).
+    written. An upgrade (``fail`` to ``pass``) is refused when (T062 MJ3,
+    R2-MJ1):
+
+    - the run used trusted host tools (``--trust-tools``): a host run never
+      clears a ``fail``;
+    - or the run left cases ``not_run`` while the run that recorded the
+      ``fail`` ran them all.
+
+    ``all_cases_ran`` is stored with every verdict. Only a stored value of
+    exactly ``False`` means a case did not run; a missing or any other value
+    counts as "all ran", so legacy and malformed metas fail closed. A verdict
+    also records ``trusted_tools`` (informational, no gate reads it).
+    ``incomplete`` is never written: a validation that could not finish
+    (Docker down) must not turn a ``fail`` into something runnable. Returns
+    True when the file changed. A missing file (hand-written harness) is not
+    created, and an unreadable or non-object file is left alone
+    (``check_harness_meta`` keeps failing closed on it).
     """
     if status not in ("pass", "fail"):
         return False
@@ -554,20 +561,16 @@ def update_harness_meta_status(
         return False
     if not isinstance(data, dict):
         return False
-    recorded_strong = data.get("validation_strength", "strong") == "strong"
-    if status == "pass" and data.get("status") == "fail":
-        if recorded_strong and not strong:
+    prior_fail = data.get("status") == "fail"
+    recorded_all_ran = data.get("all_cases_ran") is not False
+    if status == "pass" and prior_fail:
+        if trusted_tools or (recorded_all_ran and not all_cases_ran):
             return False
-    if status == "fail" and data.get("status") == "fail":
-        strong = strong or recorded_strong
-    strength = "strong" if strong else "weak"
-    update = {
-        "status": status,
-        "trusted_tools": trusted_tools,
-        "validation_strength": strength,
-    }
-    if status == "fail":
-        update = {"status": status, "validation_strength": strength}
+    if status == "fail" and prior_fail:
+        all_cases_ran = all_cases_ran or recorded_all_ran
+    update: dict[str, object] = {"status": status, "all_cases_ran": all_cases_ran}
+    if status == "pass":
+        update["trusted_tools"] = trusted_tools
     if all(data.get(key) == value for key, value in update.items()):
         return False
     data.update(update)

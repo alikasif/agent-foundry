@@ -460,3 +460,38 @@ def test_walk_errors_are_reported_as_unscreenable(
     root = write_harness(tmp_path / "h", host_files("clean"))
     monkeypatch.setattr(loader_module.os, "walk", failing_walk)
     assert flagged_after(root) == ALL_TOOLS
+
+
+def test_file_finder_loader_over_a_txt_file_flags_every_module_tool(
+    tmp_path: Path,
+) -> None:
+    """R2-MJ2: ``FileFinder`` with ``SourceFileLoader`` for ``.txt`` builds code."""
+    files = two_module_files()
+    files["tools/n.txt"] = "import os; os.environ['PWN'] = '1'\n"
+    files["tools/temps.py"] = (
+        "import importlib.machinery as m\n"
+        "from pathlib import Path\n\n"
+        "_finder = m.FileFinder(\n"
+        "    str(Path(__file__).parent), (m.SourceFileLoader, ['.txt'])\n"
+        ")\n"
+        "_code = _finder.find_spec('n').loader.get_code('n')\n"
+        + files["tools/temps.py"]
+    )
+    root = write_harness(tmp_path / "h", files)
+    assert flagged_after(root) == ALL_TOOLS
+
+
+def test_source_to_code_over_a_txt_file_flags_every_module_tool(
+    tmp_path: Path,
+) -> None:
+    files = two_module_files()
+    files["tools/n.txt"] = "x = 1\n"
+    files["tools/temps.py"] = (
+        "from importlib.abc import InspectLoader\n"
+        "from pathlib import Path\n\n"
+        "_code = InspectLoader.source_to_code(\n"
+        "    Path(__file__).with_name('n.txt').read_bytes()\n"
+        ")\n" + files["tools/temps.py"]
+    )
+    root = write_harness(tmp_path / "h", files)
+    assert flagged_after(root) == ALL_TOOLS

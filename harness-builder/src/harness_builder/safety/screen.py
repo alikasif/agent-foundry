@@ -8,7 +8,8 @@ constructs in five categories:
   ``ftplib``, ``smtplib``, ``poplib``, ``imaplib``, ``telnetlib``,
   ``xmlrpc``, ``websocket(s)`` (and dynamic imports of them), plus
   ``asyncio.open_connection`` / ``open_unix_connection`` / ``start_server``;
-- ``subprocess``: ``subprocess``, ``pty`` and ``multiprocessing`` imports,
+- ``subprocess``: ``subprocess``, ``pty``, ``multiprocessing``, ``posix``, ``nt``
+  and ``_posixsubprocess`` imports,
   ``os.system``, ``os.popen``, ``os.exec*``, ``os.spawn*``, ``os.fork*``,
   ``asyncio.create_subprocess_exec`` / ``_shell``;
 - ``delete``: ``os.remove``, ``os.unlink``, ``os.rmdir``, ``os.removedirs``,
@@ -29,16 +30,21 @@ constructs in five categories:
   (T046 MJ5b, T048 MA1, T062 MJ1). Imports of stdlib modules that compile and
   run a string or file (``timeit``, ``code``, ``codeop``, ``pdb``, ``bdb``,
   ``cProfile``, ``profile``, ``trace``, ``doctest``, ``zipimport``,
-  ``importlib._bootstrap*``, ``logging.config``) are flagged too, so code
-  stored in a non-``.py`` file cannot be run unseen (T062 MJ2);
+  ``importlib._bootstrap*``, ``importlib.abc``, ``logging.config``,
+  ``webbrowser``, ``_ctypes``), any reference to the ``importlib.machinery``
+  file loaders and ``FileFinder``, and ``.get_code()`` / ``.source_to_code()``
+  / ``.get_source()`` / ``.load_extension()`` calls are flagged too, so code
+  stored in a non-``.py`` file cannot be run unseen (T062 MJ2, R2-MJ2);
 - ``secret``: key-like string literals, string literals assigned to
   secret-looking names, and high-entropy string literals.
 
 The screen is a heuristic. It cannot see through ``getattr`` tricks or data
 flow, and it flags every delete because "outside the workdir" is not
 decidable statically. Known limits: ``getattr(os, "system")`` style
-indirection (including ``getattr(builtins, "ex" + "ec")``,
-``vars(builtins)["exec"]`` and ``pydoc.locate("os.system")``), other
+indirection (including ``getattr(builtins, "ex" + "ec")`` and
+``vars(builtins)["exec"]``), building a function from a code object with
+``type(f)(code, {})()``, ``typing.get_type_hints`` and
+``inspect.get_annotations(eval_str=True)`` over string annotations, other
 deserialisers (``shelve``, ``dill``) and overwriting moves (``shutil.move``,
 ``os.replace``, ``os.rename``) are not reported. Only ``.py`` source is
 screened: the caller must fail closed on ``.pth``/``.pyc``/``.so``/``.zip``
@@ -82,7 +88,9 @@ NETWORK_SUBMODULES = ("http.client", "http.server")
 NETWORK_CALLS = frozenset(
     {"asyncio.open_connection", "asyncio.open_unix_connection", "asyncio.start_server"}
 )
-SUBPROCESS_MODULES = frozenset({"subprocess", "pty", "multiprocessing"})
+SUBPROCESS_MODULES = frozenset(
+    {"subprocess", "pty", "multiprocessing", "posix", "nt", "_posixsubprocess"}
+)
 SUBPROCESS_CALLS = frozenset(
     {
         "os.system",
@@ -109,9 +117,11 @@ DYNAMIC_EXEC_MODULES = frozenset(
         "trace",
         "doctest",
         "zipimport",
+        "webbrowser",
+        "_ctypes",
     }
 )
-DYNAMIC_EXEC_SUBMODULES = ("logging.config", "importlib._bootstrap")
+DYNAMIC_EXEC_SUBMODULES = ("logging.config", "importlib._bootstrap", "importlib.abc")
 IMPORT_BINDING_NAMES = frozenset({"__path__", "__package__", "__spec__"})
 DELETE_CALLS = frozenset(
     {"os.remove", "os.unlink", "os.rmdir", "os.removedirs", "shutil.rmtree"}
@@ -136,13 +146,39 @@ DYNAMIC_EXEC_CALLS = frozenset(
         "compile",
         "builtins.compile",
         "types.FunctionType",
+        "typing.ForwardRef",
+        "pkgutil.resolve_name",
+        "pydoc.locate",
+        "pydoc.pipepager",
         "pickle.load",
         "pickle.loads",
         "marshal.load",
         "marshal.loads",
     }
 )
-DYNAMIC_EXEC_METHODS = frozenset({"exec_module", "load_module"})
+DYNAMIC_EXEC_METHODS = frozenset(
+    {
+        "exec_module",
+        "load_module",
+        # Loader methods that turn text or a file into a code object.
+        "get_code",
+        "source_to_code",
+        "get_source",
+        # sqlite3 native extension loading.
+        "load_extension",
+        "enable_load_extension",
+    }
+)
+# Referencing these (not only calling them) can build a loader or finder.
+LOADER_CLASSES = frozenset(
+    f"importlib.machinery.{name}"
+    for name in (
+        "SourceFileLoader",
+        "SourcelessFileLoader",
+        "ExtensionFileLoader",
+        "FileFinder",
+    )
+)
 IMPORT_SYSTEM_NAMES = frozenset(
     {"sys.meta_path", "sys.path_hooks", "sys.path_importer_cache"}
 )
@@ -247,6 +283,10 @@ class _Screener(ast.NodeVisitor):
                 self._check_module(origin, node.lineno, "from-import")
             if node.level == 0 and origin.startswith(DYNAMIC_EXEC_SUBMODULES):
                 self._check_module(origin, node.lineno, "from-import")
+            if node.level == 0 and origin in LOADER_CLASSES:
+                self.findings.append(
+                    Finding("dynamic_exec", node.lineno, f"import {origin}")
+                )
             if node.level == 0 and (_import_system(origin) or origin == SYS_PATH):
                 self.findings.append(
                     Finding("dynamic_exec", node.lineno, f"import {origin}")
@@ -261,6 +301,8 @@ class _Screener(ast.NodeVisitor):
         if name == SYS_PATH:
             self._add("dynamic_exec", node, f"reference {name}")
         if name is not None and name.startswith(DYNAMIC_EXEC_SUBMODULES):
+            self._add("dynamic_exec", node, f"reference {name}")
+        if name in LOADER_CLASSES:
             self._add("dynamic_exec", node, f"reference {name}")
         self.generic_visit(node)
 
