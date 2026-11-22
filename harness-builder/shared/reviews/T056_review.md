@@ -474,3 +474,78 @@ T057.
 T053 APPROVED.
 
 **Verdict: CHANGES_REQUESTED.** Blockers: none. Majors: MJ3-R2 (T049).
+
+## Round 3
+
+**Reviewer:** backend_reviewer
+**Date:** 2026-11-22
+**Commit reviewed:** 06d930a (`fix(python): cross-process stats read-modify-write (T056 MJ3-R2)`), with the `### T056-fixes-r2` notes
+**Verdict:** **APPROVED** (no blockers, no majors; 3 new minors, none blocking)
+
+### Verification run (this round)
+
+| Check | Result |
+|---|---|
+| `uv run ruff format --check .` | 264 files already formatted |
+| `uv run ruff check .` | All checks passed |
+| `uv run pyrefly check` | 0 errors (69 suppressed) |
+| full `uv run pytest` | **2324 passed, 52 skipped, 0 failed** (211 s; round 2 was 2292 passed). No unknown-mark warnings (`pytest-timeout` is a dev dependency). |
+
+### MJ3-R2: fixed
+
+The fix covers the whole read-modify-write cycle, not only the write:
+
+- `read_stats` maps only `FileNotFoundError` to `{}`. It retries other `OSError`s and then raises them.
+- Invalid content raises `StatsCorruptError`.
+- `record_use` holds an in-process lock and a cross-process lock (`skills-meta/stats.lock`) around the read and the write.
+- `hygiene._read_stats` turns both kinds of failure into `ConfigError("stats unreadable: ...")`, and the CLI exits 2.
+- Only `record_use` calls `write_stats` in `src/` (grep).
+- The `skills:stats` hook error path is safe. `HookManager.post_tool` (`hooks/manager.py:144-149`) catches `Exception`, traces it and returns the observation unchanged. A raised `OSError` or `TimeoutError` therefore drops one use and nothing else.
+
+**Round-2 repro, re-run verbatim** (`xproc_stats.py`: 4 processes x 150 uses, plus `seed` x 10). It ran three times, while the full suite was running at the same time:
+
+```
+writer errors: 0   {'p0': 150, 'p1': 150, 'p2': 150, 'p3': 150, 'seed': 10}   (x3)
+```
+
+Round 2 lost data on every run, for example `{'p1': 41}`.
+
+**Variants (scratch `r3_variants.py`, real subprocesses, Windows):**
+
+| Variant | Result |
+|---|---|
+| **Readers spinning.** 3 processes call `read_stats` and `list_skills` in a tight loop for 25 s while the 4 writers run. | About 9,200 reads and 9,200 hygiene calls per reader. 0 raised. `seed` was never missing or changed. Writers: 0 errors. All counts exact. |
+| **Crashed writer.** A child takes `stats.lock`, then `os._exit(9)`. | The next `record_use` takes 0.025 s and succeeds. The OS released the lock. |
+| **Hung holder.** A live child holds the lock for 14 s. | `record_use` raises `TimeoutError` after 10.00 s, and `stats.json` is byte-identical. After the holder exits, counting works again (`blocked: 1`, `seed: 10`). |
+| **Corrupt file.** Five payloads: bad JSON, empty, bad UTF-8, `[]`, wrong field type. | `read_stats` raises `StatsCorruptError`. `list_skills` and `skill_stats` raise `ConfigError: stats unreadable`. `record_use` moves the file to `stats.json.corrupt-<ts>` (bytes equal to the original, warning logged) and restarts at `{x: 1}`. |
+| **Unreadable (real OS error).** `stats.json` replaced by a directory, so `read_text` raises `PermissionError`. | `read_stats` raises after 2.09 s (the full retry schedule). `list_skills` gives `ConfigError: stats unreadable: [Errno 13]`. `record_use` raises `PermissionError` and writes nothing. |
+
+The hygiene unit test's "denied" case monkeypatches `read_stats` itself. The directory probe above is what exercised the real retry, raise and `ConfigError` path.
+
+**Prune safety.** Unreadable stats are never read as never-used:
+- `plan_prune` reads stats only through `list_skills` and raises.
+- `prune NAME` also raises.
+- The CLI test is parametrized over `list`/`stats`/`prune`. It asserts exit 2, `stats unreadable` and an unchanged tree, with every skill aged past the prune threshold.
+- Prune and trash code never writes `stats.json` (grep).
+
+**Tests.** `tests/skills/test_stats_multiprocess.py` spawns 4 processes x 100 uses and asserts the following:
+- `seed` is unchanged;
+- no name is missing;
+- the sum of the counts equals the expected total minus the raised calls;
+- no `corrupt-*` file is left.
+
+The notes correct the wrong "lose an increment" claim, as round 2 asked.
+
+### New minors (non-blocking, record or fix with m3)
+
+- **m3 (escalated).** `record_stats` is a sync `post_tool` hook. `hooks/manager.py:43-47` calls it on the event loop, not in a thread. In the worst case a hung lock holder blocks the loop for about 12 s per skill call: the 10 s lock poll plus the 2 s read retry. Before this fix the worst case was about 2 s. Real contention gives sub-millisecond waits, as the readers variant shows, so this only matters when another process hangs while it holds the lock. Fix with the deferred m3, for example with `anyio.to_thread.run_sync`, or with a shorter lock timeout for the hook.
+- **m15. The POSIX lock has no timeout.** `_process_lock` uses a blocking `fcntl.flock(LOCK_EX)`. The `STATS_LOCK_TIMEOUT_S` docstring ("how long `record_use` waits") is true on Windows only. On Linux and macOS, a stopped holder (for example after `SIGSTOP`) blocks every run's stats hook indefinitely. Poll `LOCK_EX | LOCK_NB` with the same deadline, or correct the docstring. The POSIX path was checked by reading the code only. This host is Windows.
+- **m16. `write_stats` is public and takes no lock.** It has no callers outside `record_use` today. A future caller, for example a "reset stats" or rename-on-prune feature, would reopen the cross-process race. Make it private, or have it take `_process_lock`.
+
+### Still open from earlier rounds (unchanged, tracked)
+
+The deferred minors m4, m7, m9-m13 and m14 are recorded in the notes. m7, m11 and m14 still need the T057 docs.
+
+**Per-task:** T049 APPROVED. T050 APPROVED. T051 APPROVED. T052 APPROVED. T053 APPROVED.
+
+**Verdict: APPROVED.** Blockers: none. Majors: none.
