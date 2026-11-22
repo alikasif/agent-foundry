@@ -294,3 +294,183 @@ After the fixes, rerun `ruff format --check .`, `ruff check .`, `pyrefly check` 
 
 **Verdict: CHANGES_REQUESTED**. Blockers: none. Majors: MJ1 (T053), MJ2 (T050),
 MJ3 (T049), MJ4 (T053).
+
+---
+
+## Round 2
+
+**Reviewer:** backend_reviewer
+**Date:** 2026-11-22
+**Commit reviewed:** b3c2d47 (`fix(python): address T056 review round 1`), with the `### T056-fixes` notes
+**Verdict:** **CHANGES_REQUESTED** (no blockers, 1 major: MJ3 is only fixed within one process)
+
+### Verification run (this round)
+
+| Check | Result |
+|---|---|
+| `uv run ruff format --check .` | 261 files already formatted |
+| `uv run ruff check .` | All checks passed |
+| `uv run pyrefly check` | 0 errors (69 suppressed) |
+| full `uv run pytest` | **2292 passed, 52 skipped, 0 xfailed** (265 s; Docker down, `HARNESS_LIVE` unset) |
+
+**Baseline caveat (not a T056 finding).** The committed `src/harness_builder/spec/loader.py` does not
+parse at ad34dc0 or at HEAD b3c2d47 (`IndentationError`, `flagged_tool_names`). The break comes from
+the T046 MJ5 commit ad34dc0, not from T056. The b3c2d47 diff to `loader.py` only touches
+`builder_from_spec`/`_promotion_unset`. The run above used the working tree, which has an
+uncommitted fix of that function by the concurrent T046 work. **HEAD as committed is not green on any
+spec path.** The lead must make sure the T046 fix is committed.
+
+### Round-1 majors
+
+| Finding | Status | Evidence |
+|---|---|---|
+| MJ1 promotion from spec/CLI | **Fixed** | see below |
+| MJ2 retriever top-3 | **Fixed** | see below |
+| MJ3 stats replace retry | **Partly fixed: still open across processes** | see MJ3-R2 |
+| MJ4 skills-compare guard | **Fixed** | see below |
+
+**MJ1.**
+- `config_hash` and the snapshot are stable. I extracted c1a0cff (before the field) with `git archive`
+  and built four spec-loaded harnesses from `harness.yaml` on both trees: no `skills:`, `skills:`
+  default, `enabled: false`, and `top_k: 5`. All four give **an identical `config_hash` and an
+  identical `spec_snapshot`** on both trees (`e19847a2e9f5...` for the default skills section,
+  `e9e16194ee5d...` without skills).
+- The spec path works. A harness with `SkillsConfig(promotion=PromotionSpec())` and no explicit hook
+  ran a verified `run_code`. It made one run LLM call and no promotion call, and it wrote only
+  `.agents/skills-pending/<cid>/source.json`. Nothing appeared in `live`.
+- The `on_stop` mode and unknown keys are rejected by the schema.
+
+**MJ2.**
+- The fixture is untouched. In the b3c2d47 test diff only `REGRESSION_FLOOR` (46/52 to 48/52) and
+  the strict xfail removal changed in `tests/skills/test_retriever.py`. The labelled queries and
+  fixture skills were not edited, so 48/52 = 92.3% is not tuned to the fixture.
+- `test_top3_hit_rate_meets_the_assumed_threshold` passes with no xfail.
+- The stemmer changes are general: `-ies`, `-ing`/`-ed`/`-ion` with a minimum stem length, undoubling,
+  trailing `e`, and a letter/digit split.
+- Latency: my own probe ran 300 random queries over 1,000 synthetic skills. Median 2.0 ms, p95 2.7 ms,
+  max 3.4 ms. Indexing took 49 ms. This is far under the 100 ms bar.
+- Hash-seed determinism tests pass.
+- Known oddities are accepted (they do not reduce recall on the fixture): `making` gives `mak`, and
+  `nothing` gives `noth`.
+
+**MJ4.**
+- `_denied_skill_tools` runs before `compare_skills` and uses the same first-match logic as
+  `RulePermissionPolicy`.
+- `ask` counts as not allowed, and a rule that needs arg globs does not count as an allow.
+- `SkillsConfig`/`HarnessSpec` have no `visible_tools` field (grep), so the visibility half of round 1
+  does not apply to this path.
+- Three parametrized CliRunner cases cover the change and exit 2.
+- One residual case is acceptable: an arg-glob **deny** rule placed before an allow passes the guard,
+  and the run is then denied only for the matching args.
+
+### MJ3-R2 [MAJOR, data loss] T049 `skills/store.py:234-273`: a cross-process read failure wipes every other skill's stats
+
+**Problem.** The in-process lock and `replace_path` retry fix the threaded case. That is why the test
+passes. They do not cover a second process: two `harness run`/`eval` processes on one skills root, or
+`skills prune`/`stats` running beside a run.
+
+1. On Windows, `read_stats` can get `PermissionError` while another process's `os.replace` is in
+   flight.
+2. `read_stats` turns any `OSError` into `{}`.
+3. `record_use` then writes a file that holds **only its own key**.
+
+The result is not "an increment lost", as the notes say. It is the loss of every other skill's
+counters and `last_used`.
+
+**Repro** (scratch script, 4 processes x 150 `record_use` on names `p0..p3`, after seeding
+`seed` x 10):
+
+```
+run 1: {'p0': 1, 'p1': 86, 'p2': 72, 'seed': 10}     (p3 gone; expected 150 each)
+run 2: {'p1': 41}                                     (seed, p0, p2, p3 gone)
+run 3: {'p1': 36}; instrumented reads logged PermissionError(13) on read_text
+```
+
+A few writes also still raise after the 2 s backoff (3-5 per run). The `skills:stats` hook swallows
+them, so each one is a single lost use. That part is acceptable.
+
+**Why it matters.** `last_used` and the usage counts drive prune eligibility. A wiped heavily-used
+skill falls back to its `SKILL.md` mtime and can be offered for prune. The same read path feeds
+`hygiene.py:134/157/174`. A `skills prune` or `skills stats` whose read races a run's replace sees
+`{}`, so every skill looks never-used. Prune stays a dry run plus a confirmation and only moves to
+trash, so this is a major, not a blocker. The dispatch criterion "no lost writes under concurrency"
+is not met.
+
+**Fix.** It applies to every reader and writer of `stats.json`, not only `write_stats`:
+
+1. A read failure must never be followed by a write.
+2. In `read_stats`, only `FileNotFoundError` (and an absent file) reads as `{}`.
+3. Any other `OSError` is retried with the same backoff as `STATS_RETRY_DELAYS_S` and then raised.
+4. `record_use` must therefore raise instead of writing `{name: 1}`. The hook drops that one use, which
+   is the accepted loss.
+5. `hygiene` must report "stats unreadable" and exit non-zero instead of treating every skill as
+   never-used.
+
+Optional, if the lead wants zero loss: a cross-process lock around the read-modify-write, for example
+a `stats.lock` taken with `msvcrt.locking`/`fcntl.flock`.
+
+The fix needs one more decision. A corrupt `stats.json` (`ValueError`) currently also resets to `{}`
+and is overwritten. The atomic writer cannot produce a corrupt file, so this is acceptable. Either
+record it as accepted, or move the bad file aside as `stats.json.corrupt-<ts>` before writing.
+
+**Re-test.** Add a multi-process test (subprocesses, as in the repro). It must assert that the `seed`
+entry survives unchanged and that each `p*` count is short by at most that worker's own raised calls.
+It is Windows-only in effect, but should run everywhere. Fix the T056-fixes note, which says "lose an
+increment".
+
+### Minor fixes re-checked (no regressions)
+
+- **m1.** `ScopedSkillManager.frontmatter` is public. `store`/`validation` use it, and the Protocol no
+  longer exports `_parse_skill_md`.
+- **m2.** `_swap` logs a failed rollback (`OSError` only) and re-raises the original error.
+- **m5.** The docstrings are corrected.
+- **m6.** Mentioned names add at most `top_k` (`named[: self.top_k]`). The offered set still bounds
+  `activate_skill`/`run_skill_script`.
+- **m8.** Any `Exception` is recorded per candidate, and the loop goes on. `BaseException` (Ctrl-C,
+  cancellation) still aborts, which is correct.
+- **Dedup IDF change.** An unseen term now gets the weight of a term seen in one entry. Similarity can
+  only rise, so dedup finds more matches and `--auto-approve` refuses more. That is the safe direction.
+- **Deferred (m3, m4, m7, m9-m13).** These are recorded in the notes. m7 and m11 still need the T057
+  docs.
+
+### Approval gate and sandbox safety (attempted bypasses, this round)
+
+I tried the new entry point end to end with CliRunner, a fake LLM and `passing_sandbox`:
+
+1. A spec-level `promotion: {}` run left a `deferred` candidate.
+2. `skills propose` turned it into a `ready` candidate.
+3. `skills review` with EOF gave `denied`, and the `live` tree snapshot was unchanged.
+4. `skills review` with `n` gave `denied`, and the snapshot was unchanged.
+5. `skills review` with `y` gave `promoted`. It is then discovered.
+
+Spec promotion writes only under `skills-pending/<cid>`. The deferred hook's `_DeferredLLM` refuses to
+generate. Nothing outside `ApprovalGate.review` writes `live` (grep unchanged since round 1).
+
+The full suite covers the rest, and all of it passes:
+- truthy and raising approvers are a no;
+- an invalid candidate never reaches the approver;
+- auto-approve needs the marker and refuses dedup matches;
+- unlisted or non-`.py` scripts and resources are refused;
+- link escapes are refused, and mount confinement holds;
+- `run_skill_script` uses only the Executor, with no host path.
+
+Docker is still down, so the in-container paths remain unverified (as in round 1).
+
+**New minor m14 (not verified by running).** `harness replay` rebuilds the harness from
+`spec_snapshot`, which now carries `skills.promotion` when it is set, and replays the recorded
+observations. A replay of a verified run will probably write a new `source.json` in
+`skills-pending` on each replay. This is the m7 side effect, now reachable from specs. It stays behind
+the gate, so it is minor: skip promotion on replay (the same replay flag m7 needs), or document it in
+T057.
+
+### Required fixes (round 2)
+
+1. **MJ3-R2 (T049):** fix the stats read-modify-write across processes, as above, with a multi-process
+   test. Correct the implementation note.
+2. **Lead (T046, not T056):** commit the `loader.py` fix. HEAD does not parse.
+3. m14: fix with m7, or document.
+
+**Per-task:** T049 CHANGES_REQUESTED (MJ3-R2). T050 APPROVED. T051 APPROVED. T052 APPROVED.
+T053 APPROVED.
+
+**Verdict: CHANGES_REQUESTED.** Blockers: none. Majors: MJ3-R2 (T049).
