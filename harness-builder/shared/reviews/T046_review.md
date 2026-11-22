@@ -332,3 +332,92 @@ This uses the same reasoning that made MJ1 major. The generator is told which co
 2. Rerun `ruff format --check .`, `ruff check .`, `pyrefly check` and `pytest`. Skills-area failures from the concurrent T056 work are excluded.
 
 **Verdict: CHANGES_REQUESTED**
+
+## Round 3
+
+**Reviewer:** backend_reviewer
+**Date:** 2026-11-22
+**Commit reviewed:** ad34dc0 (fix(python): screen unreferenced harness files and importlib loaders (T046 MJ5))
+**Verdict:** **CHANGES_REQUESTED** (MJ5 partially fixed: the stated scope has a depth bug, and a text-only suffix bypass remains)
+
+### Verification run (this round)
+
+| Check | Result |
+|---|---|
+| `uv run ruff format --check .` | 261 files already formatted |
+| `uv run ruff check .` | All checks passed |
+| `uv run pyrefly check` | 0 errors (69 suppressed) |
+| `uv run pytest` (full, working tree incl. concurrent T056 edits) | **2292 passed, 52 skipped, 0 failed, 0 xfailed** |
+
+### MJ5 probes
+
+Setup: a copy of `tests/generator/fixtures/unit_conversion`. `tools/units.py` gets a loader prepended (`sys.path.insert(0, <dir>)` then `import helper`, unless noted). The helper holds `import socket` / `import subprocess`. The column shows `flagged_tool_names(...)`. Stage A uses the same `unreferenced_py_files`, so it sees the same result.
+
+| Variant | Result | Notes |
+|---|---|---|
+| Clean baseline | `[]` | correct |
+| `tools/helper.py` via `sys.path` (round-2 repro 1) | both tools | **fixed** |
+| `tools/helper.py` via `spec_from_file_location` + `exec_module` (round-2 repro 2) | both tools | **fixed** (loader also flagged in the module itself) |
+| Helper in subpackage `tools/sub/helper.py` | both tools | fixed |
+| Nested `helper` -> `helper2` (both under `tools/`) | both tools | fixed |
+| Helper at harness root `helper.py` | both tools | fixed |
+| `tools/tests/helper.py` | **`[]`** | **bypass** (MJ5a) |
+| `tools/reports/helper.py` | **`[]`** | **bypass** (MJ5a) |
+| `tools/__pycache__/helper.py` | **`[]`** | **bypass** (MJ5a) |
+| `tools/.hidden/helper.py` | **`[]`** | **bypass** (MJ5a) |
+| `tools/helper.txt` + `importlib.machinery.SOURCE_SUFFIXES.append(".txt")` | **`[]`** | **bypass** (MJ5b); the loader module itself has zero findings |
+| Root `tests/helper.py` | `[]` | out of the declared scope, see minors |
+| `skills/x/helper.py`, `evals/helper.py` | `[]` | documented known limit |
+| `tools/helper.pyc` (sourceless) | `[]` | not reachable by the generator, see minors |
+| `tools/h.zip` via zipimport | `[]` | not practically reachable, see minors |
+| Symlinks | not run (Windows privilege) | not reachable, see minors |
+
+**Execution confirmed.** I loaded `units.py` with `python -I` through `spec_from_file_location`, the same way `hb_entry` does, from a neutral CWD. For both the `tools/tests/helper.py` variant and the `.txt` suffix variant, the helper module ran and `socket` was in `sys.modules`. Both are real bypasses, not screen-only artefacts.
+
+**Reachability.** `confine` (`generator/harness.py:79-115`) reserves only **top-level** names (`reports`, meta, schema, staging marker). `staging_rules` denies only absolute, backslash, drive and `..` patterns. So `tools/tests/helper.py`, `tools/reports/helper.py`, `tools/__pycache__/helper.py`, `tools/.hidden/helper.py` and `tools/helper.txt` are all legal `write_file` paths. `container_tool.py:427` mounts the whole harness dir read-only at `TOOLS_MOUNT`, so every one of these files is visible to the tool at run time.
+
+### Findings
+
+#### MJ5a [MAJOR, FR-032] `spec/loader.py:444-446` `_skipped`: the exclusions apply at every depth, so `tools/` is not fully screened
+
+`_skipped` checks every parent component (`rel.parts[:-1]`) against `UNSCREENED_DIRS` and the hidden prefix. Any `tests/`, `reports/`, `__pycache__/` or `.x/` directory **inside** `tools/` (or inside a tool module's dir) is therefore skipped. The `unreferenced_py_files` docstring promises "every `*.py` under `tools/`". This is the original MJ5 split-module attack with one extra path component.
+
+**Fix.** Apply the exclusions to the **top-level** component only (`rel.parts[0]` when `len(rel.parts) > 1`). Never skip anything deeper inside a scanned directory. Tests: `tools/tests/helper.py`, `tools/__pycache__/helper.py` and `tools/.hidden/helper.py` each give `ALL_TOOLS`. The existing `test_non_python_and_out_of_scope_files_are_ignored` puts files at the root only, which is why this was missed.
+
+#### MJ5b [MAJOR, FR-032] `safety/screen.py`: import-system mutation is not screened, so a non-`.py` helper can be imported
+
+```python
+import importlib.machinery as m, sys
+m.SOURCE_SUFFIXES.append(".txt"); sys.path_importer_cache.clear()
+sys.path.insert(0, str(Path(__file__).parent)); import helper   # loads tools/helper.txt
+```
+
+The screen reports nothing for this module. `unreferenced_py_files` only globs `*.py`, so `helper.txt` is never screened. Round 2 asked for "a non-`.py` file never matters" as a test, and this vector defeats that. It is plain text, needs no `getattr` trick, and is not a documented limit.
+
+**Fix.** Make any reference to the import machinery a `dynamic_exec` finding. That covers attribute access, not only calls, so `.append` and assignment are both caught:
+- `importlib.machinery.SOURCE_SUFFIXES`, `BYTECODE_SUFFIXES` and `EXTENSION_SUFFIXES`;
+- `sys.meta_path`, `sys.path_hooks` and `sys.path_importer_cache`.
+
+Add a test that the snippet above flags. *Optional, recommended:* `hb_entry` removes the harness dirs from `sys.path`, so a tool cannot import a sibling at all without mutating `sys.path`. Flagging `sys.path` mutation (`sys.path.insert`/`append`/`extend`, or assignment to `sys.path`) as `dynamic_exec` would close the whole file-scope class: depth, `skills/`, `evals/`, root `tests/`, zip and `.pyc`. The directory scan would then be defence in depth rather than the only guard. A generated tool that edits `sys.path` deserves an `ask` anyway.
+
+#### Minors (not blocking; record as accepted / known limits)
+
+- **m7.** Root `tests/` is excluded but writable by the generator and mounted at run time. It belongs in the same known-limit bucket as `skills/` and `evals/`, which the notes accept. Add it to the `### T046-fixes-r2` known-limits sentence. It is closed for free if the optional `sys.path` rule above is taken.
+- **m8.** `.pyc` and zipimport helpers are not screened. They are not practically reachable: `write_file` encodes content as UTF-8 (`harness.py:204`), so the `.pyc` magic number cannot be written, and a crafted stored zip is contrived. List them as known limits in the screen docstring.
+- **m9.** Symlinks: the generator cannot create one, and `unreferenced_py_files` resolves paths and keeps only targets inside the root. No action.
+- **Accepted:** the `skills/` / `evals/` scope narrowing is a reasoned, documented trade-off (skills ship scripts). It is acceptable as a known limit, given that Docker `--network none` remains the real boundary.
+
+### Positive notes
+
+- Both round-2 repros are fixed. Root, subpackage and nested-import helpers are caught, and an unparsable helper fails closed.
+- `_screen_unreferenced` and `flagged_tool_names` share `unreferenced_py_files`, so the MJ5a depth fix lands in one function and both stage A and run time pick it up.
+- The optional round-2 items (`compile`, `types.FunctionType`, `pickle`, `marshal`) were all done, and the remaining limits are honestly listed in the screen docstring and the notes.
+- The full suite is green, including the skills area. Ruff and pyrefly are clean.
+
+### Checklist for round 4
+
+1. **MJ5a:** restrict `_skipped` to the top-level component, with tests for `tools/tests/`, `tools/__pycache__/` and `tools/.hidden/`.
+2. **MJ5b:** flag import-machinery mutation (`*_SUFFIXES`, `meta_path`, `path_hooks`, `path_importer_cache`) as `dynamic_exec`, with a test. Optionally also flag `sys.path` mutation.
+3. Update the known limits: root `tests/`, `.pyc` and zip.
+
+**Verdict: CHANGES_REQUESTED**
