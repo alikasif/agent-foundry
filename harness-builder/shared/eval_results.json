@@ -1,0 +1,273 @@
+{
+  "task": "T060",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "docker": {
+    "available": false,
+    "detail": "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified."
+  },
+  "harness_live_env": null,
+  "live_taskcases": {
+    "run": false,
+    "skip_reason": "HARNESS_LIVE is not 1"
+  },
+  "fixture_harness_evals": [
+    {
+      "domain": "csv_triage",
+      "generation_status": "pass",
+      "mode": "offline",
+      "llm": "fake (scripted)",
+      "docker": "emulated (in-process hb_entry; no container)",
+      "tool_cases_deterministic": true,
+      "live_skip": "HARNESS_LIVE is not 1",
+      "totals": {
+        "cases": 4,
+        "passed": 4,
+        "failed": 0,
+        "not_run": 0,
+        "incomplete": 0,
+        "success_rate": 1.0,
+        "mean_steps": 2.0,
+        "tokens": 321,
+        "cost": null
+      },
+      "cases": [
+        {
+          "id": "groups-by-severity",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "counts-by-status",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "empty-export",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "worst-first",
+          "kind": "task",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 321,
+          "cost_usd": null,
+          "detail": null
+        }
+      ]
+    },
+    {
+      "domain": "repo_qa",
+      "generation_status": "pass",
+      "mode": "offline",
+      "llm": "fake (scripted)",
+      "docker": "emulated (in-process hb_entry; no container)",
+      "tool_cases_deterministic": true,
+      "live_skip": "HARNESS_LIVE is not 1",
+      "totals": {
+        "cases": 4,
+        "passed": 4,
+        "failed": 0,
+        "not_run": 0,
+        "incomplete": 0,
+        "success_rate": 1.0,
+        "mean_steps": 2.0,
+        "tokens": 277,
+        "cost": null
+      },
+      "cases": [
+        {
+          "id": "lists-files",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "finds-port",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "reads-changelog",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "which-port",
+          "kind": "task",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 277,
+          "cost_usd": null,
+          "detail": null
+        }
+      ]
+    },
+    {
+      "domain": "unit_conversion",
+      "generation_status": "pass",
+      "mode": "offline",
+      "llm": "fake (scripted)",
+      "docker": "emulated (in-process hb_entry; no container)",
+      "tool_cases_deterministic": true,
+      "live_skip": "HARNESS_LIVE is not 1",
+      "totals": {
+        "cases": 5,
+        "passed": 5,
+        "failed": 0,
+        "not_run": 0,
+        "incomplete": 0,
+        "success_rate": 1.0,
+        "mean_steps": 2.0,
+        "tokens": 276,
+        "cost": null
+      },
+      "cases": [
+        {
+          "id": "km-to-m",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "mile-to-km",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "freezing-in-f",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "boiling-in-k",
+          "kind": "tool",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 0,
+          "cost_usd": 0.0,
+          "detail": null
+        },
+        {
+          "id": "marathon",
+          "kind": "task",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 276,
+          "cost_usd": null,
+          "detail": null
+        }
+      ]
+    }
+  ],
+  "skills_comparison": {
+    "mode": "offline",
+    "llm": "fake (scripted, engineered to differ)",
+    "docker": "none needed (FakeExecutor; run_skill_script never called)",
+    "seeded_skills": 1,
+    "empty": {
+      "totals": {
+        "cases": 1,
+        "passed": 1,
+        "failed": 0,
+        "not_run": 0,
+        "incomplete": 0,
+        "success_rate": 1.0,
+        "mean_steps": 3.0,
+        "tokens": 478,
+        "cost": null
+      },
+      "cases": [
+        {
+          "id": "sum-4-5-6",
+          "kind": "task",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 3.0,
+          "tokens": 478,
+          "cost_usd": null,
+          "detail": null
+        }
+      ]
+    },
+    "seeded": {
+      "totals": {
+        "cases": 1,
+        "passed": 1,
+        "failed": 0,
+        "not_run": 0,
+        "incomplete": 0,
+        "success_rate": 1.0,
+        "mean_steps": 2.0,
+        "tokens": 628,
+        "cost": null
+      },
+      "cases": [
+        {
+          "id": "sum-4-5-6",
+          "kind": "task",
+          "status": "pass",
+          "success_rate": 1.0,
+          "steps": 2.0,
+          "tokens": 628,
+          "cost_usd": null,
+          "detail": null
+        }
+      ]
+    },
+    "step_reduction": 0.3333333333333333,
+    "success_not_dropped": true,
+    "oq15_threshold": 0.2,
+    "oq15_mechanics_ok": true,
+    "oq15_measured_live": false,
+    "note": "Scripted model: proves the comparison mechanics and arithmetic only. The OQ-15 criterion is NOT measured (needs a live LLM)."
+  }
+}
