@@ -21,10 +21,11 @@ constructs in five categories:
   ``runpy.run_path`` / ``run_module``, ``ctypes`` imports (native code is
   arbitrary execution), any reference to ``importlib.machinery.*_SUFFIXES``,
   ``sys.meta_path``, ``sys.path_hooks`` or ``sys.path_importer_cache``, and
-  any mutation of ``sys.path`` (``insert`` / ``append`` / ``extend`` / ...,
-  assignment, item assignment). ``hb_entry`` keeps the harness off
-  ``sys.path``, so a tool cannot import a sibling without such a mutation
-  (T046 MJ5b);
+  any reference to ``sys.path`` at all (reads, aliases, ``from sys import
+  path``, mutation) and any ``site`` / ``sitecustomize`` / ``usercustomize``
+  import. ``hb_entry`` keeps the harness off ``sys.path``, so a tool cannot
+  import a sibling or process a ``.pth`` file without one of these (T046 MJ5b,
+  T048 MA1);
 - ``secret``: key-like string literals, string literals assigned to
   secret-looking names, and high-entropy string literals.
 
@@ -33,10 +34,10 @@ flow, and it flags every delete because "outside the workdir" is not
 decidable statically. Known limits: ``getattr(os, "system")`` style
 indirection (including ``getattr(builtins, "ex" + "ec")``), other
 deserialisers (``shelve``, ``dill``) and overwriting moves (``shutil.move``,
-``os.replace``, ``os.rename``) are not reported. ``.pyc`` and zip helpers are not
-screened (``write_file`` writes UTF-8 text, so neither is practically
-reachable). Each file is screened alone,
-so cross-file loading is caught by the caller screening sibling files too
+``os.replace``, ``os.rename``) are not reported. Only ``.py`` source is
+screened: the caller must fail closed on ``.pth``/``.pyc``/``.so``/``.zip``
+files (``spec.loader.unscreenable_files``). Each file is screened alone, so
+the caller screens every ``*.py`` the container can see
 (``spec.loader.unreferenced_py_files``). Pure stdlib leaf module.
 """
 
@@ -85,7 +86,7 @@ SUBPROCESS_CALLS = frozenset(
     }
 )
 SUBPROCESS_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn", "os.fork")
-DYNAMIC_EXEC_MODULES = frozenset({"ctypes"})
+DYNAMIC_EXEC_MODULES = frozenset({"ctypes", "site", "sitecustomize", "usercustomize"})
 DELETE_CALLS = frozenset(
     {"os.remove", "os.unlink", "os.rmdir", "os.removedirs", "shutil.rmtree"}
 )
@@ -122,9 +123,6 @@ IMPORT_SYSTEM_NAMES = frozenset(
 SUFFIXES_PREFIX = "importlib.machinery."
 SUFFIXES_SUFFIX = "_SUFFIXES"
 SYS_PATH = "sys.path"
-SYS_PATH_MUTATORS = frozenset(
-    {"insert", "append", "extend", "remove", "pop", "clear", "sort", "reverse"}
-)
 
 KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
@@ -217,7 +215,7 @@ class _Screener(ast.NodeVisitor):
             origin = f"{module}.{alias.name}" if module else alias.name
             if node.level == 0 and origin.startswith(NETWORK_SUBMODULES):
                 self._check_module(origin, node.lineno, "from-import")
-            if node.level == 0 and _import_system(origin):
+            if node.level == 0 and (_import_system(origin) or origin == SYS_PATH):
                 self.findings.append(
                     Finding("dynamic_exec", node.lineno, f"import {origin}")
                 )
@@ -228,26 +226,14 @@ class _Screener(ast.NodeVisitor):
         name = self._qualified(node)
         if name is not None and _import_system(name):
             self._add("dynamic_exec", node, f"import system {name}")
-        if name == SYS_PATH and not isinstance(node.ctx, ast.Load):
-            self._add("dynamic_exec", node, f"assign {name}")
-        self.generic_visit(node)
-
-    def visit_Subscript(self, node: ast.Subscript) -> None:
-        if (
-            not isinstance(node.ctx, ast.Load)
-            and self._qualified(node.value) == SYS_PATH
-        ):
-            self._add("dynamic_exec", node, f"assign {SYS_PATH}[...]")
+        if name == SYS_PATH:
+            self._add("dynamic_exec", node, f"reference {name}")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         name = self._qualified(node.func)
         if name is not None:
             self._check_call(name, node)
-        if isinstance(node.func, ast.Attribute):
-            owner = self._qualified(node.func.value)
-            if owner == SYS_PATH and node.func.attr in SYS_PATH_MUTATORS:
-                self._add("dynamic_exec", node, f"call {owner}.{node.func.attr}()")
         if isinstance(node.func, ast.Attribute) and node.func.attr in DELETE_METHODS:
             if name not in DELETE_CALLS:
                 self._add("delete", node, f"call .{node.func.attr}()")

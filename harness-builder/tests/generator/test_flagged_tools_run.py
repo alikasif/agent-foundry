@@ -245,14 +245,70 @@ def test_clean_helper_flags_nothing(tmp_path: Path) -> None:
     assert flagged_after(root) == []
 
 
-def test_non_python_and_out_of_scope_files_are_ignored(tmp_path: Path) -> None:
+def test_non_python_files_and_reports_are_ignored(tmp_path: Path) -> None:
     root = write_harness(tmp_path / "h", host_files("clean"))
     (root / "tools" / "notes.txt").write_text("import socket\n", encoding="utf-8")
-    for rel in ("tests/test_x.py", "reports/r.py", "skills/s/run.py"):
-        path = root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(RISKY_HELPER, encoding="utf-8")
+    (root / "reports").mkdir(exist_ok=True)
+    (root / "reports" / "r.py").write_text(RISKY_HELPER, encoding="utf-8")
     assert flagged_after(root) == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["tests/test_x.py", "skills/s/run.py", "evals/x/h.py", ".hidden/h.py", "h.py"],
+)
+def test_every_dir_of_the_mounted_tree_is_screened(tmp_path: Path, rel: str) -> None:
+    """T048 MA1: the screened set is the whole ``/tools`` mount, minus reports."""
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(RISKY_HELPER, encoding="utf-8")
+    assert flagged_after(root) == ALL_TOOLS
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [
+        "import sys\n_p = sys.path\n_p.insert(0, '/tools/tests')\nimport helper\n",
+        "import sys\nlist.insert(sys.path, 0, '/tools/tests')\nimport helper\n",
+        "import sys\n[sys.path][0].insert(0, '/tools/tests')\nimport helper\n",
+        "import site\nsite.addsitedir('/tools/evals/x')\n",
+    ],
+)
+def test_plain_text_sys_path_and_site_forms_flag_every_tool(
+    tmp_path: Path, loader: str
+) -> None:
+    """T048 MA1 probes: the loader is flagged whatever the helper holds."""
+    files = host_files("clean")
+    files["tools/units.py"] = loader + files["tools/units.py"]
+    files["tests/helper.py"] = "VALUE = 1\n"
+    assert flagged_after(write_harness(tmp_path / "h", files)) == ALL_TOOLS
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "evals/x/a.pth",
+        "tools/__pycache__/units.cpython-313.pyc",
+        "tests/native.so",
+        "lib/native.pyd",
+        "data/bundle.zip",
+    ],
+)
+def test_unscreenable_file_anywhere_fails_closed(tmp_path: Path, rel: str) -> None:
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"import socket\n")
+    assert flagged_after(root) == ALL_TOOLS
+
+
+def test_pth_file_reaches_the_run_time_rules(tmp_path: Path) -> None:
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    (root / "evals" / "x").mkdir(parents=True)
+    (root / "evals" / "x" / "a.pth").write_text("import os\n", encoding="utf-8")
+    ids, _ = build_config(root)
+    assert ids == [f"safety:{name}" for name in ALL_TOOLS]
 
 
 @pytest.mark.parametrize(

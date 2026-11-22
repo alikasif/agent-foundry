@@ -442,6 +442,28 @@ def test_skills_spec_errors_are_located(
         from_dir(root)
 
 
+def test_spec_skills_root_with_docker_tool_is_refused(
+    tmp_path: Path, installer: Any
+) -> None:
+    """T058 MA-4 probe: a pending candidate under ``lib/.agents`` stays unmounted."""
+    pending = tmp_path / "lib" / ".agents" / "skills-pending" / "c1" / "scripts"
+    pending.mkdir(parents=True)
+    (pending / "evil.py").write_text("VALUE = 1\n", encoding="utf-8")
+    root = harness_with_tool(tmp_path, extra="skills: {root: lib}\n")
+    with pytest.raises(SpecError, match=r"skills\.root: .*mounted at /tools"):
+        from_dir(root)
+    assert installer.calls == []
+
+
+def test_spec_skills_root_with_host_tool_is_allowed(
+    tmp_path: Path, installer: Any
+) -> None:
+    (tmp_path / "lib").mkdir()
+    root = harness_with_tool(tmp_path, "host", extra="skills: {root: lib}\n")
+    from_dir(root, trust_host_tools=True)
+    assert len(installer.calls) == 1
+
+
 def test_unavailable_skills_extension_is_a_config_error(tmp_path: Path) -> None:
     register_spec_extension("skills", "no_such_module_t040:install", replace=True)
     try:

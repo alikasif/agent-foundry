@@ -174,6 +174,21 @@ async def test_non_secret_findings_flag_but_do_not_reject(store: SkillStore) -> 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "extra", ["import sys\nsys.path.insert(0, '/tmp')", "import site\nsite.main()"]
+)
+async def test_import_path_tricks_flag_but_do_not_reject(
+    store: SkillStore, extra: str
+) -> None:
+    """T058 MA-5: the T048 MA1 screen rules reach skill validation as flagged."""
+    script = SCRIPT.replace("import sys", extra, 1)
+    report = await validate(store, passing_sandbox(), skill_reply(script=script))
+    assert report.ok and report.flagged
+    categories = {f.category for screen in report.safety for f in screen.findings}
+    assert categories == {"dynamic_exec"}
+
+
+@pytest.mark.anyio
 async def test_test_file_findings_are_screened_too(store: SkillStore) -> None:
     test = TEST + "\nimport subprocess\n"
     report = await validate(store, passing_sandbox(), skill_reply(test=test))

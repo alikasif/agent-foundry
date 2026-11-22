@@ -106,7 +106,10 @@ sys.exit(1 if failed or not ran else 0)
 """Stdlib test runner (the sandbox image has no pytest).
 
 A pass needs exit code 0 *and* the sentinel as the last stdout line, so a
-``sys.exit(0)`` or ``os._exit(0)`` in the script or a test is a failure."""
+``sys.exit(0)`` or ``os._exit(0)`` before the runner prints it is a failure.
+A forged pass (print the sentinel, then ``os._exit(0)``) is not detected: the
+sandbox is the boundary and the approver reads the code, which the safety
+screen flags (``os._exit`` is not a screen finding, so review the script)."""
 PASS_SENTINEL = re.compile(r"HB-SKILL-TESTS ran=[1-9][0-9]* failed=0")
 
 

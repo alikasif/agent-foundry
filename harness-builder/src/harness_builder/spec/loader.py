@@ -43,6 +43,7 @@ import importlib
 import importlib.util
 import inspect
 import json
+import os
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -333,6 +334,7 @@ def builder_from_spec(
     hooks = _hooks(spec, base_dir, source, trusted=builder.trust_host_tools)
     load_eval_cases(spec, base_dir, source)
     skills = _skills(spec, base_dir, source)
+    _check_library_not_mounted(spec, skills, source)
     installer = None if skills is None else _extension("skills", source)
     if spec.model is not None:
         builder.model(
@@ -405,59 +407,69 @@ def flagged_tool_names(
     return list(dict.fromkeys(flagged))
 
 
-UNSCREENED_DIRS = frozenset({"reports", "tests", "__pycache__"})
-TOOLS_DIR = "tools"
+UNSCREENED_DIRS = frozenset({"reports"})
+UNSCREENABLE_SUFFIXES = frozenset(
+    {".pth", ".pyc", ".pyo", ".so", ".pyd", ".zip", ".egg", ".whl"}
+)
 
 
 def unreferenced_py_files(spec: HarnessSpec, base_dir: Path) -> list[Path]:
-    """Python files a tool module could load but the spec does not name.
+    """Python files in the mounted harness tree that the spec does not name.
 
-    A tool can import a sibling (``sys.path.insert`` plus ``import helper``)
-    or load it by path (``importlib.util``), so the screen must cover those
-    files too (T046 MJ5). Scope: ``*.py`` directly in the harness root, every
-    ``*.py`` under ``tools/`` and under the directory of any referenced tool
-    module. Skipped: top-level ``reports/``, ``tests/``, ``__pycache__`` and
-    hidden directories (never anything nested inside a scanned directory),
-    files resolving outside the harness, and hook modules (host code, gated by
-    ``--trust-tools``). Known limits: ``skills/``, ``evals/`` and root
-    ``tests/`` are not scanned (a tool cannot import from them without
-    mutating ``sys.path``, which the screen flags), nor are ``.pyc`` or zip
-    helpers. Sorted, so results are stable.
+    ``ContainerTool`` mounts the whole harness directory at ``/tools``, so the
+    screen covers the whole tree (T048 MA1): every ``*.py`` at any depth,
+    including hidden directories, except those under the top-level
+    ``reports/`` (pipeline-owned, never writable by the generator), files
+    resolving outside the harness, and the tool and hook modules the spec
+    names (tool modules are screened per reference; hook modules are host code,
+    gated by ``--trust-tools``). No directory is exempt, not even ``skills/``
+    or ``tests/``. Files the screen cannot read, such as ``.pth`` or ``.pyc``,
+    are handled by ``unscreenable_files``. Sorted, so results are stable.
     """
     root = base_dir.resolve()
-    tool_refs = [ref for ref in spec.tools if isinstance(ref, ModuleToolRef)]
-    named = {(root / ref.module).resolve() for ref in tool_refs}
-    named |= {
+    named = {
         (root / ref.module).resolve()
-        for ref in spec.hooks
-        if isinstance(ref, ModuleHookRef)
+        for ref in [*spec.tools, *spec.hooks]
+        if isinstance(ref, ModuleToolRef | ModuleHookRef)
     }
-    dirs = {TOOLS_DIR, *(Path(ref.module).parent.as_posix() for ref in tool_refs)}
-    found = set(root.glob("*.py"))
-    for rel in dirs - {"."}:
-        found |= set((root / rel).rglob("*.py"))
+    return sorted(
+        path for path in _tree_files(root) if path.suffix == ".py" and path not in named
+    )
+
+
+def unscreenable_files(base_dir: Path) -> list[Path]:
+    """Files in the mounted tree that can execute but that no screen can read.
+
+    ``.pth`` (processed by ``site``), ``.pyc``/``.pyo`` (loaded in place of
+    their source), ``.so``/``.pyd`` and zip-like archives. Any one of them
+    makes the caller flag every module tool (fail closed, T048 MA1). Same
+    scope as ``unreferenced_py_files``.
+    """
+    root = base_dir.resolve()
     return sorted(
         path
-        for path in map(Path.resolve, found)
-        if path.is_relative_to(root)
-        and path not in named
-        and not _skipped(path.relative_to(root))
+        for path in _tree_files(root)
+        if path.suffix.lower() in UNSCREENABLE_SUFFIXES
     )
 
 
-def _skipped(rel: Path) -> bool:
-    """True when the top-level directory of ``rel`` is excluded or hidden.
-
-    Only the first component counts: a ``tests/`` or ``.x/`` directory nested
-    under ``tools/`` is writable and importable, so it must be screened.
-    """
-    return len(rel.parts) > 1 and (
-        rel.parts[0] in UNSCREENED_DIRS or rel.parts[0].startswith(".")
-    )
+def _tree_files(root: Path) -> list[Path]:
+    """Resolved files under ``root`` outside the unscreened top-level dirs."""
+    found: list[Path] = []
+    for current, dirs, names in os.walk(root):
+        if Path(current) == root:
+            dirs[:] = [d for d in dirs if d not in UNSCREENED_DIRS]
+        found += (Path(current) / name for name in names)
+    return [path for path in map(Path.resolve, found) if path.is_relative_to(root)]
 
 
 def _unreferenced_flagged(spec: HarnessSpec, base_dir: Path) -> bool:
-    """True if any unreferenced file has a finding or cannot be read/parsed."""
+    """True if any unreferenced file has a finding or cannot be read/parsed.
+
+    Also True when the tree holds a file no screen can read (fail closed).
+    """
+    if unscreenable_files(base_dir):
+        return True
     for path in unreferenced_py_files(spec, base_dir):
         try:
             if screen(path).flagged:
@@ -841,7 +853,12 @@ def _module_hook(
             raise ImportError(f"cannot load {ref.module}")
         module = importlib.util.module_from_spec(module_spec)
         sys.modules[name] = module
-        module_spec.loader.exec_module(module)
+        write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True  # a .pyc would trip the screen (T048 MA1)
+        try:
+            module_spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = write_bytecode
     except Exception as exc:  # module top-level code may raise anything
         raise ConfigError(f"{source}: {where}: {type(exc).__name__}: {exc}") from exc
     fn = getattr(module, ref.function, None)
@@ -865,6 +882,35 @@ def _skills(
     if not root.is_dir():
         raise spec_error(source, "skills.root", f"{skills.root} is not a directory")
     return skills.model_copy(update={"root": str(root)}) if skills.enabled else None
+
+
+def _check_library_not_mounted(
+    spec: HarnessSpec, skills: SkillsConfig | None, source: str
+) -> None:
+    """Refuse a spec-set skills root next to docker module tools (T058 MA-4).
+
+    ``ContainerTool`` mounts the whole harness directory at ``/tools``. A spec
+    ``skills.root`` lies inside it, so ``<root>/.agents/`` (unapproved
+    candidates in ``skills-pending/``, the live library) would be visible to
+    tool code that the screen never covers. Keep the library outside the
+    harness directory (``--skills-root`` / ``HARNESS_SKILLS_ROOT``) or run the
+    tools with ``runtime: host``.
+    """
+    if skills is None or skills.root is None:
+        return
+    mounted = [
+        ref.function
+        for ref in spec.tools
+        if isinstance(ref, ModuleToolRef) and ref.runtime == "docker"
+    ]
+    if mounted:
+        raise spec_error(
+            source,
+            "skills.root",
+            f"a skills root inside the harness directory would be mounted at "
+            f"/tools for the docker tools {mounted}; keep the library outside "
+            "the harness directory (--skills-root, HARNESS_SKILLS_ROOT)",
+        )
 
 
 def _extension(section: str, source: str) -> SpecExtension:

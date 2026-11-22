@@ -193,7 +193,14 @@ def load_tool(module_path: Path, func_name: str) -> LoadedTool:
         raise ToolLoadError(f"cannot load tool module: {module_path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module  # pydantic resolves string annotations here
-    spec.loader.exec_module(module)
+    # No .pyc next to the tool: a .pyc in the tree makes the safety screen fail
+    # closed (T048 MA1), and the host-side trust path must not create one.
+    write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = write_bytecode
     fn = getattr(module, func_name, None)
     if not inspect.isfunction(fn):
         raise ToolLoadError(f"{module_path.name} has no function {func_name!r}")

@@ -410,11 +410,35 @@ def test_import_system_mutation_is_dynamic_exec(source: str) -> None:
 @pytest.mark.parametrize(
     "source",
     [
-        "import sys\nfirst = sys.path[0]\n",
-        "import sys\nprint(sys.version, sys.argv, list(sys.path))\n",
+        "import sys\nprint(sys.version, sys.argv, sys.modules)\n",
         "import os\nos.path.join('a', 'b')\n",
         "import sys\nsys.modules.get('json')\n",
+        "import pathlib\npathlib.Path('x').parent\n",
     ],
 )
-def test_reading_sys_path_and_unrelated_attributes_stay_clean(source: str) -> None:
+def test_unrelated_sys_and_path_attributes_stay_clean(source: str) -> None:
     assert categories(source) == set()
+
+
+# --- T048 MA1: plain-text sys.path and site forms ----------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import sys\nfirst = sys.path[0]\n",
+        "import sys\nprint(list(sys.path))\n",
+        "import sys\np = sys.path\np.insert(0, d)\nimport helper\n",
+        "import sys\nlist.insert(sys.path, 0, d)\nimport helper\n",
+        "import sys\n[sys.path][0].insert(0, d)\n",
+        "from sys import path\n",
+        "from sys import path as p\np.insert(0, d)\n",
+        "import site\nsite.addsitedir(d)\nimport helper\n",
+        "import site as s\ns.addsitedir(d)\n",
+        "from site import addsitedir\n",
+        "import sitecustomize\n",
+        "import usercustomize\n",
+    ],
+)
+def test_sys_path_reference_and_site_use_are_dynamic_exec(source: str) -> None:
+    assert categories(source) == {"dynamic_exec"}
