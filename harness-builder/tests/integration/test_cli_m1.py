@@ -33,6 +33,7 @@ from harness_builder.strategies import registry
 from harness_builder.strategies.react import ReActStrategy
 from harness_builder.trace.recorder import load_trace, write_trace
 
+PROJECT_DOTENV = Path(__file__).resolve().parents[2] / ".env"
 SECRET = "sk-or-ABCDEFGH12345"
 MODEL = "openai/gpt-4o-mini"
 ENV: dict[str, str | None] = {
@@ -556,10 +557,19 @@ def test_run_code_spec_runs_in_docker(invoke: Invoke, tmp_path: Path) -> None:
 
 @pytest.mark.live
 def test_run_with_real_llm(tmp_path: Path) -> None:
-    """One real OpenRouter call through the default ``LLM_FACTORY``."""
+    """One real OpenRouter call through the default ``LLM_FACTORY``.
+
+    The autouse fixture runs in an empty cwd, so the project ``.env`` is read
+    explicitly and its key handed to the CLI through the invoke environment.
+    """
+    key = Settings.from_env(dotenv_path=PROJECT_DOTENV).openrouter_api_key
+    if key is None:
+        pytest.skip("OPENROUTER_API_KEY not set in the environment or project .env")
     h = write_spec(tmp_path / "hl")
     result = CliRunner().invoke(
-        cli_main.main, ["run", str(h), "Reply with the single word: pong"]
+        cli_main.main,
+        ["run", str(h), "Reply with the single word: pong"],
+        env={"OPENROUTER_API_KEY": key.get_secret_value()},
     )
     assert result.exit_code == 0, result.output
     assert "pong" in result.stdout.lower()
