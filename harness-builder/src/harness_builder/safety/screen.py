@@ -30,11 +30,15 @@ constructs in five categories:
   (T046 MJ5b, T048 MA1, T062 MJ1). Imports of stdlib modules that compile and
   run a string or file (``timeit``, ``code``, ``codeop``, ``pdb``, ``bdb``,
   ``cProfile``, ``profile``, ``trace``, ``doctest``, ``zipimport``,
-  ``importlib._bootstrap*``, ``importlib.abc``, ``logging.config``,
-  ``webbrowser``, ``_ctypes``), any reference to the ``importlib.machinery``
-  file loaders and ``FileFinder``, and ``.get_code()`` / ``.source_to_code()``
-  / ``.get_source()`` / ``.load_extension()`` calls are flagged too, so code
-  stored in a non-``.py`` file cannot be run unseen (T062 MJ2, R2-MJ2);
+  ``importlib._bootstrap*``, ``_frozen_importlib*``, ``importlib.abc``,
+  ``logging.config``, ``webbrowser``, ``_ctypes``), calls to ``breakpoint()``
+  and ``sys.breakpointhook()`` (they run ``.pdbrc``), any reference to the
+  ``importlib.machinery`` file loaders and ``FileFinder``, and
+  ``.get_code()`` / ``.source_to_code()`` / ``.get_source()`` /
+  ``.load_extension()`` calls are flagged too, so the direct ways to run code
+  stored in a non-``.py`` file are seen. This is a best-effort list, not a
+  proof; Docker (``--network none``, read-only harness mount) is the real
+  boundary (T062 MJ2, R2-MJ2, R3-MJ1/MJ2);
 - ``secret``: key-like string literals, string literals assigned to
   secret-looking names, and high-entropy string literals.
 
@@ -119,6 +123,9 @@ DYNAMIC_EXEC_MODULES = frozenset(
         "zipimport",
         "webbrowser",
         "_ctypes",
+        # CPython's own names for importlib._bootstrap(_external).
+        "_frozen_importlib",
+        "_frozen_importlib_external",
     }
 )
 DYNAMIC_EXEC_SUBMODULES = ("logging.config", "importlib._bootstrap", "importlib.abc")
@@ -154,6 +161,10 @@ DYNAMIC_EXEC_CALLS = frozenset(
         "pickle.loads",
         "marshal.load",
         "marshal.loads",
+        # breakpoint() imports pdb, which runs the commands in a .pdbrc file.
+        "breakpoint",
+        "builtins.breakpoint",
+        "sys.breakpointhook",
     }
 )
 DYNAMIC_EXEC_METHODS = frozenset(

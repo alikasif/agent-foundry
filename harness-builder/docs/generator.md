@@ -151,7 +151,7 @@ a `--trust-tools` one cannot). Only a stored `false` counts as "skipped cases";
 a missing or any other value counts as "all ran", so legacy and malformed metas
 fail closed (they need a run with every case executed, `--live` when TaskCases
 exist). A refused upgrade leaves the `fail` in place (use `--allow-failed` to run
-it). `trusted_tools` is informational. A hand-written harness has no meta file
+it). `trusted_tools` is informational and follows the latest verdict. An unrecognised `status` counts as a `fail`. A hand-written harness has no meta file
 and gets none.
 
 ### Options
@@ -219,7 +219,7 @@ risky constructs in five categories:
 | `network` | imports of `socket`, `ssl`, `urllib`, `urllib3`, `requests`, `httpx`, `aiohttp`, `http.client`, `http.server`, `ftplib`, `smtplib`, `poplib`, `imaplib`, `telnetlib`, `xmlrpc`, `websocket(s)` (also through dynamic imports), `asyncio.open_connection` / `open_unix_connection` / `start_server` |
 | `subprocess` | imports of `subprocess`, `pty`, `multiprocessing`, `posix`, `nt`, `_posixsubprocess`; `os.system`, `os.popen`, `os.exec*`, `os.spawn*`, `os.fork*`; `asyncio.create_subprocess_exec` / `_shell` |
 | `delete` | `os.remove`, `os.unlink`, `os.rmdir`, `os.removedirs`, `shutil.rmtree`, `.unlink()`, `.rmdir()` |
-| `dynamic_exec` | `eval`, `exec`, `compile`, `__import__`, `importlib.import_module`, the `importlib.util` / `importlib.machinery` loaders, `.exec_module()` / `.load_module()`, `runpy`, `pickle` / `marshal` loads, `types.FunctionType`, `ctypes`; the import-system hooks (`sys.meta_path`, `sys.path_hooks`, `sys.path_importer_cache`, `importlib.machinery.*_SUFFIXES`); **any reference to `sys.path`** (reads, aliases, `from sys import path`, mutation); any import of `site`, `sitecustomize` or `usercustomize`; relative imports and any binding of `__path__`, `__package__` or `__spec__`; imports of stdlib modules that run a string or file (`timeit`, `code`, `codeop`, `pdb`, `bdb`, `cProfile`, `profile`, `trace`, `doctest`, `zipimport`, `importlib._bootstrap*`, `importlib.abc`, `logging.config`, `webbrowser`, `_ctypes`); any reference to `importlib.machinery` `SourceFileLoader`, `SourcelessFileLoader`, `ExtensionFileLoader` or `FileFinder`; calls to `.get_code()`, `.source_to_code()`, `.get_source()`, `.load_extension()`, `typing.ForwardRef`, `pkgutil.resolve_name`, `pydoc.locate` / `pipepager` |
+| `dynamic_exec` | `eval`, `exec`, `compile`, `__import__`, `importlib.import_module`, the `importlib.util` / `importlib.machinery` loaders, `.exec_module()` / `.load_module()`, `runpy`, `pickle` / `marshal` loads, `types.FunctionType`, `ctypes`; the import-system hooks (`sys.meta_path`, `sys.path_hooks`, `sys.path_importer_cache`, `importlib.machinery.*_SUFFIXES`); **any reference to `sys.path`** (reads, aliases, `from sys import path`, mutation); any import of `site`, `sitecustomize` or `usercustomize`; relative imports and any binding of `__path__`, `__package__` or `__spec__`; imports of stdlib modules that run a string or file (`timeit`, `code`, `codeop`, `pdb`, `bdb`, `cProfile`, `profile`, `trace`, `doctest`, `zipimport`, `importlib._bootstrap*`, `_frozen_importlib`, `_frozen_importlib_external`, `importlib.abc`, `logging.config`, `webbrowser`, `_ctypes`); any reference to `importlib.machinery` `SourceFileLoader`, `SourcelessFileLoader`, `ExtensionFileLoader` or `FileFinder`; calls to `.get_code()`, `.source_to_code()`, `.get_source()`, `.load_extension()`, `typing.ForwardRef`, `pkgutil.resolve_name`, `pydoc.locate` / `pipepager`, `breakpoint()` and `sys.breakpointhook()` (they run `.pdbrc`) |
 | `secret` | key-like literals, secret-looking assignments, high-entropy strings |
 
 **Scope.** `ContainerTool` mounts the whole harness directory read-only at
@@ -236,7 +236,7 @@ cannot be listed, does the same. Running `python` or `pytest` inside a harness
 directory leaves `__pycache__/*.pyc` files, which flag every tool until you
 delete them.
 
-It is still a heuristic: it cannot see through `getattr`/`setattr` string
+It is still a best-effort heuristic, not a proof that stored code cannot run: it cannot see through `getattr`/`setattr` string
 indirection or data flow, and other deserialisers (`shelve`, `dill`) are not
 reported. Residual string indirection is advisory only: `getattr`,
 `vars(builtins)["exec"]`, building a function from a code object with

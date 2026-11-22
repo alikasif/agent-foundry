@@ -1768,3 +1768,13 @@ Round 1 of the T062 review of T059.
 - **R2-mn1.** Added `posix`, `nt`, `_posixsubprocess` (subprocess); `webbrowser`, `_ctypes` (modules); `typing.ForwardRef`, `pkgutil.resolve_name`, `pydoc.locate`, `pydoc.pipepager` (calls); `.load_extension()`/`.enable_load_extension()` (methods). `typing.get_type_hints` and `inspect.get_annotations(eval_str=True)` are named as residuals in the screen docstring and `docs/generator.md`, because ordinary typed code calls them and a flag would ask for approval on clean tools (a negative control pins this).
 - **R2-mn2.** `trusted_tools` documented as informational.
 - Note: `r2_meta_seq.py` uses the removed `strong=` keyword and needs porting to `all_cases_ran=`; the unit tests in `test_validate_meta.py` cover the same sequences. `docs/eval-report.md` is untracked (T061's file); I edited its gate paragraph but did not stage it.
+
+#### T062-fixes-r3
+
+Option (a) of the round 3 review.
+
+- **R3-MJ1.** `_frozen_importlib` and `_frozen_importlib_external` join `DYNAMIC_EXEC_MODULES` (they are CPython's names for `importlib._bootstrap(_external)`). Tests: import, aliased attribute and `from` forms. Docs row updated.
+- **R3-MJ2.** `breakpoint`, `builtins.breakpoint` and `sys.breakpointhook` join `DYNAMIC_EXEC_CALLS` (`breakpoint()` runs `.pdbrc` through `pdb`). Tests and docs row added. The `screen.py` docstring and `docs/generator.md` no longer say stored code "cannot be run unseen": the list is best-effort and Docker (`--network none`, read-only mount) is the boundary.
+- **R3-mn1.** `prior_fail = status not in RUNNABLE_STATUSES`, so a `--trust-tools` pass cannot upgrade `FAIL`, `broken` or an empty status. Test is parametrized.
+- **R3-mn2.** Done: `trusted_tools` is now written with every verdict (not only `pass`), so a downgrade clears a stale `true`. Docs and test updated.
+- Residual: `breakpoint` reached through `getattr(builtins, ...)` or other indirection is not seen (same class as the existing getattr residual).

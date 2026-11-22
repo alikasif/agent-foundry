@@ -561,7 +561,7 @@ def update_harness_meta_status(
         return False
     if not isinstance(data, dict):
         return False
-    prior_fail = data.get("status") == "fail"
+    prior_fail = data.get("status") not in RUNNABLE_STATUSES
     recorded_all_ran = data.get("all_cases_ran") is not False
     if status == "pass" and prior_fail:
         if trusted_tools or (recorded_all_ran and not all_cases_ran):
@@ -569,8 +569,7 @@ def update_harness_meta_status(
     if status == "fail" and prior_fail:
         all_cases_ran = all_cases_ran or recorded_all_ran
     update: dict[str, object] = {"status": status, "all_cases_ran": all_cases_ran}
-    if status == "pass":
-        update["trusted_tools"] = trusted_tools
+    update["trusted_tools"] = trusted_tools
     if all(data.get(key) == value for key, value in update.items()):
         return False
     data.update(update)

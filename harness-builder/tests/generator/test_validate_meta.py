@@ -109,6 +109,24 @@ def test_a_trusted_pass_never_unlocks_a_fail(tmp_path: Path) -> None:
     assert status_of(tmp_path) == "fail"
 
 
+@pytest.mark.parametrize("status", ["FAIL", "broken", ""])
+def test_an_unrecognised_status_is_not_upgraded_by_a_trusted_pass(
+    tmp_path: Path, status: str
+) -> None:
+    """R3-mn1: the update fails closed like ``check_harness_meta``."""
+    write_meta(tmp_path, status)
+    assert update(tmp_path, "pass", trusted=True) is False
+    assert status_of(tmp_path) == status
+
+
+def test_a_downgrade_clears_a_stale_trusted_marker(tmp_path: Path) -> None:
+    """R3-mn2: ``trusted_tools`` follows the latest verdict."""
+    set_meta(tmp_path, status="pass", all_cases_ran=True, trusted_tools=True)
+    assert update(tmp_path, "fail", trusted=False) is True
+    data = json.loads((tmp_path / META_FILE).read_text(encoding="utf-8"))
+    assert (data["status"], data["trusted_tools"]) == ("fail", False)
+
+
 def test_an_equally_strong_docker_pass_unlocks_a_fail(tmp_path: Path) -> None:
     write_meta(tmp_path, "fail")
     assert update(tmp_path, "pass", ran_all=True) is True
