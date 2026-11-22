@@ -58,6 +58,7 @@ from pathlib import Path
 from harness_builder.generator.validate import ValidationPipeline
 from harness_builder.executor.fake import FakeExecutor
 from harness_builder.errors import DockerUnavailableError
+
 d = Path(sys.argv[1])
 ex = FakeExecutor(preflight_error=DockerUnavailableError("no docker"))
 rep = anyio.run(ValidationPipeline(executor=ex).run, d)
@@ -201,5 +202,133 @@ When `harness new` runs without Docker, B0 never runs, so there is no `tools.sch
 8. Minors m2-m6: fix, or record each as accepted in implementation-notes.
 
 After the fixes: rerun `ruff format --check .`, `ruff check .`, `pyrefly check`, and `pytest`. The two strict xfails must be gone (5 xfailed becomes 3).
+
+**Verdict: CHANGES_REQUESTED**
+
+---
+
+## Round 2
+
+**Reviewer:** backend_reviewer
+**Date:** 2026-11-22
+**Commit reviewed:** c1a0cff (fix(python): address T046 review round 1)
+**Verdict:** **CHANGES_REQUESTED** (one new major, MJ5; every round-1 blocker and major is fixed)
+
+### Verification run (this round)
+
+| Check | Result |
+|---|---|
+| `uv run ruff format --check .` | 260 files already formatted |
+| `uv run ruff check .` | 1 error: `skills/promotion.py:36` F401 unused `time`. **Out of scope:** this file belongs to the concurrent T056 fixer; c1a0cff did not touch it |
+| `uv run pyrefly check` | 0 errors (64 suppressed) |
+| `uv run pytest` (full) | 2258 passed, 52 skipped, 3 xfailed, **1 failed**. The failure is `tests/skills/test_store.py::test_concurrent_writers_never_tear_the_file` (KeyError `seed`). **Out of scope:** it is in the T056 skills area, which is being edited concurrently |
+| T046 test files only (`test_eval_runner`, `test_cli_domains`, `test_flagged_tools_run`, `test_validation_t041`, `test_generator_t042`, `test_safety_screen`) | 229 passed, 0 xfail |
+
+**Strict xfails.** Both T046 pins are gone. I checked by name, not by count:
+- `test_docker_lost_during_py_assert_is_incomplete`
+- `test_incomplete_generated_harness_eval_and_run_exit_3[eval|run]`
+
+`git grep xfail -- tests` finds no marker left in tracked test files. The 3 remaining xfails are not T046's.
+
+### Round-1 items
+
+| Item | Status | Evidence |
+|---|---|---|
+| B1 linter CWD | **Fixed** | See B1 below |
+| B2 run-time `ask` rules | **Fixed as specified**, but see MJ5 | See B2 below |
+| MJ1 screen coverage | **Fixed** | See MJ1 below |
+| MJ2 `_py_assert` Docker loss | **Fixed** | `runner.py` returns `incomplete` on `DockerUnavailableError` and `fail` on `ConfigError`, inside the `try`, with the `finally` rmtree kept. Tests at `test_eval_runner.py:577,592` |
+| MJ3 staging ownership | **Fixed** | `.hb-staging` is written on creation. An unmarked `<out>.staging` raises `ConfigError` and is left intact. The marker is a reserved `write_file` path and is unlinked after the move. Tests at `test_generator_t042.py:306,321`. Minor, not blocking: the marker's content (the target path) is not compared with the current target |
+| MJ4 incomplete harness exit code | **Fixed** | See MJ4 below |
+| m1 sandbox_image fixture | Fixed | `tests/unit/conftest.py` has a build-or-skip fixture. The TODO to consolidate the three copies is noted |
+| m6 `_move` race | Fixed | `OSError` becomes a `ConfigError` that names the race and the kept staging dir |
+| m2-m5 | Accepted | Recorded in implementation-notes `### T046-fixes` |
+
+#### B1: linter CWD
+
+I re-ran the round-1 repro against c1a0cff. The script is a scratch copy of `tests/generator/fixtures/unit_conversion`, validated with `FakeExecutor(preflight_error=DockerUnavailableError)` and no trust. I planted these files at the harness root:
+- `ruff.py`, `pyrefly.py`, `json.py` and `sitecustomize.py` as marker writers;
+- a `pathlib.py` shadow.
+
+Results:
+- Good module: stage A `pass`, **no marker**.
+- Module with a planted `bad-return`: stage A `fail` with `tools\units.py:43:12-15 ... [bad-return]`. There is no marker, and the path is relativized correctly.
+- The `-I` flag, the neutral temp-dir CWD and the absolute targets are all present in `validate.py` `_lint`.
+- Regression test: `test_validation_t041.py:487`.
+
+#### B2: run-time `ask` rules
+
+`flagged_tool_names` is shared by stage A (`_flagged`) and `builder_from_spec`. It screens every referenced `ModuleToolRef` whatever its runtime, and fails closed: a module that does not parse or cannot be read flags all its tools. The `spec.loader -> safety.screen` allowlist entry is present. Bypasses I tried:
+- **Spec `allow` rules:** the rules are first-match and the safety rules are prepended. The unit_conversion fixture already has `allow` rules for both tools, and `test_run_denies_a_flagged_tool_even_without_reports` still sees `permission_denied` with zero sandbox `call` requests.
+- **Subagent profile `allow`:** `NarrowedPolicy` takes the stricter of parent and child, so a child cannot loosen the parent's `ask`.
+- **Tool name mismatch:** `ContainerTool.name` defaults to `entry.function`, and the loader never passes `name=`. The rule name therefore equals the registered name.
+- **Deleted `reports/`:** covered by tests for both `run` and `eval`.
+- **`harness replay`:** it rebuilds from `spec_snapshot` without a `base_dir`, so module tools cannot be rebuilt there in any case. This was already true before the fix and is not a regression.
+
+The eval decision is documented in implementation-notes: the default approver, so a prompt on a TTY and a deny without one, with no auto-approve. That is acceptable.
+
+#### MJ1: screen coverage
+
+Every API listed in round 1 is now caught:
+- `from http import client`, `import http.client as h` and `__import__('http.client')`;
+- `from asyncio import create_subprocess_exec`;
+- `from os import fork` and `os.posix_spawnp`;
+- `import multiprocessing.pool` and `from ctypes import CDLL`.
+
+`from http import HTTPStatus` stays clean. Overwriting moves are listed as a known limit in the docstring.
+
+#### MJ4: incomplete harness exit code
+
+Option (a) was chosen: `_schema_file` raises `DockerUnavailableError` when `tools.schema.json` is missing and the meta status is `incomplete`. I checked the recovery path the new message points to:
+- `ValidationPipeline.run` runs B0 before B and C.
+- B0 writes `tools.schema.json` into `base_dir` (`validate.py:427-430`).
+- `builder_from_spec` is only reached from `_builder` in stage B and C.
+
+So `harness validate` with Docker up repairs the harness, and the message is actionable. A hand-written harness without a meta file still exits 2, which is correct.
+
+### New finding
+
+#### MJ5 [MAJOR, FR-032] `spec/loader.py` `flagged_tool_names` and `validate.py` `_screen`: only the referenced module file is screened, so risky code moved into a sibling file escapes the `ask` rule
+
+**Problem.** Both the run-time screen and the stage-A screen look only at files named in `spec.tools[*].module`. A generated tool module can import a sibling file under `tools/` that the spec does not reference:
+- `hb_entry` drops the CWD from `sys.path`, but the module can put its own directory back, or load the sibling by file path.
+- The screen sees neither the import nor the sibling's contents.
+
+**Reproduced.** The setup is a copy of the unit_conversion fixture:
+- `tools/helper.py` contains `import socket` and `import subprocess`;
+- `tools/units.py` loads it in one of the two ways below.
+
+| How `units.py` loads the helper | `flagged_tool_names(...)` |
+|---|---|
+| `sys.path.insert(0, str(Path(__file__).parent)); import helper` | `[]` |
+| `importlib.util.spec_from_file_location(...)`, then `module_from_spec`, then `loader.exec_module` | `[]` |
+
+Stage A uses the same scope, so validation reports no finding either. Neither variant needs a `getattr` trick, so this is not the documented heuristic limit. It is a gap in **which files** get screened.
+
+This uses the same reasoning that made MJ1 major. The generator is told which constructs need approval. A prompt-injected or approval-averse model can split any tool into a clean entry module and a risky helper, and the FR-032 `ask` gate then never fires. Docker with `--network none` is still the real boundary, so this is major, not a blocker. I missed it in round 1 because my B2 fix text said "every referenced module file". The coder implemented exactly what I asked for. This finding closes the gap in that instruction.
+
+**Required fix (small).**
+1. In `flagged_tool_names`, also screen every `*.py` file under `base_dir` that the spec does not reference: `rglob`, resolved inside `base_dir`, skipping `reports/`.
+   - If any unreferenced file has findings, or cannot be parsed or read, flag **every** module tool. This is the same fail-closed rule as for an unparsable module, because the loader cannot tell which tool imports which file.
+   - Stage A gets this for free through `_flagged`. Optionally add the unreferenced files' findings to `safety_findings` so that the report shows why.
+2. Add `importlib.util` and `importlib.machinery` imports, or the `spec_from_file_location` / `module_from_spec` / `exec_module` calls, to `dynamic_exec`. This matches `importlib.import_module`, which is already flagged.
+3. Tests:
+   - both repro variants above produce `["convert_length", "convert_temperature"]`;
+   - a clean extra helper file flags nothing;
+   - a non-`.py` file never matters.
+
+**Optional (minor, may be recorded as accepted).** Also add `pickle.load(s)`, `marshal.loads` and `types.FunctionType` built from `compile(...)` to `dynamic_exec`. Probes of these, and of `getattr(builtins, 'ex'+'ec')`, produce no finding today. The `getattr` form is already a documented limit; list the rest as known limits if they are not added.
+
+### Positive notes
+
+- The B1 fix is exactly right, and its regression test covers both the "no host execution" and the "no false pass" halves.
+- Having one shared helper (`flagged_tool_names`) for validation and run time removes the drift risk completely. That is why MJ5 needs a fix in one place only.
+- The MJ4 message names the cause and the remedy, and the remedy works.
+- The `### T046-fixes` notes record every decision the review left open: eval approval, the `ctypes` category, and `http.*` handling at submodule level only.
+
+### Checklist for round 3
+
+1. **MJ5:** screen the unreferenced `*.py` files in the harness dir (fail closed: flag every module tool), and flag the `importlib.util` loaders as `dynamic_exec`, with tests.
+2. Rerun `ruff format --check .`, `ruff check .`, `pyrefly check` and `pytest`. Skills-area failures from the concurrent T056 work are excluded.
 
 **Verdict: CHANGES_REQUESTED**
