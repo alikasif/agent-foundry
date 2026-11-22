@@ -338,7 +338,9 @@ async def test_failed_script_is_ok_observation_but_not_a_stats_success(
     )
     assert obs.ok and isinstance(obs.content, dict)
     assert obs.content["exit_code"] == 1 and "result" not in obs.content
-    ext.record_stats(ToolCall(id="c1", name="run_skill_script", args=args), obs, ctx)
+    await ext.record_stats(
+        ToolCall(id="c1", name="run_skill_script", args=args), obs, ctx
+    )
     stats = script_store.read_stats()["number-tally"]
     assert (stats.usage_count, stats.success_count) == (1, 0)
 

@@ -473,11 +473,15 @@ async def test_stats_count_uses_and_successes_of_offered_skills(
     def call(tool: str, name: str) -> ToolCall:
         return ToolCall(id="c", name=tool, args={"name": name})
 
-    extension.record_stats(call(ACTIVATE_SKILL, "pdf-merge"), _obs(), ctx)
-    extension.record_stats(call(RUN_SKILL_SCRIPT, "pdf-merge"), _obs(exit_code=1), ctx)
-    extension.record_stats(call(READ_SKILL_RESOURCE, "pdf-merge"), _obs(), ctx)
-    extension.record_stats(call(ACTIVATE_SKILL, "csv-clean"), _obs(), ctx)  # refused
-    extension.record_stats(call("run_code", "pdf-merge"), _obs(), ctx)
+    await extension.record_stats(call(ACTIVATE_SKILL, "pdf-merge"), _obs(), ctx)
+    await extension.record_stats(
+        call(RUN_SKILL_SCRIPT, "pdf-merge"), _obs(exit_code=1), ctx
+    )
+    await extension.record_stats(call(READ_SKILL_RESOURCE, "pdf-merge"), _obs(), ctx)
+    await extension.record_stats(
+        call(ACTIVATE_SKILL, "csv-clean"), _obs(), ctx
+    )  # refused
+    await extension.record_stats(call("run_code", "pdf-merge"), _obs(), ctx)
 
     stats = store.read_stats()
     assert list(stats) == ["pdf-merge"]

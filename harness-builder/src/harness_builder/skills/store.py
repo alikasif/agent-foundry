@@ -58,7 +58,9 @@ touch at once; a lost use is silent, so it is worth waiting longer."""
 
 
 STATS_LOCK_TIMEOUT_S = 10.0
-"""How long ``record_use`` waits for the cross-process stats lock."""
+"""How long ``record_use`` waits for each stats lock (hooks use less)."""
+
+STATS_LOCK_FILE = "stats.lock"
 
 
 class StatsCorruptError(ValueError):
@@ -272,7 +274,23 @@ class SkillStore:
         except ValueError as exc:  # bad UTF-8 and ValidationError included
             raise StatsCorruptError(f"{self.stats_path} is corrupt: {exc}") from exc
 
-    def write_stats(self, stats: Mapping[str, SkillStats]) -> None:
+    def write_stats(
+        self,
+        stats: Mapping[str, SkillStats],
+        *,
+        lock_timeout_s: float = STATS_LOCK_TIMEOUT_S,
+    ) -> None:
+        """Replace the stats sidecar, holding the same locks as ``record_use``.
+
+        Raises ``TimeoutError`` (an ``OSError``) when a lock is not free within
+        ``lock_timeout_s``. Prefer ``record_use``; a read-modify-write of your
+        own must also run under a lock, which only this module can take.
+        """
+        self.meta.mkdir(parents=True, exist_ok=True)
+        with _stats_locked(self.meta / STATS_LOCK_FILE, lock_timeout_s):
+            self._write_stats(stats)
+
+    def _write_stats(self, stats: Mapping[str, SkillStats]) -> None:
         """Write the stats sidecar atomically (temp file + ``os.replace``)."""
         self.meta.mkdir(parents=True, exist_ok=True)
         data = {name: s.model_dump(mode="json") for name, s in sorted(stats.items())}
@@ -290,17 +308,23 @@ class SkillStore:
             raise
 
     def record_use(
-        self, name: str, success: bool, now: datetime | None = None
+        self,
+        name: str,
+        success: bool,
+        now: datetime | None = None,
+        *,
+        lock_timeout_s: float = STATS_LOCK_TIMEOUT_S,
     ) -> SkillStats:
         """Increment ``name``'s usage (and success) count and persist it.
 
-        Raises ``OSError`` when the stats cannot be read or locked; the file
-        is then left untouched (one use is dropped, no other skill's counters
-        are lost). A corrupt file is moved aside to
+        Raises ``OSError`` when the stats cannot be read or locked (a lock not
+        free within ``lock_timeout_s`` raises ``TimeoutError``); the file is
+        then left untouched (one use is dropped, no other skill's counters are
+        lost). A corrupt file is moved aside to
         ``stats.json.corrupt-<UTC timestamp>`` and counting restarts.
         """
         self.meta.mkdir(parents=True, exist_ok=True)
-        with _STATS_LOCK, _process_lock(self.meta / "stats.lock"):
+        with _stats_locked(self.meta / STATS_LOCK_FILE, lock_timeout_s):
             try:
                 stats = self.read_stats()
             except StatsCorruptError as exc:
@@ -316,42 +340,70 @@ class SkillStore:
                 last_used=now or datetime.now(UTC),
             )
             stats[name] = new
-            self.write_stats(stats)
+            self._write_stats(stats)
         return new
 
 
 @contextmanager
-def _process_lock(path: Path) -> Generator[None, None, None]:
+def _stats_locked(path: Path, timeout_s: float) -> Generator[None, None, None]:
+    """Hold the in-process and the cross-process stats lock, or time out."""
+    if not _STATS_LOCK.acquire(timeout=timeout_s):
+        raise TimeoutError(f"timed out waiting for the stats lock on {path}")
+    try:
+        with _process_lock(path, timeout_s):
+            yield
+    finally:
+        _STATS_LOCK.release()
+
+
+@contextmanager
+def _process_lock(path: Path, timeout_s: float) -> Generator[None, None, None]:
     """Hold an exclusive cross-process lock on ``path`` (created if missing).
 
-    Windows: ``msvcrt.locking`` on byte 0, polled until
-    ``STATS_LOCK_TIMEOUT_S`` (then ``TimeoutError``, an ``OSError``).
-    POSIX: blocking ``fcntl.flock``. The OS drops the lock if the process dies.
+    Both platforms poll a non-blocking lock (``msvcrt.locking`` on byte 0,
+    ``fcntl.flock`` with ``LOCK_NB``) until ``timeout_s``, then raise
+    ``TimeoutError`` (an ``OSError``), so a hung holder can never block the
+    caller for good (T056 m15). The OS drops the lock if the process dies.
     """
     with path.open("ab") as fh:
-        if sys.platform == "win32":
-            import msvcrt
-
-            deadline = time.monotonic() + STATS_LOCK_TIMEOUT_S
-            while True:
-                fh.seek(0)
-                try:
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(f"timed out locking {path}") from None
-                    time.sleep(0.005)
-        else:
-            import fcntl
-
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)  # pyrefly: ignore[missing-attribute]
+        deadline = time.monotonic() + timeout_s
+        while not _try_lock(fh.fileno()):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out locking {path}")
+            time.sleep(0.005)
         try:
             yield
         finally:
-            if sys.platform == "win32":
-                fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            _unlock(fh.fileno())
+
+
+def _try_lock(fd: int) -> bool:
+    """One non-blocking attempt at the exclusive lock on ``fd``."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # pyrefly: ignore[missing-attribute]
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)  # pyrefly: ignore[missing-attribute]
 
 
 def _triggers(value: object) -> list[str]:

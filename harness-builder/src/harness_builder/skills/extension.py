@@ -32,6 +32,7 @@ import re
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 from xml.sax.saxutils import escape
@@ -74,6 +75,7 @@ RUN_SKILL_SCRIPT = "run_skill_script"
 SKILL_TOOL_NAMES = (ACTIVATE_SKILL, READ_SKILL_RESOURCE, RUN_SKILL_SCRIPT)
 """Tool names a harness's permission rules must allow (default is deny)."""
 STATS_HOOK_NAME = "skills:stats"
+STATS_HOOK_LOCK_TIMEOUT_S = 1.0
 PROMOTION_HOOK_NAME = "skills:promotion"
 STATS_HOOK_PRIORITY = 900_000
 """After ordinary hooks (they may rewrite the observation), before promotion."""
@@ -235,10 +237,15 @@ class SkillsExtension:
         run = self._runs.get(run_id)
         return [] if run is None else list(run.offered)
 
-    def record_stats(
+    async def record_stats(
         self, call: ToolCall, obs: Observation, ctx: RunContextView
     ) -> None:
         """``post_tool`` hook: count a use of an offered skill (FR-052).
+
+        The write runs in a worker thread and waits at most
+        ``STATS_HOOK_LOCK_TIMEOUT_S`` for the stats locks, so a hung lock
+        holder can neither block the event loop nor stall a run (T058 MA-3);
+        a use that cannot be recorded in time is dropped (``OSError``).
 
         Every invoked ``activate_skill`` or ``run_skill_script`` call on a
         skill offered to the run counts one use. It counts a success when the
@@ -254,7 +261,14 @@ class SkillsExtension:
         success = obs.ok
         if call.name == RUN_SKILL_SCRIPT:
             success = success and obs.exec is not None and _script_succeeded(obs.exec)
-        self._store.record_use(name, success)
+        await anyio.to_thread.run_sync(
+            partial(
+                self._store.record_use,
+                name,
+                success,
+                lock_timeout_s=STATS_HOOK_LOCK_TIMEOUT_S,
+            )
+        )
 
     def lookup(
         self, name: str, ctx: RunContextView
