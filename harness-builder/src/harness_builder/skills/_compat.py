@@ -74,7 +74,14 @@ def scoped_skill_manager_class() -> type:
 
         def __init__(self, search_paths: Sequence[Path]) -> None:
             self._search_paths = [Path(p).resolve() for p in search_paths]
+            self._frontmatters: dict[Path, dict[str, object]] = {}
             super().__init__()
+
+        def _parse_skill_md(self, path: Path) -> tuple[dict[str, object], str]:
+            """The sibling parse, remembering the frontmatter for ``frontmatter``."""
+            parsed = super()._parse_skill_md(path)
+            self._frontmatters[path] = parsed[0]
+            return parsed
 
         @property
         def search_paths(self) -> list[Path]:
@@ -82,8 +89,15 @@ def scoped_skill_manager_class() -> type:
             return list(self._search_paths)
 
         def frontmatter(self, path: Path) -> dict[str, object]:
-            """Frontmatter of the SKILL.md at ``path`` (sibling parser)."""
-            return self._parse_skill_md(path)[0]
+            """Frontmatter of the SKILL.md at ``path``, parsed once per instance.
+
+            Discovery already parsed every catalog entry, so this reads the
+            remembered dict (read-only for callers) instead of re-parsing.
+            """
+            remembered = self._frontmatters.get(path)
+            return (
+                remembered if remembered is not None else self._parse_skill_md(path)[0]
+            )
 
         def _find_project_root(self) -> Path:
             if not self._search_paths:

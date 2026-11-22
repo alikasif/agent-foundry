@@ -140,10 +140,16 @@ def test_scoped_class_overrides_only_discovery_and_root() -> None:
     assert scoped is scoped_skill_manager_class()
     assert scoped is store_mod.ScopedSkillManager
     own = set(vars(scoped))
-    assert {"__init__", "discover_skills", "_find_project_root"} <= own
+    # T059 MA-2: ``_parse_skill_md`` is a delegating override that remembers
+    # each frontmatter, so triggers are not parsed a second time.
+    assert {
+        "__init__",
+        "discover_skills",
+        "_find_project_root",
+        "_parse_skill_md",
+    } <= own
     for inherited in (
         "_scan_dir",
-        "_parse_skill_md",
         "_find_entry",
         "load_skill_body",
         "list_skill_resources",

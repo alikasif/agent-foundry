@@ -228,6 +228,28 @@ class SkillStore:
             )
         return entries
 
+    def fingerprint(self) -> tuple[tuple[str, str, int, int], ...]:
+        """A cheap fingerprint of the discoverable library (T058 MA-2).
+
+        One ``(search path, skill dir name, SKILL.md mtime_ns, size)`` row per
+        child directory of every search path, sorted. It changes whenever a
+        skill is added, removed, replaced or edited, so a cache keyed on it
+        never serves a stale catalog, and it needs no file reads.
+        """
+        rows: list[tuple[str, str, int, int]] = []
+        for path in self.search_paths():
+            try:
+                children = [c for c in os.scandir(path) if c.is_dir()]
+            except OSError:
+                continue
+            for child in children:
+                try:
+                    st = os.stat(os.path.join(child.path, "SKILL.md"))
+                except OSError:
+                    continue
+                rows.append((str(path), child.name, st.st_mtime_ns, st.st_size))
+        return tuple(sorted(rows))
+
     def skill_dir(self, name: str) -> Path:
         """``live/<name>`` for a validated kebab-case ``name``."""
         return self.live / validate_skill_name(name)

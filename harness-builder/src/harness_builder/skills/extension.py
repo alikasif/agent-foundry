@@ -29,6 +29,7 @@ promoted after approval is retrievable in the next run.
 import json
 import os
 import re
+import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -180,6 +181,16 @@ class SkillsExtension:
         self._store = store
         self._promotion = promotion
         self._runs: OrderedDict[str, _RunSkills] = OrderedDict()
+        self._library_lock = threading.Lock()
+        self._library_cache: (
+            tuple[
+                tuple[tuple[str, str, int, int], ...],
+                ScopedManager,
+                list[SkillEntry],
+                LexicalRetriever,
+            ]
+            | None
+        ) = None
 
     def install(self, builder: SkillsBuilder) -> None:
         """Register the contributor, the three tools and the hooks."""
@@ -217,10 +228,7 @@ class SkillsExtension:
 
     def _select(self, task: str) -> tuple[_RunSkills, list[SkillEntry]]:
         """Top-k retrieved entries, then live names mentioned in ``task``."""
-        manager = self._store.manager()
-        entries = self._store.catalog_entries(manager)
-        retriever = LexicalRetriever()
-        retriever.index(entries)
+        manager, entries, retriever = self._library()
         chosen = [hit.entry for hit in retriever.search(task, k=self.top_k)]
         mentioned = set(_NAME_TOKEN_RE.findall(task.lower()))
         chosen_names = {entry.name for entry in chosen}
@@ -231,6 +239,28 @@ class SkillsExtension:
         chosen += named[: self.top_k]  # bounded: a task naming many skills (m6)
         offered = {e.name: Path(e.path or "").parent for e in chosen}
         return _RunSkills(manager=manager, offered=offered), chosen
+
+    def _library(self) -> tuple[ScopedManager, list[SkillEntry], LexicalRetriever]:
+        """The catalog manager, entries and index of the live library.
+
+        Built once and reused while ``SkillStore.fingerprint`` is unchanged, so
+        a run start costs one stat per skill instead of a full discovery and
+        parse (T058 MA-2). A skill approved after the cache was built changes
+        the fingerprint, so the next run still finds it.
+        """
+        with self._library_lock:
+            fingerprint = self._store.fingerprint()
+            if (
+                self._library_cache is not None
+                and self._library_cache[0] == fingerprint
+            ):
+                return self._library_cache[1:]
+            manager = self._store.manager()
+            entries = self._store.catalog_entries(manager)
+            retriever = LexicalRetriever()
+            retriever.index(entries)
+            self._library_cache = (fingerprint, manager, entries, retriever)
+            return manager, entries, retriever
 
     def offered(self, run_id: str) -> list[str]:
         """Names offered to run ``run_id`` (empty for an unknown run)."""

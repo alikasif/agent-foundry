@@ -27,6 +27,8 @@ HIT_RATE_THRESHOLD = 0.90
 REGRESSION_FLOOR = 48 / 52 - 1e-9
 """Hit rate measured after the T056 stemmer (48 of 52; it was 46 of 52 at
 cc3f78d); a drop below it is a regression."""
+CACHED_SELECT_LIMIT_S = 0.5
+"""Run-start budget with a warm cache (designs 10.2 asks for 0.1 s of search)."""
 LATENCY_THRESHOLD_S = 0.100
 """PRD performance target for one search over 1,000 skills (ASSUMED)."""
 TOP_K = 3
@@ -175,7 +177,7 @@ def test_search_latency_over_1000_skills(record_property: Recorder) -> None:
 def test_per_run_selection_over_1000_skills_on_disk(
     tmp_path: Path, record_property: Recorder
 ) -> None:
-    """Informational: the contributor rediscovers the library every run."""
+    """T058 MA-2: a cached run start stats the library, it does not re-parse it."""
     rng = random.Random(54)
     store = SkillStore(tmp_path)
     for entry in synthetic_library(rng, LIBRARY_SIZE - 1):
@@ -191,9 +193,18 @@ def test_per_run_selection_over_1000_skills_on_disk(
     )
     ext = SkillsExtension(store, top_k=TOP_K)
     ext._select("warm import")  # first discovery imports the sibling and ADK
+    cold = SkillsExtension(store, top_k=TOP_K)
     started = time.perf_counter()
-    _, chosen = ext._select("how many stripes does this zebra have")
-    elapsed = time.perf_counter() - started
-    record_property("select_1000_on_disk_ms", round(elapsed * 1000, 1))
-    print(f"per-run selection over 1000 on-disk skills: {elapsed * 1000:.0f} ms")
+    cold._select("how many stripes does this zebra have")
+    cold_s = time.perf_counter() - started
+    started = time.perf_counter()
+    _, chosen = cold._select("how many stripes does this zebra have")
+    cached_s = time.perf_counter() - started
+    record_property("select_1000_cold_ms", round(cold_s * 1000, 1))
+    record_property("select_1000_cached_ms", round(cached_s * 1000, 1))
+    print(
+        f"per-run selection over 1000 on-disk skills: cold {cold_s * 1000:.0f} ms,"
+        f" cached {cached_s * 1000:.0f} ms"
+    )
     assert chosen[0].name == "zebra-stripe-count"
+    assert cached_s < CACHED_SELECT_LIMIT_S
