@@ -18,8 +18,13 @@ constructs in five categories:
   ``importlib.import_module``, the ``importlib.util`` / ``importlib.machinery``
   loaders (``spec_from_file_location``, ``module_from_spec``,
   ``SourceFileLoader``) and any ``.exec_module()`` / ``.load_module()`` call,
-  ``runpy.run_path`` / ``run_module``, and ``ctypes`` imports (native code is
-  arbitrary execution);
+  ``runpy.run_path`` / ``run_module``, ``ctypes`` imports (native code is
+  arbitrary execution), any reference to ``importlib.machinery.*_SUFFIXES``,
+  ``sys.meta_path``, ``sys.path_hooks`` or ``sys.path_importer_cache``, and
+  any mutation of ``sys.path`` (``insert`` / ``append`` / ``extend`` / ...,
+  assignment, item assignment). ``hb_entry`` keeps the harness off
+  ``sys.path``, so a tool cannot import a sibling without such a mutation
+  (T046 MJ5b);
 - ``secret``: key-like string literals, string literals assigned to
   secret-looking names, and high-entropy string literals.
 
@@ -28,7 +33,9 @@ flow, and it flags every delete because "outside the workdir" is not
 decidable statically. Known limits: ``getattr(os, "system")`` style
 indirection (including ``getattr(builtins, "ex" + "ec")``), other
 deserialisers (``shelve``, ``dill``) and overwriting moves (``shutil.move``,
-``os.replace``, ``os.rename``) are not reported. Each file is screened alone,
+``os.replace``, ``os.rename``) are not reported. ``.pyc`` and zip helpers are not
+screened (``write_file`` writes UTF-8 text, so neither is practically
+reachable). Each file is screened alone,
 so cross-file loading is caught by the caller screening sibling files too
 (``spec.loader.unreferenced_py_files``). Pure stdlib leaf module.
 """
@@ -109,6 +116,15 @@ DYNAMIC_EXEC_CALLS = frozenset(
     }
 )
 DYNAMIC_EXEC_METHODS = frozenset({"exec_module", "load_module"})
+IMPORT_SYSTEM_NAMES = frozenset(
+    {"sys.meta_path", "sys.path_hooks", "sys.path_importer_cache"}
+)
+SUFFIXES_PREFIX = "importlib.machinery."
+SUFFIXES_SUFFIX = "_SUFFIXES"
+SYS_PATH = "sys.path"
+SYS_PATH_MUTATORS = frozenset(
+    {"insert", "append", "extend", "remove", "pop", "clear", "sort", "reverse"}
+)
 
 KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
@@ -201,13 +217,37 @@ class _Screener(ast.NodeVisitor):
             origin = f"{module}.{alias.name}" if module else alias.name
             if node.level == 0 and origin.startswith(NETWORK_SUBMODULES):
                 self._check_module(origin, node.lineno, "from-import")
+            if node.level == 0 and _import_system(origin):
+                self.findings.append(
+                    Finding("dynamic_exec", node.lineno, f"import {origin}")
+                )
             self.aliases[alias.asname or alias.name] = origin
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        name = self._qualified(node)
+        if name is not None and _import_system(name):
+            self._add("dynamic_exec", node, f"import system {name}")
+        if name == SYS_PATH and not isinstance(node.ctx, ast.Load):
+            self._add("dynamic_exec", node, f"assign {name}")
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if (
+            not isinstance(node.ctx, ast.Load)
+            and self._qualified(node.value) == SYS_PATH
+        ):
+            self._add("dynamic_exec", node, f"assign {SYS_PATH}[...]")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         name = self._qualified(node.func)
         if name is not None:
             self._check_call(name, node)
+        if isinstance(node.func, ast.Attribute):
+            owner = self._qualified(node.func.value)
+            if owner == SYS_PATH and node.func.attr in SYS_PATH_MUTATORS:
+                self._add("dynamic_exec", node, f"call {owner}.{node.func.attr}()")
         if isinstance(node.func, ast.Attribute) and node.func.attr in DELETE_METHODS:
             if name not in DELETE_CALLS:
                 self._add("delete", node, f"call .{node.func.attr}()")
@@ -290,6 +330,13 @@ class _Screener(ast.NodeVisitor):
 
     def _add(self, category: Category, node: ast.expr, detail: str) -> None:
         self.findings.append(Finding(category, node.lineno, detail))
+
+
+def _import_system(name: str) -> bool:
+    """True for the import-machinery hooks and ``importlib.machinery.*_SUFFIXES``."""
+    if name in IMPORT_SYSTEM_NAMES:
+        return True
+    return name.startswith(SUFFIXES_PREFIX) and name.endswith(SUFFIXES_SUFFIX)
 
 
 def _target_name(target: ast.expr) -> str | None:

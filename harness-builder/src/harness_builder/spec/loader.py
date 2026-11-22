@@ -386,6 +386,9 @@ def flagged_tool_names(
     """
     if base_dir is None:
         return []
+    module_refs = [ref for ref in spec.tools if isinstance(ref, ModuleToolRef)]
+    if _unreferenced_flagged(spec, base_dir):
+        return list(dict.fromkeys(ref.function for ref in module_refs))
     flagged: list[str] = []
     verdicts: dict[str, bool] = {}
     for i, ref in enumerate(spec.tools):
@@ -393,9 +396,6 @@ def flagged_tool_names(
             continue
         if ref.module not in verdicts:
             path = _module_file(base_dir, ref.module, source, f"tools[{i}].module")
-    module_refs = [ref for ref in spec.tools if isinstance(ref, ModuleToolRef)]
-    if _unreferenced_flagged(spec, base_dir):
-        return list(dict.fromkeys(ref.function for ref in module_refs))
             try:
                 verdicts[ref.module] = screen(path).flagged
             except (SyntaxError, OSError, UnicodeDecodeError):
@@ -405,13 +405,6 @@ def flagged_tool_names(
     return list(dict.fromkeys(flagged))
 
 
-def _meta_status(base_dir: Path) -> object:
-    """The ``status`` in ``.harness-meta.json``; None when absent or unreadable."""
-    try:
-        data = json.loads((base_dir / META_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data.get("status") if isinstance(data, dict) else None
 UNSCREENED_DIRS = frozenset({"reports", "tests", "__pycache__"})
 TOOLS_DIR = "tools"
 
@@ -423,9 +416,13 @@ def unreferenced_py_files(spec: HarnessSpec, base_dir: Path) -> list[Path]:
     or load it by path (``importlib.util``), so the screen must cover those
     files too (T046 MJ5). Scope: ``*.py`` directly in the harness root, every
     ``*.py`` under ``tools/`` and under the directory of any referenced tool
-    module. Skipped: ``reports/``, ``tests/``, ``__pycache__``, hidden
-    directories, files resolving outside the harness, and hook modules (host
-    code, gated by ``--trust-tools``). Sorted, so results are stable.
+    module. Skipped: top-level ``reports/``, ``tests/``, ``__pycache__`` and
+    hidden directories (never anything nested inside a scanned directory),
+    files resolving outside the harness, and hook modules (host code, gated by
+    ``--trust-tools``). Known limits: ``skills/``, ``evals/`` and root
+    ``tests/`` are not scanned (a tool cannot import from them without
+    mutating ``sys.path``, which the screen flags), nor are ``.pyc`` or zip
+    helpers. Sorted, so results are stable.
     """
     root = base_dir.resolve()
     tool_refs = [ref for ref in spec.tools if isinstance(ref, ModuleToolRef)]
@@ -449,8 +446,14 @@ def unreferenced_py_files(spec: HarnessSpec, base_dir: Path) -> list[Path]:
 
 
 def _skipped(rel: Path) -> bool:
-    """True when a parent directory of ``rel`` is excluded or hidden."""
-    return any(p in UNSCREENED_DIRS or p.startswith(".") for p in rel.parts[:-1])
+    """True when the top-level directory of ``rel`` is excluded or hidden.
+
+    Only the first component counts: a ``tests/`` or ``.x/`` directory nested
+    under ``tools/`` is writable and importable, so it must be screened.
+    """
+    return len(rel.parts) > 1 and (
+        rel.parts[0] in UNSCREENED_DIRS or rel.parts[0].startswith(".")
+    )
 
 
 def _unreferenced_flagged(spec: HarnessSpec, base_dir: Path) -> bool:
@@ -464,6 +467,13 @@ def _unreferenced_flagged(spec: HarnessSpec, base_dir: Path) -> bool:
     return False
 
 
+def _meta_status(base_dir: Path) -> object:
+    """The ``status`` in ``.harness-meta.json``; None when absent or unreadable."""
+    try:
+        data = json.loads((base_dir / META_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data.get("status") if isinstance(data, dict) else None
 
 
 def check_harness_meta(base_dir: Path) -> None:

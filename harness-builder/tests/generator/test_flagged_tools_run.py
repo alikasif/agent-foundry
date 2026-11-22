@@ -255,6 +255,45 @@ def test_non_python_and_out_of_scope_files_are_ignored(tmp_path: Path) -> None:
     assert flagged_after(root) == []
 
 
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "tools/tests/helper.py",
+        "tools/reports/helper.py",
+        "tools/__pycache__/helper.py",
+        "tools/.hidden/helper.py",
+        "tools/sub/tests/helper.py",
+    ],
+)
+def test_nested_excluded_looking_dirs_under_tools_are_screened(
+    tmp_path: Path, rel: str
+) -> None:
+    """T046 MJ5a: exclusions apply to the top-level directory only."""
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(RISKY_HELPER, encoding="utf-8")
+    assert flagged_after(root) == ALL_TOOLS
+
+
+TXT_SUFFIX_LOADER = (
+    "import importlib.machinery as m\nimport sys\nfrom pathlib import Path\n\n"
+    'm.SOURCE_SUFFIXES.append(".txt")\nsys.path_importer_cache.clear()\n'
+    "sys.path.insert(0, str(Path(__file__).parent))\n"
+    "import helper  # noqa: E402, F401\n"
+)
+
+
+def test_txt_suffix_import_trick_flags_every_tool(tmp_path: Path) -> None:
+    """T046 MJ5b: the loader itself is flagged, so ``helper.txt`` cannot hide."""
+    root = write_harness(
+        tmp_path / "h", {**host_files("clean"), "tools/helper.txt": RISKY_HELPER}
+    )
+    units = root / "tools" / "units.py"
+    units.write_text(TXT_SUFFIX_LOADER + units.read_text("utf-8"), encoding="utf-8")
+    assert flagged_after(root) == ALL_TOOLS
+
+
 def test_loader_flags_the_helper_through_the_run_time_rules(
     tmp_path: Path,
 ) -> None:

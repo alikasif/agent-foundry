@@ -378,3 +378,43 @@ def test_extended_stdlib_apis_are_flagged(source: str, category: str) -> None:
 
 def test_plain_http_status_import_is_not_network() -> None:
     assert categories("from http import HTTPStatus\n") == set()
+
+
+# --- import-system mutation (T046 MJ5b) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib.machinery as m\nm.SOURCE_SUFFIXES.append('.txt')\n",
+        "import importlib.machinery\nx = importlib.machinery.BYTECODE_SUFFIXES\n",
+        "from importlib import machinery\nmachinery.EXTENSION_SUFFIXES.clear()\n",
+        "from importlib.machinery import SOURCE_SUFFIXES\n",
+        "import sys\nsys.meta_path.insert(0, object())\n",
+        "import sys\nsys.path_hooks.append(object())\n",
+        "import sys\nsys.path_importer_cache.clear()\n",
+        "import sys\nsys.path.insert(0, 'x')\n",
+        "import sys\nsys.path.append('x')\n",
+        "import sys\nsys.path.extend(['x'])\n",
+        "import sys\nsys.path = ['x']\n",
+        "import sys\nsys.path += ['x']\n",
+        "import sys\nsys.path[0] = 'x'\n",
+        "import sys as s\ns.path.insert(0, 'x')\n",
+        "from sys import path\npath.insert(0, 'x')\n",
+    ],
+)
+def test_import_system_mutation_is_dynamic_exec(source: str) -> None:
+    assert "dynamic_exec" in categories(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import sys\nfirst = sys.path[0]\n",
+        "import sys\nprint(sys.version, sys.argv, list(sys.path))\n",
+        "import os\nos.path.join('a', 'b')\n",
+        "import sys\nsys.modules.get('json')\n",
+    ],
+)
+def test_reading_sys_path_and_unrelated_attributes_stay_clean(source: str) -> None:
+    assert categories(source) == set()
