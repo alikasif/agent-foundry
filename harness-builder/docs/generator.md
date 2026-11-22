@@ -236,10 +236,10 @@ loader re-screens every module tool each time it builds the harness
 spec's own rules **even when `reports/` was deleted**. A builder created from
 code with `flagged_tools=` adds its names to that list.
 
-The CLI has no interactive approver in `eval`, and `run` asks on a terminal
-only: without a TTY the default approver **denies**. So a flagged ToolCase in
-`harness eval` fails (the tool is denied), and a flagged tool never executes
-silently.
+`run` and `eval` both use the default approver: it prompts on a terminal when
+stdin is a TTY and **denies otherwise**. So in `harness eval` without a TTY (CI,
+a pipe) a flagged ToolCase fails because the tool is denied, and with a TTY it
+asks; either way a flagged tool never executes silently.
 
 ## Trust and the failed-harness gate
 

@@ -29,18 +29,40 @@ def status_of(root: Path) -> object:
     return json.loads((root / META_FILE).read_text(encoding="utf-8"))["status"]
 
 
+def update(root: Path, status: str, trusted: bool = False) -> bool:
+    """``update_harness_meta_status`` with the trust flag spelled out."""
+    return update_harness_meta_status(root, status, trusted_tools=trusted)
+
+
 def test_helper_updates_only_an_existing_readable_meta(tmp_path: Path) -> None:
-    assert update_harness_meta_status(tmp_path, "pass") is False  # none: not created
+    assert update(tmp_path, "pass") is False  # no meta file: none is created
     assert not (tmp_path / META_FILE).exists()
     write_meta(tmp_path, "incomplete")
-    assert update_harness_meta_status(tmp_path, "pass") is True
-    assert update_harness_meta_status(tmp_path, "pass") is False
+    assert update(tmp_path, "pass") is True
+    assert update(tmp_path, "pass") is False
     assert status_of(tmp_path) == "pass"
     data = json.loads((tmp_path / META_FILE).read_text(encoding="utf-8"))
     assert data["attempts"] == 1  # other keys survive
     (tmp_path / META_FILE).write_text("{not json", encoding="utf-8")
-    assert update_harness_meta_status(tmp_path, "fail") is False
+    assert update(tmp_path, "fail") is False
     assert (tmp_path / META_FILE).read_text(encoding="utf-8") == "{not json"
+
+
+@pytest.mark.parametrize("status", ["fail", "pass"])
+def test_incomplete_verdict_never_overwrites_a_meta_status(
+    tmp_path: Path, status: str
+) -> None:
+    """A validation that could not finish (Docker down) must not unlock ``fail``."""
+    write_meta(tmp_path, status)
+    assert update(tmp_path, "incomplete") is False
+    assert status_of(tmp_path) == status
+
+
+def test_a_trusted_pass_is_recorded_as_trusted(tmp_path: Path) -> None:
+    write_meta(tmp_path, "fail")
+    assert update(tmp_path, "pass", trusted=True) is True
+    data = json.loads((tmp_path / META_FILE).read_text(encoding="utf-8"))
+    assert (data["status"], data["trusted_tools"]) == ("pass", True)
 
 
 @pytest.mark.timeout(180)

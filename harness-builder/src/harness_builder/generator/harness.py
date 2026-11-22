@@ -301,8 +301,13 @@ Tool module conventions (checked statically, then run in a Docker sandbox):
 - Return a str, number, list or dict that is JSON-serializable.
 - Use the standard library and pydantic only. No network (socket, urllib,
   requests, httpx, aiohttp), subprocess, os.system/os.exec*, file deletion
-  (os.remove, unlink, shutil.rmtree, rmdir), eval, exec, __import__ or
+  (os.remove, unlink, shutil.rmtree, rmdir), eval, exec, compile, __import__,
+  importlib loaders, any reference to sys.path, any import of site, or
   secrets: such tools are flagged and need user approval at every call.
+- The whole harness directory is screened, not only the tool modules: a flagged
+  construct in ANY .py file you write (tests/ included, so do not touch
+  sys.path to import a tool) flags every tool. Write only text files; a .pth,
+  .pyc, .so, .pyd or .zip anywhere flags every tool too.
 - Every module tool in harness.yaml needs at least one entry in examples
   (an args object); validation calls each tool once with examples[0].
 - Permissions default to deny: add an allow rule for every tool.

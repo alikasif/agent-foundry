@@ -1716,6 +1716,14 @@ Hardening pass, in the order the task gave the items.
 
 **Windows bind mounts, as far as possible without Docker.** On this host `bind_mount` emits `--mount type=bind,src=C:\...,dst=/work` (`--mount`, not `-v`, so the drive-letter colon is not a separator). A source containing a comma is refused with a clear error. `check_ro_source` refuses `C:\`, the home directory and its ancestor `C:\Users`, `~\.ssh` and `C:\Windows`, and allows a directory under `%TEMP%`. Not verifiable here: Docker Desktop file sharing (WSL2 backend), junction and symlink traversal into the container, case folding at the mount boundary, read-only enforcement. Left to T060.
 
+**Advisor-review corrections made before the handback.**
+
+- **Meta gate.** `update_harness_meta_status(base_dir, status, *, trusted_tools)` writes only `pass` or `fail`. `incomplete` is never written, so a Docker-down `harness validate` cannot turn a `fail` meta into a runnable one. A `pass` also records `trusted_tools` from the validating run (a `--trust-tools` pass over a `fail` is recorded as trusted); `fail` leaves the other keys alone. Tests in `tests/generator/test_validate_meta.py` (incomplete over `fail` and over `pass`, trusted pass, unreadable file, missing file).
+- **Generator prompt.** The tool-module conventions in `generator/harness.py` now tell the model about the wider screen: `sys.path`, `site`, `compile`, importlib loaders, whole-directory scope (a flagged `tests/` file flags every tool) and the unscreenable file types. Generated tests that insert into `sys.path` would otherwise flag every tool and fail their eval ToolCases on deny.
+- **`eval` approver.** Both `run` and `eval` use the builder's default approver (prompt on a TTY, deny otherwise); docs/generator.md says so (an earlier draft said eval has no approver).
+- **Sandbox image hash.** `executor/image/hb_entry.py` is in `IMAGE_FILES`, so the default `harness-builder-sandbox:<hash>` tag changed. A Docker host must rebuild the image (T060). No test pins the hash.
+- **Pyrefly suppressions** went from 69 to 74: five `# pyrefly: ignore[...]` comments were added in T059 test files (sibling-helper imports, a private-name import, one `bad-argument-type`). Source code gained none.
+
 **Deferred, with reasons.**
 
 - T056 m4 (`getattr(executor, "config")` in `RunSkillScriptTool._request`): same pattern as `RunCodeTool`, and the `Executor` protocol has no config (`core/protocols.py` is frozen). Accepted.

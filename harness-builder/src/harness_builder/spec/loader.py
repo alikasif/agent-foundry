@@ -515,24 +515,36 @@ def check_harness_meta(base_dir: Path) -> None:
         raise ConfigError(f"{META_FILE}: unknown status {status!r}; {override}")
 
 
-def update_harness_meta_status(base_dir: Path, status: str) -> bool:
-    """Record a later validation verdict in an existing ``.harness-meta.json``.
+def update_harness_meta_status(
+    base_dir: Path, status: str, *, trusted_tools: bool
+) -> bool:
+    """Record a later ``pass`` or ``fail`` verdict in an existing meta file.
 
     ``harness validate`` calls this, so the failed-harness gate follows the
-    latest verdict (T046 mn5): a harness that now fails stops being runnable
-    and one that now passes needs no ``--allow-failed``. Returns True when the
-    file changed. A missing file (hand-written harness) is not created, and an
-    unreadable or non-object file is left alone (``check_harness_meta`` keeps
-    failing closed on it).
+    latest verdict (T046 mn5): a harness that now fails stops being runnable,
+    and one that now passes needs no ``--allow-failed``. A verdict of
+    ``pass`` also records whether that run trusted host tools
+    (``trusted_tools``). ``incomplete`` is never written: a validation that
+    could not finish (Docker down) must not turn a ``fail`` into something
+    runnable. Returns True when the file changed. A missing file (hand-written
+    harness) is not created, and an unreadable or non-object file is left
+    alone (``check_harness_meta`` keeps failing closed on it).
     """
+    if status not in ("pass", "fail"):
+        return False
     path = base_dir / META_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    if not isinstance(data, dict) or data.get("status") == status:
+    if not isinstance(data, dict):
         return False
-    data["status"] = status
+    update = {"status": status, "trusted_tools": trusted_tools}
+    if status == "fail":
+        update = {"status": status}
+    if all(data.get(key) == value for key, value in update.items()):
+        return False
+    data.update(update)
     tmp = path.with_name(f"{META_FILE}.tmp")
     tmp.write_bytes((json.dumps(data, indent=2) + "\n").encode())
     os.replace(tmp, path)
