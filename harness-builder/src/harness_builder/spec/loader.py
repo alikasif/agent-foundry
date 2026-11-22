@@ -515,6 +515,30 @@ def check_harness_meta(base_dir: Path) -> None:
         raise ConfigError(f"{META_FILE}: unknown status {status!r}; {override}")
 
 
+def update_harness_meta_status(base_dir: Path, status: str) -> bool:
+    """Record a later validation verdict in an existing ``.harness-meta.json``.
+
+    ``harness validate`` calls this, so the failed-harness gate follows the
+    latest verdict (T046 mn5): a harness that now fails stops being runnable
+    and one that now passes needs no ``--allow-failed``. Returns True when the
+    file changed. A missing file (hand-written harness) is not created, and an
+    unreadable or non-object file is left alone (``check_harness_meta`` keeps
+    failing closed on it).
+    """
+    path = base_dir / META_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get("status") == status:
+        return False
+    data["status"] = status
+    tmp = path.with_name(f"{META_FILE}.tmp")
+    tmp.write_bytes((json.dumps(data, indent=2) + "\n").encode())
+    os.replace(tmp, path)
+    return True
+
+
 def load_eval_cases(
     spec: HarnessSpec, base_dir: Path | None, source: str = "<spec>"
 ) -> list[EvalCase]:

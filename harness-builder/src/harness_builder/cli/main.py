@@ -359,6 +359,7 @@ def validate(
 
     from harness_builder.config import Settings
     from harness_builder.generator.validate import ValidationPipeline
+    from harness_builder.spec.loader import update_harness_meta_status
 
     settings = Settings.from_env()
     with _exit_codes():
@@ -371,6 +372,7 @@ def validate(
             live=live, trust_tools=trust_tools, llm=llm, judge=judge, settings=settings
         )
         report = anyio.run(pipeline.run, target)
+        update_harness_meta_status(target, report.status)
     click.echo(report.to_markdown(), nl=False)
     raise click.exceptions.Exit(report.exit_code)
 
