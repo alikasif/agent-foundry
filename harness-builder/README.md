@@ -4,15 +4,16 @@ A layered agent-harness framework in Python. You compose a harness from small,
 swappable layers (LLM client, strategy, tools, permissions, hooks, context policy,
 budget, trace), run it, and get a complete, replayable trace of what it did.
 
-Status: milestone M4 (M1 framework core, spec loader, trace replay and diff, the
-Docker sandbox, the `run_code` tool, the CodeAct strategy and `harness doctor`,
-plus the harness generator `harness new`, validation, evals and the full
-HarnessSpec v1, plus the skills layer: BM25 retrieval, skill tools, deferred or
-in-process promotion and a human approval gate, see
-[docs/skills.md](docs/skills.md)).
-**No live LLM run has been made yet, and the Docker sandbox has not been run
-against a real Docker daemon yet**; everything below was exercised offline with a
-scripted fake model, a fake Docker CLI and `--trust-tools`.
+Status: all milestones (M1 to M5) are implemented: the framework core, spec loader,
+trace replay and diff, the Docker sandbox, `run_code` and CodeAct, `harness doctor`,
+the generator (`harness new`, validation, evals), HarnessSpec v1 and the skills
+layer. **Everything was exercised offline only**: a scripted fake model, a fake
+Docker CLI or an in-process emulation of the sandbox entry point, and `--trust-tools`.
+**No live LLM run, no rubric check and no real Docker container has ever been run,
+and the OQ-15 criterion (20% fewer steps with skills) has never been measured.**
+See [docs/eval-report.md](docs/eval-report.md) for the results and their limits, and
+[docs/index.md](docs/index.md) for all documentation. Runnable offline examples are
+in [examples/](examples/README.md).
 
 ## Install
 
@@ -187,6 +188,11 @@ and check formats).
 
 ## Documentation
 
+- [docs/index.md](docs/index.md): index of all guides by task.
+- [docs/eval-report.md](docs/eval-report.md): offline eval results, what was never
+  measured, residual risks, ASSUMED defaults.
+- [examples/](examples/README.md): code-built ReAct and CodeAct harnesses and a
+  sample `harness.yaml`, all runnable offline.
 - [docs/layers.md](docs/layers.md): each layer, its protocol, default
   implementation and test double; the step loop; defaults.
 - [docs/extending.md](docs/extending.md): write a tool, a hook, a context policy
@@ -210,9 +216,16 @@ and check formats).
   the approval workflow (`harness skills review`), hygiene commands and
   `harness eval --skills-compare`.
 
-## Known limitations (M1 to M4)
+## Known limitations
 
-- Skills (M4) have never run against a live model or a real Docker daemon. Skill
+- The sandbox image tag changed when `executor/image/hb_entry.py` joined the image
+  files (T059). Rebuild it (`uv run harness doctor` prints the command) before running
+  the docker-marked tests on a Docker host.
+- The static safety screen is a heuristic: a finding in any `.py` file of the
+  harness tree flags every module tool (they then need approval), but string
+  indirection is not caught. The container is the boundary, and it is unproven.
+  Details: [docs/generator.md](docs/generator.md), [docs/eval-report.md](docs/eval-report.md).
+- Skills have never run against a live model or a real Docker daemon. Skill
   scripts and candidate tests have not run in a container, and without Docker
   `harness skills review` marks every candidate invalid (it cannot be approved).
   Whether skills improve results is unmeasured: `--skills-compare` is tested
