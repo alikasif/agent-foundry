@@ -139,10 +139,11 @@ $ uv run harness validate bad --trust-tools
 - `tools/text_tools.py` line 1 [subprocess] import subprocess (tools: count_words)
 ```
 
-`validate` prints this report on stdout. **It does not write `reports/` and does
-not update `.harness-meta.json`** (only `tools.schema.json`, from stage B0). A
-harness that was `incomplete` when generated keeps that meta status after a
-later passing `validate`; `incomplete` is still runnable.
+`validate` prints this report on stdout. **It does not write `reports/`**
+(it writes only `tools.schema.json`, from stage B0). When a
+`.harness-meta.json` already exists it updates its `status` to the new verdict,
+so a harness that now fails stops being runnable and one that now passes needs
+no `--allow-failed`. A hand-written harness has no meta file and gets none.
 
 ### Options
 
@@ -179,7 +180,7 @@ stage is `incomplete`, else `pass`. A report is `pass` even when stage C is
 | `new` | status `pass` | status `fail` | usage or config error (non-empty `-o`, no model, no API key) | status `incomplete` |
 | `validate` | `pass` | `fail` | usage error, unreadable path | `incomplete` |
 | `eval` | no case failed or incomplete | a case failed | usage or config error (including an untrusted `runtime: host` tool) | a case is `incomplete` and none failed |
-| `run` | stopped `done` | stopped for any other reason | config or spec error, including a `fail` harness without `--allow-failed` | Docker unavailable |
+| `run` | stopped `done` | stopped for any other reason | config or spec error, including a `fail` harness without `--allow-failed` | Docker unavailable, or an `incomplete` harness whose `tools.schema.json` is missing (run `harness validate` first) |
 
 ## The repair loop
 
@@ -201,22 +202,44 @@ something the generator can fix. One budget covers the draft and every repair
 
 ## The safety screen
 
-Stage A parses each referenced module (never importing it) and flags risky
-constructs in five categories:
+Stage A parses the Python the harness contains (never importing it) and flags
+risky constructs in five categories:
 
 | Category | Flags |
 |---|---|
-| `network` | imports of `socket`, `urllib`, `requests`, `httpx`, `aiohttp` |
-| `subprocess` | `subprocess`, `os.system`, `os.popen`, `os.exec*`, `os.spawn*` |
-| `delete` | `os.remove`, `os.unlink`, `os.rmdir`, `shutil.rmtree`, `.unlink()`, `.rmdir()` |
-| `dynamic_exec` | `eval`, `exec`, `__import__`, `importlib.import_module` |
+| `network` | imports of `socket`, `ssl`, `urllib`, `urllib3`, `requests`, `httpx`, `aiohttp`, `http.client`, `http.server`, `ftplib`, `smtplib`, `poplib`, `imaplib`, `telnetlib`, `xmlrpc`, `websocket(s)` (also through dynamic imports), `asyncio.open_connection` / `open_unix_connection` / `start_server` |
+| `subprocess` | imports of `subprocess`, `pty`, `multiprocessing`; `os.system`, `os.popen`, `os.exec*`, `os.spawn*`, `os.fork*`; `asyncio.create_subprocess_exec` / `_shell` |
+| `delete` | `os.remove`, `os.unlink`, `os.rmdir`, `os.removedirs`, `shutil.rmtree`, `.unlink()`, `.rmdir()` |
+| `dynamic_exec` | `eval`, `exec`, `compile`, `__import__`, `importlib.import_module`, the `importlib.util` / `importlib.machinery` loaders, `.exec_module()` / `.load_module()`, `runpy`, `pickle` / `marshal` loads, `types.FunctionType`, `ctypes`; the import-system hooks (`sys.meta_path`, `sys.path_hooks`, `sys.path_importer_cache`, `importlib.machinery.*_SUFFIXES`); **any reference to `sys.path`** (reads, aliases, `from sys import path`, mutation); any import of `site`, `sitecustomize` or `usercustomize` |
 | `secret` | key-like literals, secret-looking assignments, high-entropy strings |
 
-It is a heuristic: it cannot see through `getattr` tricks or data flow. A
-finding does not fail validation. It lists the affected tools in
-`flagged_tools`, and a builder created with `flagged_tools=` puts an `ask` rule
-for each ahead of the spec's rules. See [spec.md](spec.md#known-gaps): the CLI
-does not apply those rules at `harness run` time yet.
+**Scope.** `ContainerTool` mounts the whole harness directory read-only at
+`/tools`, so the screen covers what is mounted: every `*.py` at any depth, in
+hidden directories and in `tests/`, `skills/` and `evals/` too. Only the
+top-level `reports/` directory (written by the pipeline) is skipped. Tool
+modules are screened per reference, and every other `.py` file is screened as
+well; a finding there flags **every** module tool of the harness, because the
+loader cannot tell which tool loads which file. The screen also **fails
+closed**: any `.pth`, `.pyc`, `.pyo`, `.so`, `.pyd`, `.zip`, `.egg` or `.whl`
+file anywhere in the tree (none can be screened, and each can execute) flags
+every module tool. A file that cannot be read or parsed does the same.
+
+It is still a heuristic: it cannot see through `getattr`/`setattr` string
+indirection or data flow, and other deserialisers (`shelve`, `dill`) are not
+reported. The container (`--network none`, read-only mount) is the boundary;
+the screen only decides what asks for approval.
+
+A finding does not fail validation. It lists the affected tools in
+`flagged_tools`. `harness run` and `harness eval` apply the same rule: the
+loader re-screens every module tool each time it builds the harness
+(`builder_from_spec`), so each flagged tool gets an `ask` rule ahead of the
+spec's own rules **even when `reports/` was deleted**. A builder created from
+code with `flagged_tools=` adds its names to that list.
+
+The CLI has no interactive approver in `eval`, and `run` asks on a terminal
+only: without a TTY the default approver **denies**. So a flagged ToolCase in
+`harness eval` fails (the tool is denied), and a flagged tool never executes
+silently.
 
 ## Trust and the failed-harness gate
 
@@ -272,8 +295,10 @@ does not apply those rules at `harness run` time yet.
 The README is the generator's own, or a template, with a `FAILED VALIDATION` or
 `VALIDATION INCOMPLETE` banner on top when the status is not `pass`. The harness
 is moved into place with one rename from staging, so a crash never leaves a
-half-written output directory (a stale `<output>.staging/` is deleted on the
-next run).
+half-written output directory. A leftover `<output>.staging/` is deleted on the
+next run only when it carries the `.hb-staging` ownership marker; an unmarked
+directory of that name is not ours, so the run stops with exit 2 and leaves it
+alone.
 
 Whether to commit generated harnesses to git is undecided (U7). `harnesses/` is
 the default output location.
@@ -376,14 +401,17 @@ harness does not build.
 ## Known gaps
 
 - Nothing here has run against a live LLM or a real Docker daemon.
-- `harness validate` does not rewrite `reports/` or `.harness-meta.json`.
+- `harness validate` does not rewrite `reports/`. It only updates `status` in an
+  existing `.harness-meta.json`, so the failed-harness gate follows the latest
+  verdict (T046 mn5).
 - `--live` with `validate` reuses one client for all TaskCase runs, so a
   list-backed fake script works only for single-run cases.
 - `allowed_tools` is advisory: the pipeline does not reject a spec that
   references another built-in.
-- The safety screen's `flagged_tools` are not applied by `harness run`
-  ([spec.md](spec.md#known-gaps)).
 - The CLI cannot pass `examples`, `constraints` or `allowed_tools` to
   `harness new`.
-- Validation status `incomplete` after generation is runnable by design; whether
-  that is the right default is an open review question.
+- Validation status `incomplete` after generation is runnable, by decision
+  (T048 mn4): it never means "unvalidated code runs on the host". A
+  `runtime: docker` tool still needs Docker and `tools.schema.json`, so an
+  incomplete harness stays sandboxed. One case is weaker: with Docker up and a
+  missing linter, stages B0, B and C run but pyrefly did not.

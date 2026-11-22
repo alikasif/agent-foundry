@@ -228,10 +228,10 @@ and check formats).
 - The generator, validation and evals have never run against a live model or a
   real Docker daemon. Without Docker, a harness with Docker tools validates as
   `incomplete` (exit 3).
-- `harness run` does not apply the safety screen's flagged-tool `ask` rules to a
-  generated harness, and `harness replay` cannot rebuild a harness that has
-  module tools (no harness-directory option); see
-  [docs/spec.md](docs/spec.md#known-gaps).
+- `harness replay` cannot rebuild a harness that has module tools (no
+  harness-directory option); see [docs/spec.md](docs/spec.md#known-gaps).
+  `harness run` and `harness eval` do apply the safety screen's flagged-tool
+  `ask` rules (without a TTY the default approver denies).
 - Docker has not been exercised against a real daemon: the sandbox, `run_code`
   and CodeAct are tested with fakes only, and the real-Docker isolation tests
   (`tests/docker`, 25 tests) exist but have never run (all skipped). Isolation is best effort

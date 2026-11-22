@@ -88,7 +88,9 @@ not checked, see [Known issues](#known-issues-and-limits)):
 - The script and the test must parse (`ast.parse`) and pass the
   [safety screen](generator.md); a `secret` finding rejects the candidate, any
   other finding (network, subprocess, delete, dynamic exec) is shown to you and
-  marks the candidate **flagged**.
+  marks the candidate **flagged**. Any reference to `sys.path` and any `site`
+  import counts as `dynamic_exec`, so such a candidate is flagged and never
+  auto-approved.
 
 ### Script contract
 
@@ -220,12 +222,16 @@ cases are `incomplete`). Offline callers must pass an executor, for example
 Disclosure is in three tiers, so an agent pays for a skill only when it uses it:
 
 1. **Catalog (every run).** At run start, for the parent and each sub-agent run,
-   the extension builds a fresh catalog and index from the live library,
-   searches it with the task text, and appends one instruction line plus
+   the extension takes the catalog and index of the live library (cached while
+   the library is unchanged, see below), searches it with the task text, and
+   appends one instruction line plus
    `<available_skills>` (name and description, XML-escaped) to the **system
    prompt**. No hits means nothing is added. Bodies never enter the prompt.
-   Because the index is rebuilt on every run, a newly approved skill is found by
-   the next run with no cache to clear.
+   The cache is keyed on a fingerprint of the live directory (one
+   `(path, name, SKILL.md mtime_ns, size)` row per skill, read with `stat`), so a
+   skill that is approved, replaced, edited or pruned changes the fingerprint
+   and the next run rebuilds: there is no cache to clear. Frontmatter is parsed
+   once per skill (the catalog's parse also supplies `triggers`).
 2. **Body.** `activate_skill(name)` returns the `SKILL.md` body and the resource
    list.
 3. **Resources.** `read_skill_resource` and `run_skill_script`.
@@ -235,8 +241,9 @@ exact kebab-case name appears as a whole token of the (lowercased) task, at most
 `top_k` extra, sorted by name. `csv` is not matched by `csv-merge`, but a
 one-word skill name is offered whenever the task contains that word.
 
-**Retriever.** `LexicalRetriever` (BM25F, no embeddings; a `Retriever` protocol
-sits behind it):
+**Retriever.** `LexicalRetriever` (BM25F, no embeddings). `core.protocols.Retriever`
+describes the shape, but the skills modules construct `LexicalRetriever`
+directly, so swapping the retriever means editing them (T058 m-A1, accepted):
 
 - One document per skill. Field weights: name 2.0, triggers 1.5, description 1.0.
   `k1 = 1.2`, `b = 0.75`.
@@ -251,7 +258,10 @@ sits behind it):
 Measured (offline, my own fixtures): top-3 hit rate 92.3% (48 of 52 labelled
 queries) on an independently written fixture, median search time about 1 ms over
 1,000 synthetic skills. The four misses need synonyms or have no lexical overlap.
-These numbers come from fixtures, not real tasks.
+Run start over 1,000 skills on disk (measured on Windows): about 1.3 s cold
+(discovery plus YAML parsing, once per library change) and about 30 ms with a
+warm cache. Before the cache every run paid about 2 s. These numbers come from
+fixtures, not real tasks.
 
 ## The three skill tools
 
@@ -284,11 +294,24 @@ observation is `ok` and, for a script, exit code 0 without timeout or OOM.
 `read_skill_resource`, refused names and denied calls do not count. Activating a
 skill and then running its script counts 2 uses.
 
-- The file is written atomically (temp file, fsync, replace). A corrupt file reads
-  as empty, so the next write replaces all counters.
-- In-process writers take turns; two **processes** can lose an increment.
-- **`harness replay` of a skills run increments the counters again**, because
-  replay re-runs the post-tool hooks.
+- The file is written atomically (temp file, fsync, replace). A writer holds an
+  in-process lock and a cross-process lock on `skills-meta/stats.lock`, so
+  concurrent processes lose no increment.
+- A corrupt file is **not** read as empty: `record_use` moves it to
+  `stats.json.corrupt-<UTC timestamp>` (with a warning) and restarts counting.
+  A file that cannot be read (for example locked by another process on Windows)
+  is retried for about 2 s; if it is still unreadable that single use is
+  dropped and no other counter is touched.
+- `skills list`, `skills stats` and `skills prune` exit 2 with `stats unreadable`
+  when the file cannot be read or is corrupt, instead of treating it as empty.
+- The hook runs the write in a worker thread and waits at most 1 s for the
+  locks, so a hung lock holder cannot stall the event loop or a run: the use is
+  dropped. Both platforms poll a non-blocking lock with a deadline.
+- **`harness replay` of a skills run increments the counters again**, and
+  writes a new `skills-pending/<cid>/source.json` when the replayed run is a
+  verified success under spec-level promotion (`mode: deferred`), because replay
+  re-runs the post-tool and stop hooks. Treat replay as a run for these two
+  side effects; there is no replay flag on the run context yet (T056 m7, m14).
 - `harness eval --skills-compare` runs on a temp copy and leaves the real stats
   untouched.
 
@@ -410,7 +433,9 @@ error: --auto-approve refused: <root> has no .hb-sandbox-library marker (auto-ap
 
 **Caveat.** The marker is a plain file anyone can create. It is a guard against
 using `--auto-approve` by accident on your real library, not a security control.
-Do not create it in a library you care about.
+Do not create it in a library you care about. A marker committed to a repository
+enables `--auto-approve` for every clone's skills root, so do not commit it (T056
+m11).
 
 ### Docker needed to approve
 
@@ -513,7 +538,7 @@ from harness_builder.skills.retriever import LexicalRetriever
 from harness_builder.skills.store import SkillStore
 from harness_builder.skills.validation import CandidateValidator
 
-SCRIPT = '''\
+SCRIPT = """\
 import json
 import sys
 
@@ -524,14 +549,14 @@ def main(args: dict) -> object:
 
 if __name__ == "__main__":
     print(json.dumps(main(json.load(sys.stdin))))
-'''
-TEST = '''\
+"""
+TEST = """\
 import skill_script
 
 
 def test_sum():
     assert skill_script.main({"numbers": [1, 2]}) == {"total": 3}
-'''
+"""
 REPLY = json.dumps(
     {
         "name": "sum-numbers",
@@ -605,22 +630,40 @@ cost off the run's own ledger. The caller must also bind an executor (a real
   skills root such as a temp directory.
 - **Retrieval is lexical.** No synonyms; 4 of 52 labelled queries still miss. The
   `making`/`make` pair does not match (stem below the minimum length).
-- **Stats are advisory.** Multi-process writers can lose an increment; replay
-  increments counters; a corrupt `stats.json` resets all counters.
+- **Stats are advisory.** A use is dropped when the stats cannot be read or
+  locked in time; replay increments counters and writes a pending `source.json`;
+  a corrupt `stats.json` is set aside as `stats.json.corrupt-<ts>` and counting
+  restarts (nothing is lost silently, the old file stays).
+- **The live library is trusted code.** Candidates are screened and reviewed at
+  the approval gate, but hand-placed skills, `include_user_skills`
+  (`~/.agents/skills`) and the `--skills-compare` seed copy are never screened or
+  layout-checked. `run_skill_script` mounts the whole skill directory read-only
+  and runs any listed `scripts/*.py`; Docker (`--network none`) is the boundary.
+  Only `allow` `run_skill_script` for a library you trust. Screening live
+  scripts at discovery is a possible later step (T058 MA-5b, decided: not now).
+- **A spec `skills.root` is refused next to docker module tools.** The harness
+  directory is mounted at `/tools`, so `<root>/.agents/` (pending candidates, the
+  live library) would be visible to tool code the screen never covers. Keep the
+  library outside the harness directory (`--skills-root`,
+  `HARNESS_SKILLS_ROOT`), or use `runtime: host` tools. A `--skills-root` or env
+  root that you point inside a harness directory with docker tools is your own
+  call and is not checked.
 - **`on_stop` promotion is builder-API only.** A spec can enable `deferred` only.
 - **Hand-written live skills are not validated.** Discovery uses the sibling's
   lenient frontmatter parse, so a description containing `---` is silently cut. A
   directory name different from `name` is warned about but still discovered.
-- **Blocking I/O in hooks.** The stats write and the rename retry on Windows can
-  block the event loop for a short time, up to roughly 2 s (stats) or 0.75 s
-  (renames) under contention.
-- **Time-of-check gap.** Between the candidate's digest check and the sandbox
-  test the files could change; the promoted bytes are digest-checked again, so a
-  changed candidate is refused at promotion.
-- **`seeded_skills` counts symlinked directories** in the eval comparison.
+- **Blocking I/O in hooks.** The stats write runs off the event loop. The rename
+  retry on Windows (up to 0.75 s) still runs in the approval gate, a CLI path.
+- **Time-of-check gap.** The candidate's digest is checked again after its
+  sandbox test, and a candidate that changed during the test is rejected; the
+  promoted bytes are digest-checked once more at promotion.
+- **Prune ages from the `SKILL.md` mtime** (T056 m9), which approval preserves,
+  so a candidate approved long after generation can be prune-eligible at once.
+  The dry run and the confirmation keep this safe.
 - **Forged pass.** A test that prints the pass sentinel and then calls
-  `os._exit(0)` can fake a pass. It takes intent, and you see the test source
-  at the gate.
+  `os._exit(0)` can fake a pass: the runner needs exit 0 and the sentinel as
+  the last line, and the sentinel can be printed by the test itself. It takes
+  intent, and you see the test source at the gate.
 - **Merge is manual**, and dedup compares descriptions only.
 - **Sub-agent profiles** cannot list skill tools by name (the spec loader does not
   know extension tools).

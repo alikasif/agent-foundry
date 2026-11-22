@@ -222,9 +222,12 @@ hand-checked code, and validation rejects it unless you pass `--trust-tools`.
   auto-deny, and validation approves `ask` decisions so the smoke run can
   proceed.
 - When the safety screen flags a tool (see [generator.md](generator.md#the-safety-screen)),
-  builders created with `flagged_tools=` get an `ask` rule for it ahead of your
-  rules. **`harness run` does not pass flagged tools today**; see
-  [Known gaps](#known-gaps).
+  the loader re-screens every module tool each time it builds the harness, so
+  `harness run` and `harness eval` also put an `ask` rule for it ahead of your
+  rules, with or without a validation report. Builders created in code with
+  `flagged_tools=` add their names. Without a TTY the default approver denies,
+  so a flagged tool does not run unattended (a flagged `harness eval` ToolCase
+  fails).
 - The defaults marked ASSUMED in the design (deny-unlisted, sub-agent depth 2)
   are placeholders awaiting confirmation.
 
@@ -330,9 +333,6 @@ tools, eval files or a skills root) and `flagged_tools`.
 
 ## Known gaps
 
-- `harness run` and `harness eval` do not apply the safety screen's
-  `flagged_tools`, so a flagged tool in a generated harness gets no `ask` rule at
-  run time. Choosing how to enforce this is open (review item).
 - `harness replay` has no option for the harness directory, so a trace from a
   harness with module tools, an eval file or a skills root cannot be rebuilt from
   its snapshot by the CLI (`<spec>: tools[0].module: file references need a spec file or
