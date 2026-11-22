@@ -22,17 +22,23 @@ constructs in five categories:
   arbitrary execution), any reference to ``importlib.machinery.*_SUFFIXES``,
   ``sys.meta_path``, ``sys.path_hooks`` or ``sys.path_importer_cache``, and
   any reference to ``sys.path`` at all (reads, aliases, ``from sys import
-  path``, mutation) and any ``site`` / ``sitecustomize`` / ``usercustomize``
-  import. ``hb_entry`` keeps the harness off ``sys.path``, so a tool cannot
-  import a sibling or process a ``.pth`` file without one of these (T046 MJ5b,
-  T048 MA1);
+  path``, mutation), any ``site`` / ``sitecustomize`` / ``usercustomize``
+  import, relative imports and any binding of ``__path__`` / ``__package__``
+  / ``__spec__``. ``hb_entry`` keeps the harness off ``sys.path``, so a tool
+  cannot import a sibling or process a ``.pth`` file without one of these
+  (T046 MJ5b, T048 MA1, T062 MJ1). Imports of stdlib modules that compile and
+  run a string or file (``timeit``, ``code``, ``codeop``, ``pdb``, ``bdb``,
+  ``cProfile``, ``profile``, ``trace``, ``doctest``, ``zipimport``,
+  ``importlib._bootstrap*``, ``logging.config``) are flagged too, so code
+  stored in a non-``.py`` file cannot be run unseen (T062 MJ2);
 - ``secret``: key-like string literals, string literals assigned to
   secret-looking names, and high-entropy string literals.
 
 The screen is a heuristic. It cannot see through ``getattr`` tricks or data
 flow, and it flags every delete because "outside the workdir" is not
 decidable statically. Known limits: ``getattr(os, "system")`` style
-indirection (including ``getattr(builtins, "ex" + "ec")``), other
+indirection (including ``getattr(builtins, "ex" + "ec")``,
+``vars(builtins)["exec"]`` and ``pydoc.locate("os.system")``), other
 deserialisers (``shelve``, ``dill``) and overwriting moves (``shutil.move``,
 ``os.replace``, ``os.rename``) are not reported. Only ``.py`` source is
 screened: the caller must fail closed on ``.pth``/``.pyc``/``.so``/``.zip``
@@ -86,7 +92,27 @@ SUBPROCESS_CALLS = frozenset(
     }
 )
 SUBPROCESS_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn", "os.fork")
-DYNAMIC_EXEC_MODULES = frozenset({"ctypes", "site", "sitecustomize", "usercustomize"})
+DYNAMIC_EXEC_MODULES = frozenset(
+    {
+        "ctypes",
+        "site",
+        "sitecustomize",
+        "usercustomize",
+        # Stdlib APIs that compile and run a string or file they are handed.
+        "timeit",
+        "code",
+        "codeop",
+        "pdb",
+        "bdb",
+        "cProfile",
+        "profile",
+        "trace",
+        "doctest",
+        "zipimport",
+    }
+)
+DYNAMIC_EXEC_SUBMODULES = ("logging.config", "importlib._bootstrap")
+IMPORT_BINDING_NAMES = frozenset({"__path__", "__package__", "__spec__"})
 DELETE_CALLS = frozenset(
     {"os.remove", "os.unlink", "os.rmdir", "os.removedirs", "shutil.rmtree"}
 )
@@ -209,11 +235,17 @@ class _Screener(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
+        if node.level > 0:
+            self.findings.append(
+                Finding("dynamic_exec", node.lineno, "relative import")
+            )
         if node.level == 0:
             self._check_module(module, node.lineno, "from-import")
         for alias in node.names:
             origin = f"{module}.{alias.name}" if module else alias.name
             if node.level == 0 and origin.startswith(NETWORK_SUBMODULES):
+                self._check_module(origin, node.lineno, "from-import")
+            if node.level == 0 and origin.startswith(DYNAMIC_EXEC_SUBMODULES):
                 self._check_module(origin, node.lineno, "from-import")
             if node.level == 0 and (_import_system(origin) or origin == SYS_PATH):
                 self.findings.append(
@@ -228,7 +260,13 @@ class _Screener(ast.NodeVisitor):
             self._add("dynamic_exec", node, f"import system {name}")
         if name == SYS_PATH:
             self._add("dynamic_exec", node, f"reference {name}")
+        if name is not None and name.startswith(DYNAMIC_EXEC_SUBMODULES):
+            self._add("dynamic_exec", node, f"reference {name}")
         self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store) and node.id in IMPORT_BINDING_NAMES:
+            self._add("dynamic_exec", node, f"binds {node.id}")
 
     def visit_Call(self, node: ast.Call) -> None:
         name = self._qualified(node.func)
@@ -278,7 +316,7 @@ class _Screener(ast.NodeVisitor):
             self.findings.append(Finding("network", line, f"{how} {module}"))
         if top in SUBPROCESS_MODULES:
             self.findings.append(Finding("subprocess", line, f"{how} {module}"))
-        if top in DYNAMIC_EXEC_MODULES:
+        if top in DYNAMIC_EXEC_MODULES or module.startswith(DYNAMIC_EXEC_SUBMODULES):
             self.findings.append(Finding("dynamic_exec", line, f"{how} {module}"))
 
     def _check_call(self, name: str, node: ast.Call) -> None:

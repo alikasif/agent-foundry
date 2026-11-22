@@ -7,8 +7,9 @@ silently. Offline: Docker is emulated in-process, and every test is sync
 because the commands call ``anyio.run`` themselves.
 """
 
+import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from harness_builder.core.types import ToolCall
 from harness_builder.executor.models import ExecRequest
 from harness_builder.llm.fake import FakeLLMClient
 from harness_builder.llm.types import LLMRequest, LLMResponse
+from harness_builder.spec import loader as loader_module
 from harness_builder.spec.loader import (
     builder_from_spec,
     flagged_tool_names,
@@ -369,3 +371,92 @@ def host_files(kind: str) -> FileSet:
             "tools/units.py"
         ].replace('"""Unit conversion tools: lengths and temperatures."""\n', "", 1)
     return files
+
+
+def two_module_files() -> FileSet:
+    """Host-runtime unit_conversion with ``convert_temperature`` in its own module."""
+    files = host_files("clean")
+    units = files["tools/units.py"]
+    files["tools/temps.py"] = units
+    spec = files["harness.yaml"]
+    head, _, tail = spec.rpartition("module: tools/units.py")
+    files["harness.yaml"] = f"{head}module: tools/temps.py{tail}"
+    return files
+
+
+def test_two_module_control_is_clean(tmp_path: Path) -> None:
+    root = write_harness(tmp_path / "h", two_module_files())
+    assert flagged_after(root) == []
+
+
+def test_finding_in_a_named_tool_module_flags_every_module_tool(
+    tmp_path: Path,
+) -> None:
+    """T062 MJ1 (P2/P4): a clean tool can import the flagged named module."""
+    files = two_module_files()
+    files["tools/units.py"] = "import subprocess  # noqa: F401\n" + files[
+        "tools/units.py"
+    ].replace('"""Unit conversion tools: lengths and temperatures."""\n', "", 1)
+    root = write_harness(tmp_path / "h", files)
+    assert flagged_after(root) == ALL_TOOLS
+
+
+def test_finding_in_a_named_hook_module_flags_every_module_tool(
+    tmp_path: Path,
+) -> None:
+    """T062 MJ1 (P1): a tool can run a spec hook module through a relative import."""
+    files = two_module_files()
+    files["tools/hook.py"] = "import subprocess  # noqa: F401\n\n\ndef h(*a): ...\n"
+    files["harness.yaml"] += (
+        "hooks:\n  - {module: tools/hook.py, function: h, event: pre_tool}\n"
+    )
+    root = write_harness(tmp_path / "h", files)
+    assert flagged_after(root) == ALL_TOOLS
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "from . import units  # noqa: F401\n",
+        "__path__ = ['.']\n__package__ = __name__\n",
+    ],
+)
+def test_relative_import_and_package_binding_flag_every_module_tool(
+    tmp_path: Path, prefix: str
+) -> None:
+    """T062 MJ1 (P4): a plain module turning itself into a package is flagged."""
+    files = two_module_files()
+    files["tools/temps.py"] = prefix + files["tools/temps.py"]
+    root = write_harness(tmp_path / "h", files)
+    assert flagged_after(root) == ALL_TOOLS
+
+
+def test_timeit_over_a_text_file_flags_every_module_tool(tmp_path: Path) -> None:
+    """T062 MJ2 (P3): ``timeit`` runs the code in a ``.txt`` file."""
+    files = two_module_files()
+    files["tools/notes.txt"] = "import os; os.environ['PWN'] = '1'\n"
+    files["tools/temps.py"] = (
+        "import timeit\n"
+        "from pathlib import Path\n\n"
+        "timeit.timeit(Path(__file__).with_name('notes.txt').read_text(), number=1)\n"
+        + files["tools/temps.py"]
+    )
+    root = write_harness(tmp_path / "h", files)
+    assert flagged_after(root) == ALL_TOOLS
+
+
+def test_walk_errors_are_reported_as_unscreenable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T062 mn5: ``os.walk`` errors fail closed (portable, via ``onerror``)."""
+    real_walk = os.walk
+
+    def failing_walk(
+        top: Path, onerror: Callable[[OSError], object]
+    ) -> Iterator[tuple[str, list[str], list[str]]]:
+        onerror(OSError(13, "denied", str(Path(top) / "locked")))
+        return real_walk(top)
+
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    monkeypatch.setattr(loader_module.os, "walk", failing_walk)
+    assert flagged_after(root) == ALL_TOOLS

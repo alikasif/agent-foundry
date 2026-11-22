@@ -144,8 +144,10 @@ def test_dynamic_import_of_subprocess_via_importlib() -> None:
     assert categories(source) == {"dynamic_exec", "subprocess"}
 
 
-def test_relative_import_named_like_a_risky_module_is_not_flagged() -> None:
-    assert screen("from . import socket\nfrom .requests import get\n").findings == ()
+def test_relative_import_named_like_a_risky_module_is_only_a_relative_import() -> None:
+    """Not network (it is the sibling), but any relative import is dynamic_exec."""
+    source = "from . import socket\nfrom .requests import get\n"
+    assert categories(source) == {"dynamic_exec"}
 
 
 def test_unrelated_attribute_calls_are_not_flagged() -> None:
@@ -442,3 +444,52 @@ def test_unrelated_sys_and_path_attributes_stay_clean(source: str) -> None:
 )
 def test_sys_path_reference_and_site_use_are_dynamic_exec(source: str) -> None:
     assert categories(source) == {"dynamic_exec"}
+
+
+# --- T062 MJ1/MJ2: sibling reach and exec-of-string stdlib modules -------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from . import risky\n",
+        "from .pkg import risky\n",
+        "__path__ = ['x']\n",
+        "__package__ = __name__\n",
+        "__spec__ = None\n",
+        "import timeit\ntimeit.timeit(open('d.txt').read(), number=1)\n",
+        "import code\ncode.InteractiveInterpreter().runsource(src, symbol='exec')\n",
+        "import codeop\nf.__code__ = codeop.compile_command(src, symbol='exec')\n",
+        "import zipimport\nf.__code__ = zipimport.zipimporter('d.txt').get_code('m')\n",
+        "import cProfile\ncProfile.run(src)\n",
+        "import profile\nprofile.run(src)\n",
+        "import pdb\npdb.run(src)\n",
+        "import bdb\n",
+        "import trace\ntrace.Trace().run(src)\n",
+        "import doctest\ndoctest.run_docstring_examples(src, {})\n",
+        "from timeit import timeit\n",
+        "from pdb import run\n",
+        "import importlib._bootstrap\n",
+        "import importlib._bootstrap_external\n",
+        "from importlib._bootstrap import _load\n",
+        "from importlib import _bootstrap\n",
+        "import importlib\nimportlib._bootstrap._load(spec)\n",
+        "import logging.config\nlogging.config.fileConfig('x.ini')\n",
+        "from logging.config import fileConfig\n",
+        "from logging import config\n",
+        "import logging\nlogging.config.fileConfig('x.ini')\n",
+    ],
+)
+def test_sibling_reach_and_exec_of_string_modules_are_dynamic_exec(
+    source: str,
+) -> None:
+    assert categories(source) == {"dynamic_exec"}
+
+
+def test_plain_logging_and_importlib_metadata_stay_clean() -> None:
+    """Negative control: only ``logging.config`` and ``importlib._bootstrap*``."""
+    source = (
+        "import logging\nimport importlib.metadata\nfrom importlib import resources\n"
+        "log = logging.getLogger(__name__)\npath = 'a'\npackage = 1\n"
+    )
+    assert categories(source) == set()

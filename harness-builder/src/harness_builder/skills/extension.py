@@ -272,10 +272,12 @@ class SkillsExtension:
     ) -> None:
         """``post_tool`` hook: count a use of an offered skill (FR-052).
 
-        The write runs in a worker thread and waits at most
-        ``STATS_HOOK_LOCK_TIMEOUT_S`` for the stats locks, so a hung lock
-        holder can neither block the event loop nor stall a run (T058 MA-3);
-        a use that cannot be recorded in time is dropped (``OSError``).
+        The write runs in a worker thread and waits up to
+        ``STATS_HOOK_LOCK_TIMEOUT_S`` for each of the two stats locks, so a
+        hung lock holder cannot block the event loop (T058 MA-3). The run
+        still awaits the hook: with the read and replace retries the worst
+        case is about 4.75 s per call (T062 mn3), then the use is dropped
+        (``OSError``).
 
         Every invoked ``activate_skill`` or ``run_skill_script`` call on a
         skill offered to the run counts one use. It counts a success when the

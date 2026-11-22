@@ -271,6 +271,7 @@ def _finalize(
         "model": harness.config.model.name,
         "generator_stop": stop.reason,
         "trusted_tools": report.trusted,
+        "validation_strength": "strong" if report.strong else "weak",
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "request": request.model_dump(mode="json"),
     }

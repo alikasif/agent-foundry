@@ -382,14 +382,17 @@ def flagged_tool_names(
     """Tool names whose module ``safety.screen`` flags (FR-032), in spec order.
 
     Shared by validation stage A and ``builder_from_spec`` so both agree.
-    Fails closed: a module that cannot be read or parsed flags every tool it
-    provides. Returns ``[]`` without a ``base_dir``; a module path that leaves
-    the harness directory raises ``SpecError``.
+    A finding in ANY ``.py`` of the mounted tree (named tool and hook modules
+    included, T062 MJ1) flags every module tool: a tool can run another file
+    through a relative import. Fails closed: a file that cannot be read or
+    parsed, or an unlistable directory, flags every module tool. Returns
+    ``[]`` without a ``base_dir``; a module path that leaves the harness
+    directory raises ``SpecError``.
     """
     if base_dir is None:
         return []
     module_refs = [ref for ref in spec.tools if isinstance(ref, ModuleToolRef)]
-    if _unreferenced_flagged(spec, base_dir):
+    if _tree_flagged(base_dir):
         return list(dict.fromkeys(ref.function for ref in module_refs))
     flagged: list[str] = []
     verdicts: dict[str, bool] = {}
@@ -414,27 +417,25 @@ UNSCREENABLE_SUFFIXES = frozenset(
 
 
 def unreferenced_py_files(spec: HarnessSpec, base_dir: Path) -> list[Path]:
-    """Python files in the mounted harness tree that the spec does not name.
+    """Python files in the mounted harness tree outside the named tool modules.
 
     ``ContainerTool`` mounts the whole harness directory at ``/tools``, so the
     screen covers the whole tree (T048 MA1): every ``*.py`` at any depth,
     including hidden directories, except those under the top-level
     ``reports/`` (pipeline-owned, never writable by the generator), files
-    resolving outside the harness, and the tool and hook modules the spec
-    names (tool modules are screened per reference; hook modules are host code,
-    gated by ``--trust-tools``). No directory is exempt, not even ``skills/``
-    or ``tests/``. Files the screen cannot read, such as ``.pth`` or ``.pyc``,
-    are handled by ``unscreenable_files``. Sorted, so results are stable.
+    resolving outside the harness, and the tool modules the spec names (stage
+    A screens those per module; hook modules are included here, T062 MJ1). No
+    directory is exempt, not even ``skills/`` or ``tests/``. Files the screen
+    cannot read, such as ``.pth`` or ``.pyc``, are handled by
+    ``unscreenable_files``. Sorted, so results are stable.
     """
     root = base_dir.resolve()
     named = {
         (root / ref.module).resolve()
-        for ref in [*spec.tools, *spec.hooks]
-        if isinstance(ref, ModuleToolRef | ModuleHookRef)
+        for ref in spec.tools
+        if isinstance(ref, ModuleToolRef)
     }
-    return sorted(
-        path for path in _tree_files(root) if path.suffix == ".py" and path not in named
-    )
+    return sorted(path for path in _tree_py_files(root) if path not in named)
 
 
 def unscreenable_files(base_dir: Path) -> list[Path]:
@@ -443,34 +444,45 @@ def unscreenable_files(base_dir: Path) -> list[Path]:
     ``.pth`` (processed by ``site``), ``.pyc``/``.pyo`` (loaded in place of
     their source), ``.so``/``.pyd`` and zip-like archives. Any one of them
     makes the caller flag every module tool (fail closed, T048 MA1). Same
-    scope as ``unreferenced_py_files``.
+    scope as ``unreferenced_py_files``. A directory that cannot be listed is
+    reported too (its files were never seen, T062 mn5).
     """
     root = base_dir.resolve()
-    return sorted(
-        path
-        for path in _tree_files(root)
-        if path.suffix.lower() in UNSCREENABLE_SUFFIXES
-    )
+    files, unlistable = _walk(root)
+    flagged = [p for p in files if p.suffix.lower() in UNSCREENABLE_SUFFIXES]
+    return sorted([*flagged, *unlistable])
 
 
-def _tree_files(root: Path) -> list[Path]:
-    """Resolved files under ``root`` outside the unscreened top-level dirs."""
+def _tree_py_files(root: Path) -> list[Path]:
+    """Resolved ``*.py`` files under ``root`` outside the unscreened dirs."""
+    return [path for path in _walk(root)[0] if path.suffix == ".py"]
+
+
+def _walk(root: Path) -> tuple[list[Path], list[Path]]:
+    """``(files, unlistable dirs)`` under ``root``, minus unscreened top dirs."""
     found: list[Path] = []
-    for current, dirs, names in os.walk(root):
+    unlistable: list[Path] = []
+
+    def on_error(exc: OSError) -> None:
+        unlistable.append(Path(exc.filename or root))
+
+    for current, dirs, names in os.walk(root, onerror=on_error):
         if Path(current) == root:
             dirs[:] = [d for d in dirs if d not in UNSCREENED_DIRS]
         found += (Path(current) / name for name in names)
-    return [path for path in map(Path.resolve, found) if path.is_relative_to(root)]
+    files = [path for path in map(Path.resolve, found) if path.is_relative_to(root)]
+    return files, unlistable
 
 
-def _unreferenced_flagged(spec: HarnessSpec, base_dir: Path) -> bool:
-    """True if any unreferenced file has a finding or cannot be read/parsed.
+def _tree_flagged(base_dir: Path) -> bool:
+    """True if any ``.py`` in the tree has a finding or cannot be read/parsed.
 
-    Also True when the tree holds a file no screen can read (fail closed).
+    Also True when the tree holds a file no screen can read or a directory
+    that cannot be listed (fail closed).
     """
     if unscreenable_files(base_dir):
         return True
-    for path in unreferenced_py_files(spec, base_dir):
+    for path in _tree_py_files(base_dir.resolve()):
         try:
             if screen(path).flagged:
                 return True
@@ -516,15 +528,18 @@ def check_harness_meta(base_dir: Path) -> None:
 
 
 def update_harness_meta_status(
-    base_dir: Path, status: str, *, trusted_tools: bool
+    base_dir: Path, status: str, *, trusted_tools: bool, strong: bool
 ) -> bool:
     """Record a later ``pass`` or ``fail`` verdict in an existing meta file.
 
     ``harness validate`` calls this, so the failed-harness gate follows the
-    latest verdict (T046 mn5): a harness that now fails stops being runnable,
-    and one that now passes needs no ``--allow-failed``. A verdict of
-    ``pass`` also records whether that run trusted host tools
-    (``trusted_tools``). ``incomplete`` is never written: a validation that
+    latest verdict (T046 mn5). A downgrade (``pass`` to ``fail``) is always
+    written. An upgrade (``fail`` to ``pass``) is written only when the new run
+    is at least as strong as the one that recorded the ``fail`` (T062 MJ3):
+    ``strong`` means every case ran (no ``not_run``) on Docker tools, no
+    trusted host B0. The meta stores it as ``validation_strength``; a ``fail``
+    without that key counts as strong. A verdict also records
+    ``trusted_tools``. ``incomplete`` is never written: a validation that
     could not finish (Docker down) must not turn a ``fail`` into something
     runnable. Returns True when the file changed. A missing file (hand-written
     harness) is not created, and an unreadable or non-object file is left
@@ -539,9 +554,20 @@ def update_harness_meta_status(
         return False
     if not isinstance(data, dict):
         return False
-    update = {"status": status, "trusted_tools": trusted_tools}
+    recorded_strong = data.get("validation_strength", "strong") == "strong"
+    if status == "pass" and data.get("status") == "fail":
+        if recorded_strong and not strong:
+            return False
+    if status == "fail" and data.get("status") == "fail":
+        strong = strong or recorded_strong
+    strength = "strong" if strong else "weak"
+    update = {
+        "status": status,
+        "trusted_tools": trusted_tools,
+        "validation_strength": strength,
+    }
     if status == "fail":
-        update = {"status": status}
+        update = {"status": status, "validation_strength": strength}
     if all(data.get(key) == value for key, value in update.items()):
         return False
     data.update(update)

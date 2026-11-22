@@ -304,9 +304,14 @@ skill and then running its script counts 2 uses.
   dropped and no other counter is touched.
 - `skills list`, `skills stats` and `skills prune` exit 2 with `stats unreadable`
   when the file cannot be read or is corrupt, instead of treating it as empty.
-- The hook runs the write in a worker thread and waits at most 1 s for the
-  locks, so a hung lock holder cannot stall the event loop or a run: the use is
-  dropped. Both platforms poll a non-blocking lock with a deadline.
+- The hook runs the write in a worker thread, so a hung lock holder cannot stall
+  the event loop. The run does await the hook: the worst case is about 4.75 s per
+  skill call (1 s for the in-process lock, 1 s for the process lock, about 2 s of
+  read retries, 0.75 s of replace retries), after which the use is dropped. Both
+  platforms poll a non-blocking lock with a deadline.
+- The catalog cache keys on the `SKILL.md` mtime and size; on a filesystem with a
+  coarse mtime (FAT, HFS+, ext3) a same-size edit within that window serves stale
+  frontmatter until the next change. Accepted (T062 mn4).
 - **`harness replay` of a skills run increments the counters again**, and
   writes a new `skills-pending/<cid>/source.json` when the replayed run is a
   verified success under spec-level promotion (`mode: deferred`), because replay
@@ -645,9 +650,14 @@ cost off the run's own ledger. The caller must also bind an executor (a real
   directory is mounted at `/tools`, so `<root>/.agents/` (pending candidates, the
   live library) would be visible to tool code the screen never covers. Keep the
   library outside the harness directory (`--skills-root`,
-  `HARNESS_SKILLS_ROOT`), or use `runtime: host` tools. A `--skills-root` or env
-  root that you point inside a harness directory with docker tools is your own
-  call and is not checked.
+  `HARNESS_SKILLS_ROOT`), or use `runtime: host` tools. Only a spec root is
+  checked. A `--skills-root` or env root inside the harness is not, and neither
+  are root rungs 4 and 5 (the nearest `pyproject.toml`, then the cwd), which land
+  inside the harness when you run from inside it. Such a library is still
+  screened with the rest of the tree at build time (every `.py` under it flags
+  every module tool, so a risky approved or pending script costs an `ask` on all
+  docker tools, and a large library is walked on every build). Candidates that
+  deferred promotion writes during a run appear after that screen.
 - **`on_stop` promotion is builder-API only.** A spec can enable `deferred` only.
 - **Hand-written live skills are not validated.** Discovery uses the sibling's
   lenient frontmatter parse, so a description containing `---` is silently cut. A

@@ -158,6 +158,16 @@ class ValidationReport(BaseModel):
     live: bool = False
 
     @property
+    def strong(self) -> bool:
+        """True when every eval case ran and B0, B and C used Docker tools.
+
+        Compared by ``update_harness_meta_status``: a weaker run (``not_run``
+        TaskCases, trusted host tools) must not unlock a harness a stronger
+        run failed.
+        """
+        return not self.trusted and all(c.status != "not_run" for c in self.eval_cases)
+
+    @property
     def exit_code(self) -> int:
         """0 pass, 1 fail, 3 incomplete."""
         return EXIT_CODES[self.status]
@@ -693,10 +703,14 @@ def _screen(
     trees: dict[str, ast.Module],
     module_tools: list[ModuleToolRef],
 ) -> list[SafetyFinding]:
-    """Screen every parsed module; findings name the tools of that module."""
+    """Screen every parsed module; a finding is blamed on every module tool.
+
+    Any tool can run another module of the tree through a relative import
+    (T062 MJ1), so the module a finding sits in does not limit its reach.
+    """
     findings: list[SafetyFinding] = []
+    tools = [t.function for t in module_tools]
     for module in trees:
-        tools = [t.function for t in module_tools if t.module == module]
         report = screen(files[module].read_text(encoding="utf-8"))
         findings += [
             SafetyFinding(
@@ -714,7 +728,9 @@ def _screen(
 def _screen_unreferenced(
     spec: HarnessSpec, base_dir: Path, module_tools: list[ModuleToolRef]
 ) -> list[SafetyFinding]:
-    """Findings of files the spec does not name (T046 MJ5), blamed on all tools.
+    """Findings of files outside the named tool modules (T046 MJ5, T062 MJ1).
+
+    Hook modules are included. Blamed on all tools.
 
     The loader cannot tell which tool loads which file, so every module tool
     is listed; an unreadable or unparsable file gets a ``dynamic_exec`` finding
