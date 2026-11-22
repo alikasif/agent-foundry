@@ -10,17 +10,15 @@ to let a model run, which is the point of requirement FR-046.
 - **Best effort, not a security guarantee.** A Docker container is a process
   sandbox on a **shared host kernel**. It is a strong accident barrier and a
   moderate barrier against a hostile program. It is not a virtual machine.
-- **Not yet exercised against a real daemon.** In this repository's development
-  and CI runs no container has been started: the author's Docker Desktop was
-  stopped throughout. Everything below describes the flags and code the executor
-  generates, checked against a fake Docker CLI (the generated `docker create` line
-  is asserted in unit tests). Whether Docker honours each flag on your machine is
-  unverified here.
-- **The isolation test suite exists but has never run.** `tests/docker/` holds 25
-  tests marked `docker` that start real containers and probe the limits. They
-  skip when no daemon answers, and on the only machine used so far they all
-  skipped. They have not passed; they have not failed; they are untested. Some
-  of their expectations are guesses about Docker Desktop behaviour.
+- **Exercised against a real daemon once (2026-11-22).** Windows 11, Docker Desktop
+  engine 29.5.3: the `docker`-marked tests passed (42 passed, 1 live test skipped).
+  The flags below are also asserted against a fake Docker CLI in unit tests. Other
+  hosts and engines are unverified.
+- **The isolation test suite has run once, on Windows 11 + Docker Desktop.**
+  `tests/docker/` holds 31 tests marked `docker`; on 2026-11-22 all 31 passed
+  (network off, read-only root and `/tools`, dropped capabilities, no secrets in
+  the environment, limits). Only that one host and engine (29.5.3) have been
+  tried; a POSIX host is untested.
 - The code review of the Docker and CodeAct code (T034, status
   CHANGES_REQUESTED) found two MAJOR issues, since fixed in source but never run against Docker, and
   deferred some minor ones. They are listed under [Known issues from review](#known-issues-from-review).

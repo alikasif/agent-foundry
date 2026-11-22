@@ -5,18 +5,29 @@ Source: `shared/eval_results.json`, written by `scripts/run_eval_results.py`
 
 ## Read this first
 
-**Every number in this report is offline and Docker-emulated, and every model
-answer comes from a scripted fake LLM. The passes are by construction.** They show
-that the plumbing works. They say nothing about whether a real model, a real
-container or a generated harness is any good.
+**The fixture-harness evals and the skills comparison below are offline and
+Docker-emulated, and every model answer in them comes from a scripted fake LLM. The
+passes are by construction.** They show that the plumbing works. They say nothing
+about whether a real model or a generated harness is any good.
 
-Never measured, anywhere in this project:
+What ran in a real container (2026-11-22, Docker Desktop server 29.5.3, Windows 11):
+`pytest -m docker`, **42 passed, 1 skipped (the live stage-C test), 0 failed**. It
+covers the sandbox isolation, resource limits, stdin round trip, harness runs and
+latency (`tests/docker`, 31 tests), stage C Docker, `ContainerTool`, the strategy
+swap and the skill-script path against a real container, and the `/skill`
+read-only mount. This measures the sandbox, not model quality. The first real run
+(38 of 42 failed) found one image bug, now fixed: `COPY --chmod=0644` also gave
+`/opt/hb` mode 0644, so uid 10001 could not open `hb_entry.py`. Recorded in
+`shared/eval_results.json` under `real_docker_tests` (produced by
+`scripts/run_eval_results.py --real-docker`). Median container round trip
+(T032 latency test, 10 runs): about 1.05 s on this host, target 3.0 s.
 
-- **Real Docker.** The Docker daemon was down when the results were produced
-  (`docker.available: false`; `docker info` reached the client but not the
-  `dockerDesktopLinuxEngine` pipe). No container has ever run. The "Docker" in the
-  results is the production sandbox code path with `hb_entry` called in-process
-  (`tests/generator/support.py`), not a container.
+Still not measured, anywhere in this project:
+
+- **The fixture harness evals in real Docker.** The numbers below use the
+  production sandbox code path with `hb_entry` called in-process
+  (`tests/generator/support.py`), not a container. Only the docker-marked tests
+  above ran in a container.
 - **Live LLM runs.** No request has been sent to OpenRouter. `HARNESS_LIVE` was
   not `1`, so live TaskCases are recorded as a skip, not as a failure.
 - **Rubric checks.** They need a judge model, so they were never run.
@@ -25,8 +36,9 @@ Never measured, anywhere in this project:
   was engineered to need two extra calls without the skill.
 - **Cost.** `cost` is `null` or `0.0` (fake model, no price). No cost figure here is
   real.
-- `py_assert` checks, `run_code` and Docker-runtime ToolCases inside a real
-  container.
+- **Generated-harness `py_assert` checks, `run_code` and Docker-runtime ToolCases
+  from the fixture evals** inside a real container (the docker-marked tests cover
+  these paths with their own fixtures, not the three eval domains).
 
 ## What was run
 
@@ -34,7 +46,7 @@ Never measured, anywhere in this project:
 |---|---|
 | Mode | offline |
 | LLM | `FakeLLMClient`, scripted |
-| Docker | emulated in-process; `FakeExecutor` for the skills comparison |
+| Docker | emulated in-process; `FakeExecutor` for the skills comparison (real Docker: see the docker-marked results above) |
 | ToolCases | deterministic (same input, same output) |
 | Live TaskCases | skipped, `HARNESS_LIVE is not 1` |
 
@@ -82,44 +94,45 @@ higher than empty tokens in this run, which the criterion does not look at.
 `harness eval --skills-compare` itself needs `--live` per its help text. This
 result came from calling `compare_skills` directly with a scripted model.
 
-## Test-suite state (T060, same host)
+## Test-suite state
 
-From the T060 notes, refreshed after the T062 round 3 follow-up (F5) with a full `uv run pytest -q` on the same host: 2456 passed, 52 skipped, 0 failed;
-`ruff format --check`, `ruff check` and `pyrefly check` were clean. The 52 skips,
-each with a reason:
+Full `uv run pytest -q` on the same host after the F1 close-out, with Docker
+running: 2498 passed, 10 skipped, 0 failed (5 min 19 s; Docker Desktop had auto-updated to engine 29.9.3 by then, so the docker-marked tests passed on both 29.5.3 and 29.9.3). `ruff format --check`, `ruff check` and `pyrefly check` clean.
 
-- Docker daemon not available: the `tests/docker` suite (31 skips in that area
-  including isolation, limits, stdin round trip, harness runs and latency), plus
-  stage C Docker, strategy swap and a few single tests.
-- `HARNESS_LIVE` unset: 3 live tests.
+Remaining skips, each with a reason:
+
+- `HARNESS_LIVE` unset: the live tests, including the live stage-C test.
 - Windows: 6 symlink tests (no privilege, WinError 1314) and 1 POSIX-socket-path
   test.
 
-The `tests/docker` tests have never passed, because they have never run.
+No test skips for lack of a Docker daemon any more.
 
 ## Known limits and residual risks
 
 These come from the architecture reviews (T024, T036, T048, T058) and the T059 and
 T060 notes.
 
-- **Never run in real Docker.** B0 schema extraction, `ContainerTool` calls, stage
-  C, `PyAssert`, `run_code`, CodeAct, `run_skill_script`, the skill candidate test
-  runner and the `/skill` read-only mount have only run against fakes or the
-  emulated sandbox. Windows bind-mount behaviour with Docker Desktop (file
-  sharing, junctions, case folding, read-only enforcement) is unverified. Known
-  divergence trap: Linux sorts case-sensitively; tools should sort by
-  `p.as_posix()`.
-- **Sandbox image must be rebuilt.** T059 added `executor/image/hb_entry.py` to
-  `IMAGE_FILES`, so the default tag `harness-builder-sandbox:<hash>` changed. The
-  image was not rebuilt in T060. Run `uv run harness doctor`, then the printed
-  `docker build` command, before expecting the docker-marked tests to pass.
+- **Real-Docker status (2026-11-22).** B0 schema extraction, `ContainerTool` calls,
+  stage C, `run_skill_script`, the skill candidate test runner and the read-only
+  mount now pass in a real container (see the top of this report). Windows bind
+  mounts on Docker Desktop, checked by hand: file sharing works; a read-only mount
+  rejects writes with EROFS; a host directory junction inside a mount appears in the
+  container as a dangling symlink and is not followed (no host escape); and the
+  mount is **case-insensitive** (`/tools/B.txt` resolves to a host `b.txt`), unlike
+  a Linux filesystem. Tools should sort by `p.as_posix()` and not depend on case.
+  A POSIX host (uid mapping, `fcntl` lock) is still unverified.
+- **Sandbox image tag.** The tag is a content hash of `IMAGE_FILES`, so any edit to
+  the Dockerfile or `hb_entry.py` changes it. Run `uv run harness doctor` and the
+  printed `docker build` command before the docker-marked tests.
 - **The safety screen is a heuristic.** `safety/screen.py` is a static AST check.
   Indirection through `getattr`/`setattr`, assigning a builtin to a variable (`e = exec; e(s)`, `bp = breakpoint`), `vars(builtins)['exec']`, `pydoc.locate`,
   data flow and other deserialisers stay out of reach. A finding in any `.py` file
   of the mounted harness tree (or an unparsable or unscreenable file such as
   `.pth`, `.pyc`, `.so`) flags every module tool, which then gets an `ask` rule.
-  That is advisory hardening. The container is the boundary, and the container has
-  never been run. See [generator.md](generator.md) for the screen categories.
+  That is advisory hardening. The container is the boundary. Checked in a real
+  container on 2026-11-22: payloads that screened clean or were flagged all ran under
+  the production flags with no network (connect fails) and EROFS on `/tools` and `/`.
+  The bypass `bp = breakpoint; bp()` still screens clean and is contained the same way. See [generator.md](generator.md) for the screen categories.
 - **Isolation is best effort.** A container on a shared kernel is not a hard
   boundary. See [isolation.md](isolation.md).
 - **Generator quality unknown.** No live model has written a harness. The repair
@@ -175,10 +188,10 @@ confirmed by the user, and none was measured.
 
 ## To close the gaps
 
-1. Start Docker Desktop, then `uv run harness doctor` and run the printed
-   `docker build` command.
-2. `uv run pytest tests/docker tests/generator/test_docker_stage_c.py`.
-3. With `OPENROUTER_API_KEY` and `HARNESS_MODEL` set, `HARNESS_LIVE=1 uv run pytest`
+1. Docker items are closed (2026-11-22). To refresh them: `uv run harness doctor`, the
+   printed `docker build` command, then
+   `uv run python scripts/run_eval_results.py --real-docker`.
+2. With `OPENROUTER_API_KEY` and `HARNESS_MODEL` set, `HARNESS_LIVE=1 uv run pytest`
    and `uv run harness eval <harness> --live`.
-4. For OQ-15, run `uv run harness eval <harness> --skills-compare --live` with a
+3. For OQ-15, run `uv run harness eval <harness> --skills-compare --live` with a
    real model and a library of real skills. Judge it only after multiple runs.

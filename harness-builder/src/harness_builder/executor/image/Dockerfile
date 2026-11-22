@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir --require-hashes --only-binary=:all: \
 RUN useradd --uid 10001 --user-group --no-create-home --home-dir /tmp \
         --shell /usr/sbin/nologin hb
 
+# COPY --chmod also applies to the auto-created parent dir, so create it 0755
+# first or uid 10001 cannot traverse /opt/hb.
+RUN install -d -m 0755 /opt/hb
 COPY --chmod=0644 hb_entry.py /opt/hb/hb_entry.py
 
 # hb-final is generated here (not copied) so a CRLF checkout cannot break it.

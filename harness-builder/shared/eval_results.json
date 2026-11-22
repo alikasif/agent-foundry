@@ -2,8 +2,40 @@
   "task": "T060",
   "platform": "Windows-11-10.0.26300-SP0",
   "docker": {
-    "available": false,
-    "detail": "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified."
+    "available": true,
+    "server_version": "29.5.3"
+  },
+  "real_docker_tests": {
+    "date": "2026-11-22",
+    "pytest_exit_code": 0,
+    "summary_line": "42 passed, 1 skipped, 2465 deselected, 1 warning in 124.29s (0:02:04)",
+    "by_module": {
+      "tests.docker": {
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0
+      },
+      "tests.generator": {
+        "passed": 4,
+        "failed": 0,
+        "skipped": 1
+      },
+      "tests.integration": {
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0
+      },
+      "tests.skills": {
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
+      "tests.unit": {
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0
+      }
+    }
   },
   "harness_live_env": null,
   "live_taskcases": {

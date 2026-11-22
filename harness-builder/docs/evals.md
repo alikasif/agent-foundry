@@ -8,8 +8,9 @@ uses the same runner.
 There are two kinds of case and five kinds of check.
 
 > **Not run live.** The examples were run offline, with a scripted fake model and
-> `--trust-tools`. No live LLM run and no real-Docker run has been made, so the
-> `py_assert` check and Docker-runtime tools were never run in a container; on a
+> `--trust-tools`. No live LLM run has been made. The docker-marked tests
+> (42 passed on 2026-11-22) ran real containers, but the example harnesses'
+> `py_assert` checks and Docker-runtime tools were not evaluated in one; on a
 > machine without Docker they report `incomplete`.
 
 - [Case files](#case-files)
@@ -267,8 +268,9 @@ cases use `harness_builder.spec.loader.load_eval_cases(spec, base_dir, source)`.
 
 - Only offline fake-model runs exist. The 20 percent step-reduction criterion
   (OQ-15) and any live success rate have not been measured.
-- `py_assert`, Docker-runtime ToolCases and `run_code` cases have never run in a
-  container.
+- `py_assert`, Docker-runtime ToolCases and `run_code` cases of the example
+  harnesses have not been evaluated in a container. The docker-marked tests cover
+  those code paths with their own fixtures (2026-11-22).
 - With `--trust-tools` in `harness validate`, a ToolCase aimed at a built-in tool
   is `incomplete` (the executor is faked). `harness eval --trust-tools` does not
   fake it; it uses the real Docker executor.

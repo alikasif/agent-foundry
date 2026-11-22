@@ -7,14 +7,12 @@ clean up. What the container does and does not protect you from is on
 [isolation.md](isolation.md); how the model uses it is on
 [strategies.md](strategies.md).
 
-> **Verification status.** The Docker code was written and unit-tested against a
-> scripted fake Docker CLI (`FakeDockerCli`). **It has not been run against a real
-> Docker daemon in this repository's development or CI runs yet.** The author's
-> Docker Desktop was stopped throughout; the only real-Docker behaviour observed is
-> `harness doctor` failing cleanly at the daemon check. Treat every statement about
-> what a live container does as the *intended* behaviour until you have run the
-> isolation tests in `tests/docker` yourself (see [Verify it
-> yourself](#verify-it-yourself)).
+> **Verification status.** The Docker code was unit-tested against a scripted fake
+> Docker CLI (`FakeDockerCli`) and, on 2026-11-22, run against a real Docker Desktop
+> daemon (engine 29.5.3, Windows 11): `pytest -m docker` gave 42 passed and 1 skipped
+> (the live test). That is one host. Other hosts and engines, and a POSIX uid
+> mapping, are unverified; run the isolation tests in `tests/docker` yourself (see
+> [Verify it yourself](#verify-it-yourself)).
 
 - [Prerequisite](#prerequisite)
 - [harness doctor](#harness-doctor)

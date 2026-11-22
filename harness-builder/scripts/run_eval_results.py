@@ -2,7 +2,10 @@
 
 Usage (from the harness-builder directory)::
 
-    uv run python scripts/run_eval_results.py [OUT_JSON]
+    uv run python scripts/run_eval_results.py [OUT_JSON] [--real-docker]
+
+``--real-docker`` additionally runs ``pytest -m docker`` against a running
+daemon (minutes) and records the per-module counts.
 
 Everything here is offline: the three generated fixture harnesses
 (``tests/generator/fixtures``) are written through the generator pipeline
@@ -20,7 +23,9 @@ import platform
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -273,7 +278,40 @@ def docker_state() -> dict[str, Any]:
     return {"available": False, "detail": (proc.stderr or proc.stdout).strip()[:300]}
 
 
-async def main(out_path: Path) -> None:
+def real_docker_tests() -> dict[str, Any]:
+    """Run ``pytest -m docker`` against the real daemon and summarise it.
+
+    Per-file counts come from a junit file. This measures the sandbox,
+    isolation, limits and the real-container paths of stage C, ContainerTool,
+    strategy swap and skills, not model quality.
+    """
+    with tempfile.TemporaryDirectory(prefix="hb-real-docker-") as tmp:
+        xml = Path(tmp) / "junit.xml"
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-m", "docker", "-q",
+             "-p", "no:cacheprovider", f"--junitxml={xml}"],
+            cwd=ROOT, capture_output=True, text=True, timeout=1800,
+        )  # fmt: skip
+        root = ET.parse(xml).getroot()
+    files: dict[str, dict[str, int]] = {}
+    for case in root.iter("testcase"):
+        name = (case.get("classname") or "").rsplit(".", 1)[0] or "unknown"
+        counts = files.setdefault(name, {"passed": 0, "failed": 0, "skipped": 0})
+        if case.find("skipped") is not None:
+            counts["skipped"] += 1
+        elif case.find("failure") is not None or case.find("error") is not None:
+            counts["failed"] += 1
+        else:
+            counts["passed"] += 1
+    return {
+        "date": date.today().isoformat(),
+        "pytest_exit_code": proc.returncode,
+        "summary_line": proc.stdout.strip().splitlines()[-1],
+        "by_module": dict(sorted(files.items())),
+    }
+
+
+async def main(out_path: Path, with_real_docker: bool) -> None:
     """Run everything and write ``out_path``."""
     with tempfile.TemporaryDirectory(prefix="hb-t060-") as tmp:
         work = Path(tmp)
@@ -284,6 +322,11 @@ async def main(out_path: Path) -> None:
         "task": "T060",
         "platform": platform.platform(),
         "docker": docker_state(),
+        "real_docker_tests": (
+            real_docker_tests()
+            if with_real_docker
+            else "not run (pass --real-docker with a running daemon)"
+        ),
         "harness_live_env": os.environ.get("HARNESS_LIVE"),
         "live_taskcases": {
             "run": False,
@@ -297,9 +340,6 @@ async def main(out_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    target = (
-        Path(sys.argv[1])
-        if len(sys.argv) > 1
-        else ROOT / "shared" / "eval_results.json"
-    )
-    anyio.run(main, target)
+    args = [a for a in sys.argv[1:] if a != "--real-docker"]
+    target = Path(args[0]) if args else ROOT / "shared" / "eval_results.json"
+    anyio.run(main, target, "--real-docker" in sys.argv)

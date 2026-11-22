@@ -8,8 +8,9 @@ approval.
 
 > **Not run live, not run in Docker.** Everything here was exercised offline: a
 > scripted fake model, `FakeExecutor` in place of the sandbox, and a scratch
-> library on disk. No live LLM run and no real-Docker run has been made. Skill
-> scripts and candidate tests have **never run in a real container**. On a
+> library on disk. No live LLM run has been made. The skills e2e and
+> extension tests ran a skill script in a real container on 2026-11-22 (docker-marked
+> tests); everything else here ran offline. On a
 > machine without Docker, `harness skills review` reports every candidate as
 > invalid (see [Docker needed to approve](#docker-needed-to-approve)).
 
