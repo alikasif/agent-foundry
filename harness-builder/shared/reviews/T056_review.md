@@ -318,7 +318,7 @@ parse at ad34dc0 or at HEAD b3c2d47 (`IndentationError`, `flagged_tool_names`). 
 the T046 MJ5 commit ad34dc0, not from T056. The b3c2d47 diff to `loader.py` only touches
 `builder_from_spec`/`_promotion_unset`. The run above used the working tree, which has an
 uncommitted fix of that function by the concurrent T046 work. **HEAD as committed is not green on any
-spec path.** The lead must make sure the T046 fix is committed.
+spec path.** Update: while this review was being written, the concurrent T046 work committed the fix as b67c3f9, and `loader.py` at HEAD parses again. The suite result above matches that tree for T056 code.
 
 ### Round-1 majors
 
@@ -467,7 +467,7 @@ T057.
 
 1. **MJ3-R2 (T049):** fix the stats read-modify-write across processes, as above, with a multi-process
    test. Correct the implementation note.
-2. **Lead (T046, not T056):** commit the `loader.py` fix. HEAD does not parse.
+2. **Lead (T046, not T056):** the `loader.py` parse break from ad34dc0 is fixed in b67c3f9. No action is left for T056.
 3. m14: fix with m7, or document.
 
 **Per-task:** T049 CHANGES_REQUESTED (MJ3-R2). T050 APPROVED. T051 APPROVED. T052 APPROVED.
