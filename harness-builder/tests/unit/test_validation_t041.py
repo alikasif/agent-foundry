@@ -515,3 +515,19 @@ async def test_lint_messages_use_paths_relative_to_the_harness(
     report = await pipeline(trust_tools=True).run(make_harness(tmp_path, source))
     problems = "\n".join(report.stage("A").problems)
     assert str(tmp_path) not in problems
+
+
+async def test_risky_unreferenced_helper_is_reported_and_flags_every_tool(
+    tmp_path: Path,
+) -> None:
+    """T046 MJ5: a sibling file the spec does not name is screened too."""
+    harness = make_harness(tmp_path, GOOD_TOOL)
+    (harness / "tools" / "helper.py").write_text("import socket\n", encoding="utf-8")
+    report = await pipeline(trust_tools=True).run(harness)
+    assert report.flagged_tools == ["add"]
+    finding = report.safety_findings[0]
+    assert (finding.module, finding.category, finding.tools) == (
+        "tools/helper.py",
+        "network",
+        ["add"],
+    )

@@ -66,6 +66,7 @@ from harness_builder.spec.loader import (
     load_eval_cases,
     load_spec,
     resolve_inside,
+    unreferenced_py_files,
 )
 from harness_builder.spec.models import (
     BuiltinToolRef,
@@ -378,6 +379,7 @@ class ValidationPipeline:
                     for p in signature_problems(tree, ref.function)
                 ]
         findings = _screen(files, trees, module_tools)
+        findings += _screen_unreferenced(spec, base_dir, module_tools)
         lint_problems, lint_missing = _lint(base_dir, [files[m] for m in trees])
         problems += lint_problems
         flagged = _flagged(spec, base_dir, source, findings)
@@ -705,6 +707,30 @@ def _screen(
                 detail=f.detail,
             )
             for f in report.findings
+        ]
+    return findings
+
+
+def _screen_unreferenced(
+    spec: HarnessSpec, base_dir: Path, module_tools: list[ModuleToolRef]
+) -> list[SafetyFinding]:
+    """Findings of files the spec does not name (T046 MJ5), blamed on all tools.
+
+    The loader cannot tell which tool loads which file, so every module tool
+    is listed; an unreadable or unparsable file gets a ``dynamic_exec`` finding
+    (fail closed, same as at run time).
+    """
+    tools = [t.function for t in module_tools]
+    findings: list[SafetyFinding] = []
+    for path in unreferenced_py_files(spec, base_dir):
+        module = path.relative_to(base_dir.resolve()).as_posix()
+        try:
+            found = [(f.category, f.line, f.detail) for f in screen(path).findings]
+        except (SyntaxError, OSError, UnicodeDecodeError, ValueError) as exc:
+            found = [("dynamic_exec", 1, f"cannot be screened ({exc})")]
+        findings += [
+            SafetyFinding(module=module, tools=tools, category=c, line=line, detail=d)
+            for c, line, d in found
         ]
     return findings
 

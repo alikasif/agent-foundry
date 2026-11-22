@@ -188,6 +188,81 @@ def test_unparsable_module_flags_every_tool_of_it(tmp_path: Path) -> None:
     ]
 
 
+ALL_TOOLS = ["convert_length", "convert_temperature"]
+RISKY_HELPER = "import socket  # noqa: F401\nimport subprocess  # noqa: F401\n"
+SYS_PATH_LOADER = (
+    "import sys\nfrom pathlib import Path\n\n"
+    "sys.path.insert(0, str(Path(__file__).parent))\n"
+    "import helper  # noqa: E402, F401\n"
+)
+SPEC_LOADER = (
+    "import importlib.util\nfrom pathlib import Path\n\n"
+    "_spec = importlib.util.spec_from_file_location(\n"
+    '    "helper", Path(__file__).parent / "helper.py"\n'
+    ")\n"
+    "_mod = importlib.util.module_from_spec(_spec)\n"
+    "_spec.loader.exec_module(_mod)\n"
+)
+
+
+def flagged_after(root: Path) -> list[str]:
+    """``flagged_tool_names`` of the harness at ``root``."""
+    spec, base_dir, source = load_spec(root)
+    return flagged_tool_names(spec, base_dir, source)
+
+
+def with_loader(tmp_path: Path, loader: str, helper: str) -> Path:
+    """Host-runtime unit_conversion whose module loads an unnamed helper."""
+    files = host_files("clean")
+    files["tools/units.py"] = loader + files["tools/units.py"]
+    files["tools/helper.py"] = helper
+    return write_harness(tmp_path / "split", files)
+
+
+@pytest.mark.parametrize("loader", [SYS_PATH_LOADER, SPEC_LOADER])
+def test_risky_helper_loaded_by_a_clean_module_flags_every_tool(
+    tmp_path: Path, loader: str
+) -> None:
+    """T046 MJ5: the helper is not in the spec but is still screened."""
+    assert flagged_after(with_loader(tmp_path, loader, RISKY_HELPER)) == ALL_TOOLS
+
+
+def test_risky_helper_flags_even_without_a_loader(tmp_path: Path) -> None:
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    (root / "helper.py").write_text(RISKY_HELPER, encoding="utf-8")
+    assert flagged_after(root) == ALL_TOOLS
+
+
+def test_unparsable_helper_fails_closed(tmp_path: Path) -> None:
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    (root / "tools" / "helper.py").write_text("def broken(:\n", encoding="utf-8")
+    assert flagged_after(root) == ALL_TOOLS
+
+
+def test_clean_helper_flags_nothing(tmp_path: Path) -> None:
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    (root / "tools" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert flagged_after(root) == []
+
+
+def test_non_python_and_out_of_scope_files_are_ignored(tmp_path: Path) -> None:
+    root = write_harness(tmp_path / "h", host_files("clean"))
+    (root / "tools" / "notes.txt").write_text("import socket\n", encoding="utf-8")
+    for rel in ("tests/test_x.py", "reports/r.py", "skills/s/run.py"):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(RISKY_HELPER, encoding="utf-8")
+    assert flagged_after(root) == []
+
+
+def test_loader_flags_the_helper_through_the_run_time_rules(
+    tmp_path: Path,
+) -> None:
+    root = with_loader(tmp_path, SYS_PATH_LOADER, RISKY_HELPER)
+    ids, _ = build_config(root)
+    assert ids == [f"safety:{name}" for name in ALL_TOOLS]
+
+
 def host_files(kind: str) -> FileSet:
     """Fixture files with host-runtime tools; ``risky`` imports ``socket``."""
     files = fixture_files("unit_conversion")

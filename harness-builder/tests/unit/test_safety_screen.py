@@ -99,6 +99,25 @@ def read(path: Path) -> dict:
             "from importlib import import_module\nimport_module('json')\n",
             "dynamic_exec",
         ),
+        (
+            "import importlib.util\n"
+            "s = importlib.util.spec_from_file_location('h', 'h.py')\n",
+            "dynamic_exec",
+        ),
+        (
+            "from importlib.util import module_from_spec\nmodule_from_spec(s)\n",
+            "dynamic_exec",
+        ),
+        ("m = load()\ns.loader.exec_module(m)\n", "dynamic_exec"),
+        (
+            "from importlib.machinery import SourceFileLoader\n"
+            "SourceFileLoader('h', 'h.py').load_module()\n",
+            "dynamic_exec",
+        ),
+        ("compile('x = 1', 'f', 'exec')\n", "dynamic_exec"),
+        ("import types\ntypes.FunctionType(code, {})\n", "dynamic_exec"),
+        ("import pickle\npickle.loads(b'')\n", "dynamic_exec"),
+        ("import marshal\nmarshal.loads(b'')\n", "dynamic_exec"),
     ],
 )
 def test_each_category_is_detected(source: str, category: str) -> None:

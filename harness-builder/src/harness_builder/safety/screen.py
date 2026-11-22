@@ -14,16 +14,23 @@ constructs in five categories:
 - ``delete``: ``os.remove``, ``os.unlink``, ``os.rmdir``, ``os.removedirs``,
   ``shutil.rmtree`` and any ``.unlink()`` / ``.rmdir()`` method call;
 - ``dynamic_exec``: ``eval``, ``exec``, ``__import__``,
-  ``importlib.import_module``, ``runpy.run_path`` / ``run_module``, and
-  ``ctypes`` imports (native code is arbitrary execution);
+  ``compile``, ``types.FunctionType``, ``pickle`` / ``marshal`` loads,
+  ``importlib.import_module``, the ``importlib.util`` / ``importlib.machinery``
+  loaders (``spec_from_file_location``, ``module_from_spec``,
+  ``SourceFileLoader``) and any ``.exec_module()`` / ``.load_module()`` call,
+  ``runpy.run_path`` / ``run_module``, and ``ctypes`` imports (native code is
+  arbitrary execution);
 - ``secret``: key-like string literals, string literals assigned to
   secret-looking names, and high-entropy string literals.
 
 The screen is a heuristic. It cannot see through ``getattr`` tricks or data
 flow, and it flags every delete because "outside the workdir" is not
 decidable statically. Known limits: ``getattr(os, "system")`` style
-indirection, and overwriting moves (``shutil.move``, ``os.replace``,
-``os.rename``) are not reported. Pure stdlib leaf module.
+indirection (including ``getattr(builtins, "ex" + "ec")``), other
+deserialisers (``shelve``, ``dill``) and overwriting moves (``shutil.move``,
+``os.replace``, ``os.rename``) are not reported. Each file is screened alone,
+so cross-file loading is caught by the caller screening sibling files too
+(``spec.loader.unreferenced_py_files``). Pure stdlib leaf module.
 """
 
 import ast
@@ -87,8 +94,21 @@ DYNAMIC_EXEC_CALLS = frozenset(
         "importlib.import_module",
         "runpy.run_path",
         "runpy.run_module",
+        "importlib.util.spec_from_file_location",
+        "importlib.util.spec_from_loader",
+        "importlib.util.module_from_spec",
+        "importlib.machinery.SourceFileLoader",
+        "importlib.machinery.SourcelessFileLoader",
+        "compile",
+        "builtins.compile",
+        "types.FunctionType",
+        "pickle.load",
+        "pickle.loads",
+        "marshal.load",
+        "marshal.loads",
     }
 )
+DYNAMIC_EXEC_METHODS = frozenset({"exec_module", "load_module"})
 
 KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
@@ -191,6 +211,9 @@ class _Screener(ast.NodeVisitor):
         if isinstance(node.func, ast.Attribute) and node.func.attr in DELETE_METHODS:
             if name not in DELETE_CALLS:
                 self._add("delete", node, f"call .{node.func.attr}()")
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in DYNAMIC_EXEC_METHODS:
+                self._add("dynamic_exec", node, f"call .{node.func.attr}()")
         for keyword in node.keywords:
             if keyword.arg is not None:
                 self._check_named_secret(keyword.arg, keyword.value)
