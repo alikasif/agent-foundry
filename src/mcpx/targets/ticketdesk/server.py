@@ -6,6 +6,7 @@ benchmark measures when it loads tool definitions into a model's context.
 """
 
 from collections import Counter
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from typing import Any
 
@@ -45,12 +46,14 @@ def _brief(t: Ticket) -> Row:
     return row
 
 
-def _page(items: list[Row], page: int, per_page: int) -> Page:
-    """Slice already-ordered rows into one page of at most 100 items."""
+def _page[T](
+    items: Sequence[T], page: int, per_page: int, to_row: Callable[[T], Row]
+) -> Page:
+    """Slice ordered items into one page of at most 100, converting only that page."""
     size = max(1, min(per_page, MAX_PER_PAGE))
     start = (max(page, 1) - 1) * size
     return {
-        "items": items[start : start + size],
+        "items": [to_row(x) for x in items[start : start + size]],
         "page": max(page, 1),
         "total": len(items),
     }
@@ -150,7 +153,7 @@ def list_tickets(
     rows = _tickets_where(status=status, label=label, project_id=project_id)
     if sort == "closed_at_desc":
         rows = sorted(rows, key=lambda t: t.closed_at or "", reverse=True)
-    return _page([_ticket(t) for t in rows], page, per_page)
+    return _page(rows, page, per_page, _ticket)
 
 
 @tool
@@ -185,8 +188,7 @@ def list_comments(ticket_id: int, page: int = 1, per_page: int = 100) -> Page:
     and body. Raises a tool error when the ticket id does not exist.
     """
     _ticket_or_raise(ticket_id)
-    rows = [asdict(c) for c in get_dataset().comments_for(ticket_id)]
-    return _page(rows, page, per_page)
+    return _page(get_dataset().comments_for(ticket_id), page, per_page, asdict)
 
 
 @tool
@@ -234,7 +236,7 @@ def list_activity(page: int = 1, per_page: int = 100) -> Page:
     ``{"items", "page", "total"}`` where each item has id, kind, project_id,
     ticket_id (null for deploys) and at.
     """
-    return _page([asdict(e) for e in _events()], page, per_page)
+    return _page(_events(), page, per_page, asdict)
 
 
 @tool
@@ -247,7 +249,7 @@ def list_deploys(
     ticket_id is null. Returns ``{"items", "page", "total"}`` with event rows
     carrying id, kind, project_id, ticket_id and at.
     """
-    return _page([asdict(e) for e in _events("deploy", project_id)], page, per_page)
+    return _page(_events("deploy", project_id), page, per_page, asdict)
 
 
 @tool
@@ -314,7 +316,7 @@ def list_project_tickets(
     """
     _project_or_raise(project_id)
     rows = _tickets_where(project_id=project_id, status=status)
-    return _page([_brief(t) for t in rows], page, per_page)
+    return _page(rows, page, per_page, _brief)
 
 
 @tool
@@ -363,8 +365,8 @@ def list_user_comments(user_id: int, page: int = 1, per_page: int = 100) -> Page
     user id does not exist.
     """
     _user_or_raise(user_id)
-    rows = [asdict(c) for c in get_dataset().comments if c.author_id == user_id]
-    return _page(rows, page, per_page)
+    rows = [c for c in get_dataset().comments if c.author_id == user_id]
+    return _page(rows, page, per_page, asdict)
 
 
 @tool
@@ -376,8 +378,8 @@ def list_user_reviews(user_id: int, page: int = 1, per_page: int = 100) -> Page:
     compact ticket rows. Raises a tool error when the user id does not exist.
     """
     _user_or_raise(user_id)
-    rows = [_brief(t) for t in _tickets_where() if user_id in t.reviewers]
-    return _page(rows, page, per_page)
+    rows = [t for t in _tickets_where() if user_id in t.reviewers]
+    return _page(rows, page, per_page, _brief)
 
 
 @tool
@@ -445,7 +447,7 @@ def search_tickets(query: str, page: int = 1, per_page: int = 100) -> Page:
     """
     q = query.lower()
     hits = [t for t in _tickets_where() if q in t.title.lower() or q in t.body.lower()]
-    return _page([_brief(t) for t in hits], page, per_page)
+    return _page(hits, page, per_page, _brief)
 
 
 @tool
@@ -457,8 +459,8 @@ def search_comments(query: str, page: int = 1, per_page: int = 100) -> Page:
     body).
     """
     q = query.lower()
-    rows = [asdict(c) for c in get_dataset().comments if q in c.body.lower()]
-    return _page(rows, page, per_page)
+    rows = [c for c in get_dataset().comments if q in c.body.lower()]
+    return _page(rows, page, per_page, asdict)
 
 
 @tool

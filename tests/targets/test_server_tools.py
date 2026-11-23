@@ -47,11 +47,51 @@ async def test_count_tickets() -> None:
     assert await call("count_tickets") == len(get_dataset().tickets)
 
 
+async def _all_ids(**filters: Any) -> tuple[list[int], int]:
+    """Page through list_tickets and return every id in order plus the total."""
+    ids: list[int] = []
+    page = 1
+    while True:
+        r = await call("list_tickets", page=page, per_page=100, **filters)
+        ids += [t["id"] for t in r["items"]]
+        if len(ids) >= r["total"] or not r["items"]:
+            return ids, r["total"]
+        page += 1
+
+
 async def test_list_tickets_filters_and_paginates() -> None:
+    ds = get_dataset()
+    expected = [
+        t.id
+        for t in sorted(ds.tickets, key=lambda t: t.id, reverse=True)
+        if t.status == "open" and "bug" in t.labels
+    ]
+    assert len(expected) > 100
     r = await call("list_tickets", status="open", label="bug", per_page=100)
     assert all("bug" in t["labels"] and t["status"] == "open" for t in r["items"])
-    assert len(r["items"]) <= 100 and r["total"] >= len(r["items"])
-    assert r["page"] == 1
+    assert r["total"] == len(expected)
+    assert [t["id"] for t in r["items"]] == expected[:100]
+    ids, total = await _all_ids(status="open", label="bug")
+    assert ids == expected and total == len(expected)
+
+
+async def test_list_tickets_status_and_project_combined() -> None:
+    expected = [
+        t.id
+        for t in sorted(get_dataset().tickets, key=lambda t: t.id, reverse=True)
+        if t.status == "closed" and t.project_id == 2
+    ]
+    assert expected
+    r = await call("list_tickets", status="closed", project_id=2, per_page=100)
+    assert r["total"] == len(expected)
+    assert [t["id"] for t in r["items"]] == expected[:100]
+    assert all(t["status"] == "closed" and t["project_id"] == 2 for t in r["items"])
+
+
+async def test_list_tickets_page_beyond_end_is_empty() -> None:
+    r = await call("list_tickets", status="open", page=9999, per_page=100)
+    open_count = sum(t.status == "open" for t in get_dataset().tickets)
+    assert r["items"] == [] and r["total"] == open_count and r["page"] == 9999
 
 
 async def test_list_tickets_items_are_full_dicts() -> None:
@@ -79,8 +119,23 @@ async def test_list_tickets_project_filter() -> None:
 
 
 async def test_list_tickets_closed_at_desc() -> None:
+    closed = [t for t in get_dataset().tickets if t.status == "closed"]
+    expected = [
+        t.id for t in sorted(closed, key=lambda t: str(t.closed_at), reverse=True)
+    ]
     r = await call("list_tickets", status="closed", sort="closed_at_desc", per_page=50)
+    assert r["items"] and r["total"] == len(expected)
+    assert [t["id"] for t in r["items"]] == expected[:50]
     stamps = [t["closed_at"] for t in r["items"]]
+    assert stamps == sorted(stamps, reverse=True)
+
+
+async def test_list_tickets_closed_at_desc_mixed_puts_open_last() -> None:
+    r = await call("list_tickets", sort="closed_at_desc", per_page=100)
+    assert r["total"] == 3000
+    flags = [t["closed_at"] is not None for t in r["items"]]
+    assert flags == sorted(flags, reverse=True) and flags[0] and True in flags
+    stamps = [t["closed_at"] for t in r["items"] if t["closed_at"]]
     assert stamps == sorted(stamps, reverse=True)
 
 
@@ -122,6 +177,8 @@ async def test_list_activity_newest_first() -> None:
     r = await call("list_activity", per_page=20)
     ids = [e["id"] for e in r["items"]]
     assert ids == sorted(ids, reverse=True) and ids[0] == r["total"]
+    stamps = [e["at"] for e in r["items"]]
+    assert stamps == sorted(stamps, reverse=True)
     assert {"id", "kind", "project_id", "ticket_id", "at"} <= set(r["items"][0])
 
 
