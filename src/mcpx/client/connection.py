@@ -59,6 +59,17 @@ def _is_wrapped(output_schema: dict[str, Any] | None) -> bool:
     )
 
 
+def _unwrap(name: str, structured: Any, wrapped: bool) -> Any:
+    """Strip the SDK's ``{"result": ...}`` envelope from a wrapped tool's output."""
+    if not wrapped:
+        return structured
+    if not isinstance(structured, dict) or "result" not in structured:
+        raise ValueError(
+            f"tool {name!r} advertises a wrapped result but returned {structured!r}"
+        )
+    return structured["result"]
+
+
 def _text(result: types.CallToolResult) -> str:
     """Join the text blocks of a result."""
     return "\n".join(
@@ -77,6 +88,8 @@ class Connection:
 
     async def __aenter__(self) -> Self:
         """Launch the server subprocess and complete the MCP handshake."""
+        if self._stack is not None:
+            raise RuntimeError("Connection is already open")
         async with AsyncExitStack() as stack:
             read, write = await stack.enter_async_context(
                 stdio_client(server_parameters(self._target))
@@ -141,9 +154,7 @@ class Connection:
             raise ToolError(_text(result) or f"tool {name!r} failed")
         structured = result.structured_content
         if structured is not None:
-            if self._wrapped and name in self._wrapped and isinstance(structured, dict):
-                return structured["result"]
-            return structured
+            return _unwrap(name, structured, name in (self._wrapped or ()))
         text = _text(result)
         try:
             return json.loads(text)
