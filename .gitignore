@@ -1,1 +1,6 @@
 .superpowers/
+.env
+.venv/
+__pycache__/
+runs/
+/*.json
