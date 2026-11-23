@@ -1266,6 +1266,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "anyio" },
     { name = "pyrefly" },
     { name = "pytest" },
     { name = "ruff" },
@@ -1283,6 +1284,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anyio" },
     { name = "pyrefly" },
     { name = "pytest" },
     { name = "ruff" },

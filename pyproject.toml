@@ -18,6 +18,7 @@ mcpx = "mcpx.cli:main"
 [dependency-groups]
 dev = [
     "pytest",
+    "anyio",
     "ruff",
     "pyrefly",
     "types-psutil",
@@ -39,6 +40,8 @@ markers = [
 
 [tool.ruff]
 line-length = 88
+# Ruff formats Python code blocks inside Markdown; keep it off the plan and spec.
+extend-exclude = ["docs"]
 
 [tool.pyrefly]
 project-includes = [
