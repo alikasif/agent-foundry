@@ -95,6 +95,7 @@ def test_stack_imports():
     import google.adk, litellm, mcp, psutil
     from google.adk.models.lite_llm import LiteLlm
     from google.adk.tools.mcp_tool import McpToolset, StdioConnectionParams
+
     llm = LiteLlm(model="openrouter/anthropic/claude-sonnet-4.5")
     assert "openrouter" in llm.model
 ```
@@ -120,10 +121,14 @@ def test_stack_imports():
 ```python
 def test_dataset_is_deterministic():
     assert build_dataset(7) == build_dataset(7)
+
+
 def test_dataset_scale():
     d = get_dataset()
     assert len(d.tickets) == 3000 and len(d.users) == 40 and len(d.projects) == 8
     assert any(p.key == "ATLAS" for p in d.projects)
+
+
 def test_closed_tickets_have_reviewers_and_closed_at():
     d = get_dataset()
     closed = [t for t in d.tickets if t.status == "closed"]
@@ -156,14 +161,21 @@ def test_closed_tickets_have_reviewers_and_closed_at():
 ```python
 async def test_at_least_30_tools():
     assert len(await server.mcp.list_tools()) >= 30
+
+
 async def test_list_tickets_filters_and_paginates():
     r = await call("list_tickets", status="open", label="bug", per_page=100)
     assert all("bug" in t["labels"] and t["status"] == "open" for t in r["items"])
     assert len(r["items"]) <= 100 and r["total"] >= len(r["items"])
+
+
 async def test_latest_release_case_insensitive():
     assert (await call("get_latest_release", project="atlas"))["tag"].startswith("v")
+
+
 async def test_unknown_ticket_is_an_error():
-    with pytest.raises(Exception): await call("get_ticket", ticket_id=999999)
+    with pytest.raises(Exception):
+        await call("get_ticket", ticket_id=999999)
 ```
 
 - [ ] **Step 2: Run, expect FAIL.**
@@ -190,13 +202,18 @@ async def test_unknown_ticket_is_an_error():
 async def test_list_tools_over_stdio():
     async with Connection(get_target("ticketdesk")) as c:
         assert len(await c.list_tools()) >= 30
+
+
 async def test_call_tool_returns_parsed_json():
     async with Connection(get_target("ticketdesk")) as c:
         r = await c.call_tool("get_latest_release", {"project": "atlas"})
         assert r["tag"].startswith("v")
+
+
 async def test_tool_error_raises():
     async with Connection(get_target("ticketdesk")) as c:
-        with pytest.raises(ToolError): await c.call_tool("get_ticket", {"ticket_id": 999999})
+        with pytest.raises(ToolError):
+            await c.call_tool("get_ticket", {"ticket_id": 999999})
 ```
 
 - [ ] **Step 2: Run, expect FAIL.**
@@ -221,22 +238,49 @@ async def test_tool_error_raises():
 
 ```python
 def test_generates_importable_wrappers(tmp_path):
-    spec = ToolSpec("list_items", "List items.", {"type":"object","properties":{"page":{"type":"integer"},"q":{"type":"string"}},"required":["q"]})
+    spec = ToolSpec(
+        "list_items",
+        "List items.",
+        {
+            "type": "object",
+            "properties": {"page": {"type": "integer"}, "q": {"type": "string"}},
+            "required": ["q"],
+        },
+    )
     generate_workspace("demo", [spec], tmp_path)
-    sys.path.insert(0, str(tmp_path)); mod = importlib.import_module("servers.demo")
+    sys.path.insert(0, str(tmp_path))
+    mod = importlib.import_module("servers.demo")
     sig = inspect.signature(mod.list_items)
-    assert list(sig.parameters) == ["q", "page"] and sig.parameters["page"].default is None
+    assert (
+        list(sig.parameters) == ["q", "page"] and sig.parameters["page"].default is None
+    )
     assert "List items." in mod.list_items.__doc__
+
+
 def test_names_are_sanitized(tmp_path):
-    generate_workspace("demo", [ToolSpec("get-user", "x", {"type":"object","properties":{}}), ToolSpec("import", "x", {"type":"object","properties":{}})], tmp_path)
-    mod = importlib.import_module("servers.demo")   # after sys.path setup
+    generate_workspace(
+        "demo",
+        [
+            ToolSpec("get-user", "x", {"type": "object", "properties": {}}),
+            ToolSpec("import", "x", {"type": "object", "properties": {}}),
+        ],
+        tmp_path,
+    )
+    mod = importlib.import_module("servers.demo")  # after sys.path setup
     assert hasattr(mod, "get_user") and hasattr(mod, "import_")
+
+
 def test_wrapper_passes_original_name_and_only_given_args(monkeypatch, tmp_path):
     # patch _mcpx_rpc.call, call wrapper with q only
     assert recorded == ("demo", "list_items", {"q": "x"})
+
+
 def test_workspace_has_one_file_per_tool(tmp_path):
     generate_workspace("demo", [spec_a, spec_b], tmp_path)
-    assert {p.name for p in (tmp_path/"servers"/"demo").glob("*.py")} >= {"list_items.py", "__init__.py"}
+    assert {p.name for p in (tmp_path / "servers" / "demo").glob("*.py")} >= {
+        "list_items.py",
+        "__init__.py",
+    }
 ```
 
 - [ ] **Step 2: Run, expect FAIL.**
@@ -415,7 +459,11 @@ async def test_run_once_records_error_instead_of_raising():                # Rev
 @pytest.mark.parametrize("arm", ["direct", "code"])
 async def test_task_a_is_answered_correctly(arm):
     rec = await run_once(arm, "ticketdesk", TASKS_BY_ID["A"], LIVE_MODEL, 0)
-    assert rec.error is None and rec.correct and rec.calls and rec.calls[0].prompt_tokens
+    assert (
+        rec.error is None and rec.correct and rec.calls and rec.calls[0].prompt_tokens
+    )
+
+
 async def test_code_arm_uses_far_fewer_prompt_tokens_on_task_a():
     assert code_total_prompt < direct_total_prompt
 ```
