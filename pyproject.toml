@@ -44,6 +44,8 @@ line-length = 88
 extend-exclude = ["docs"]
 
 [tool.pyrefly]
+# Mirror pytest's pythonpath so tests can import shared helpers as ``tests.*``.
+search-path = ["src", "."]
 project-includes = [
     "**/*.py*",
     "**/*.ipynb",
