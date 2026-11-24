@@ -7,6 +7,7 @@ random draws here changes those answers.
 """
 
 import random
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import cache
@@ -221,6 +222,27 @@ def _force_top_reviewer_counts(
     chosen = rng.sample(closed[:RECENT_WINDOW], len(TOP_REVIEWER_COUNTS))
     for ticket, count in zip(chosen, TOP_REVIEWER_COUNTS):
         ticket.reviewers = sorted(rng.sample(user_ids, count))
+    _separate_top_reviewers(closed[:RECENT_WINDOW])
+
+
+def _separate_top_reviewers(recent: list[Ticket]) -> None:
+    """Make the third and fourth most frequent reviewers differ in count.
+
+    Swaps the fourth-ranked user for the third-ranked one on a recent ticket,
+    which keeps every ticket's reviewer count (and so the ticket ranking) and
+    draws nothing from the RNG, so the rest of the dataset is unchanged.
+    """
+    for _ in range(len(recent) * len(TOP_REVIEWER_COUNTS)):
+        counts = Counter(u for t in recent for u in t.reviewers)
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        if ranked[2][1] > ranked[3][1]:
+            return
+        keep, drop = ranked[2][0], ranked[3][0]
+        ticket = next(
+            t for t in recent if drop in t.reviewers and keep not in t.reviewers
+        )
+        ticket.reviewers = sorted([*(u for u in ticket.reviewers if u != drop), keep])
+    raise RuntimeError("could not separate the third and fourth reviewer counts")
 
 
 def _make_comments(
