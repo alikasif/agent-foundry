@@ -1,0 +1,40 @@
+"""The code arm: one ``run_python`` tool over a generated workspace of wrappers."""
+
+from google.adk.agents import LlmAgent
+
+from mcpx.agents.direct import AGENT_NAME
+from mcpx.agents.instructions import code_instruction
+from mcpx.bench.usage import UsageRecorder
+from mcpx.llm.models import ModelConfig
+from mcpx.sandbox.runtime import Runtime
+
+
+def build_code_agent(
+    runtime: Runtime, target_name: str, model: ModelConfig, recorder: UsageRecorder
+) -> LlmAgent:
+    """Build an agent whose only tool runs Python in ``runtime``'s workspace.
+
+    The workspace must already hold ``servers/<target_name>/`` and the runtime's
+    Bridge must be running; the caller owns both.
+    """
+
+    async def run_python(code: str) -> str:
+        """Run a Python script in the working directory and return its output.
+
+        Args:
+            code: The complete script. Each call starts a fresh interpreter.
+
+        Returns:
+            What the script printed: stdout, then stderr, then a note if the
+            output was truncated or the script timed out.
+        """
+        return (await runtime.run(code)).render()
+
+    # LlmAgent is concrete; pyrefly misreads its pydantic/ABC base as abstract.
+    return LlmAgent(  # pyrefly: ignore[direct-abstract-base-instantiation]
+        name=AGENT_NAME,
+        model=model.to_llm(),
+        instruction=code_instruction(target_name),
+        tools=[run_python],
+        after_model_callback=recorder.after_model_callback,
+    )

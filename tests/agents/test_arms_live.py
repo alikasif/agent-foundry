@@ -1,0 +1,48 @@
+"""Live smoke tests: both arms answer task A through the real model.
+
+Skipped unless ``OPENROUTER_API_KEY`` is set. ``MCPX_LIVE_MODEL`` overrides the
+model id.
+"""
+
+import os
+
+import anyio
+import pytest
+
+from mcpx.agents.run import Arm, run_once
+from mcpx.bench.usage import RunRecord
+from mcpx.llm.models import ModelConfig
+from mcpx.targets import get_tasks
+
+pytestmark = [pytest.mark.anyio, pytest.mark.live]
+
+TASKS_BY_ID = {task.id: task for task in get_tasks("ticketdesk")}
+LIVE_MODEL = ModelConfig(
+    os.environ.get("MCPX_LIVE_MODEL", "deepseek/deepseek-v4.1-flash"),
+    timeout_s=120.0,
+)
+# Hard ceiling for one live run, above run_once's own 600 s default.
+LIVE_RUN_LIMIT_S = 660
+
+
+async def _run_task_a(arm: Arm) -> RunRecord:
+    with anyio.fail_after(LIVE_RUN_LIMIT_S):
+        return await run_once(arm, "ticketdesk", TASKS_BY_ID["A"], LIVE_MODEL, 0)
+
+
+@pytest.mark.parametrize("arm", ["direct", "code"])
+async def test_task_a_is_answered_correctly(arm: Arm) -> None:
+    rec = await _run_task_a(arm)
+    assert rec.error is None, rec
+    assert rec.correct, rec
+    assert rec.calls, rec
+    assert rec.calls[0].prompt_tokens, rec
+
+
+async def test_code_arm_uses_fewer_prompt_tokens_on_task_a() -> None:
+    direct = await _run_task_a("direct")
+    code = await _run_task_a("code")
+    direct_total = sum(c.prompt_tokens or 0 for c in direct.calls)
+    code_total = sum(c.prompt_tokens or 0 for c in code.calls)
+    assert direct_total > 0 and code_total > 0, (direct, code)
+    assert code_total < direct_total, (code_total, direct_total)
