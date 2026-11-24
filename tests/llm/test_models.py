@@ -1,5 +1,6 @@
 """Tests for the model configuration, including one live call."""
 
+import anyio
 import pytest
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
@@ -26,6 +27,12 @@ async def test_modelconfig_without_provider_order_sets_no_routing() -> None:
     assert "extra_body" not in llm._additional_args
 
 
+async def test_modelconfig_forwards_timeout_only_when_set() -> None:
+    assert "timeout" not in ModelConfig(MODEL_ID).to_llm()._additional_args
+    llm = ModelConfig(MODEL_ID, timeout_s=45.0).to_llm()
+    assert llm._additional_args["timeout"] == 45.0
+
+
 async def test_modelconfig_pins_provider_without_fallbacks() -> None:
     llm = ModelConfig(MODEL_ID, provider_order=("DeepInfra", "Novita")).to_llm()
     assert llm._additional_args["extra_body"] == {
@@ -35,15 +42,18 @@ async def test_modelconfig_pins_provider_without_fallbacks() -> None:
 
 @pytest.mark.live
 async def test_live_usage_is_reported(capsys: pytest.CaptureFixture[str]) -> None:
-    llm = ModelConfig(MODEL_ID).to_llm()
+    llm = ModelConfig(MODEL_ID, timeout_s=50.0).to_llm()
     request = LlmRequest(
         model=llm.model,
         contents=[types.Content(role="user", parts=[types.Part(text="Say hi.")])],
-        config=types.GenerateContentConfig(max_output_tokens=64),
+        # The model reasons by default at high effort; a small cap could be spent
+        # entirely on reasoning and leave an empty reply (finish_reason=length).
+        config=types.GenerateContentConfig(max_output_tokens=1024),
     )
     final = None
-    async for response in llm.generate_content_async(request, stream=False):
-        final = response
+    with anyio.fail_after(60):
+        async for response in llm.generate_content_async(request, stream=False):
+            final = response
     assert final is not None
     usage = final.usage_metadata
     assert usage is not None

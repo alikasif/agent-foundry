@@ -15,15 +15,20 @@ class ModelConfig:
         provider_order: OpenRouter providers to try, in order. When non-empty the
             request pins routing to them and disables fallbacks, so a run cannot
             silently move to another provider.
+        timeout_s: Per-request timeout in seconds forwarded to LiteLLM. ``None``
+            keeps LiteLLM's default.
     """
 
     model_id: str
     temperature: float = 0.0
     provider_order: tuple[str, ...] = ()
+    timeout_s: float | None = None
 
     def to_llm(self) -> LiteLlm:
         """Build the ADK ``LiteLlm`` for this configuration."""
         kwargs: dict[str, object] = {"temperature": self.temperature}
+        if self.timeout_s is not None:
+            kwargs["timeout"] = self.timeout_s
         if self.provider_order:
             # LiteLLM merges ``extra_body`` into the OpenRouter request body, so
             # ``provider`` reaches OpenRouter as its provider-routing preferences.
