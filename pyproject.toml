@@ -5,6 +5,7 @@ description = "Benchmark harness comparing MCP tool-calling with code execution"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "anyio",
     "google-adk",
     "litellm",
     "mcp",

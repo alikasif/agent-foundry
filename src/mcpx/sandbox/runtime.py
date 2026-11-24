@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import anyio
 import psutil
 
 # Variables the child inherits from the parent, if set. Everything else, notably
@@ -41,6 +42,9 @@ _READ_CHUNK = 64 * 1024
 # detached grandchild can keep them open; we stop waiting rather than hang.
 _DRAIN_GRACE_S = 2.0
 _KILL_WAIT_S = 5.0
+_POLL_S = 0.02
+# Name prefix of the tasks that read the child's pipes (lets tests check cleanup).
+DRAIN_TASK = "mcpx-runtime-drain"
 
 
 @dataclass
@@ -125,6 +129,18 @@ def child_environment(
     return env
 
 
+async def _exited(proc: asyncio.subprocess.Process) -> int:
+    """Wait until the child has exited and been reaped; return its exit code.
+
+    Not ``proc.wait()``: asyncio's ``wait()`` also waits for every pipe to close,
+    so a descendant that escaped the kill (an orphan still holding stdout) would
+    block it. ``returncode`` is set as soon as the exit itself is processed.
+    """
+    while (code := proc.returncode) is None:
+        await asyncio.sleep(_POLL_S)
+    return code
+
+
 def kill_tree(pid: int) -> None:
     """Kill a process and every descendant, then wait for them to go away."""
     try:
@@ -160,6 +176,12 @@ class Runtime:
         self.bridge_addr = bridge_addr
         self.timeout_s = timeout_s
         self.max_output_chars = max_output_chars
+        self._unreaped: set[asyncio.subprocess.Process] = set()
+
+    @property
+    def unreaped(self) -> int:
+        """How many child processes this runtime started but has not yet reaped."""
+        return len(self._unreaped)
 
     async def run(self, code: str) -> RunResult:
         """Run ``code`` to completion or timeout and return what it printed."""
@@ -182,30 +204,38 @@ class Runtime:
             env=child_environment(self.workspace, self.bridge_addr),
         )
         assert proc.stdout is not None and proc.stderr is not None
+        self._unreaped.add(proc)
         out = _Capture(self.max_output_chars)
         err = _Capture(self.max_output_chars)
         drains = [
-            asyncio.ensure_future(out.drain(proc.stdout)),
-            asyncio.ensure_future(err.drain(proc.stderr)),
+            asyncio.create_task(out.drain(proc.stdout), name=f"{DRAIN_TASK}-stdout"),
+            asyncio.create_task(err.drain(proc.stderr), name=f"{DRAIN_TASK}-stderr"),
         ]
         timed_out = False
         try:
             try:
-                await asyncio.wait_for(proc.wait(), self.timeout_s)
+                await asyncio.wait_for(_exited(proc), self.timeout_s)
             except TimeoutError:
                 timed_out = True
                 await asyncio.to_thread(kill_tree, proc.pid)
-                await proc.wait()
+                await _exited(proc)
             _, pending = await asyncio.wait(drains, timeout=_DRAIN_GRACE_S)
             for task in pending:
                 task.cancel()
             await asyncio.gather(*drains, return_exceptions=True)
         finally:
-            if proc.returncode is None:  # run() itself was cancelled or failed
-                kill_tree(proc.pid)  # synchronous on purpose: we may be cancelled
-                await proc.wait()
+            # Nothing before the shield may await: anyio re-delivers cancellation
+            # to a cancelled task at every await, which would skip the rest.
             for task in drains:
                 task.cancel()
+            if proc.returncode is None:  # run() itself was cancelled or failed
+                kill_tree(proc.pid)  # synchronous on purpose
+            # Shielded, so a re-delivered cancellation cannot skip the reap; bounded,
+            # so a process that will not die cannot hang cleanup.
+            with anyio.CancelScope(shield=True), anyio.move_on_after(_KILL_WAIT_S):
+                await _exited(proc)
+                self._unreaped.discard(proc)
+                await asyncio.gather(*drains, return_exceptions=True)
         stdout, cut_out = out.text()
         stderr, cut_err = err.text()
         return RunResult(

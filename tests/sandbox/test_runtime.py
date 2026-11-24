@@ -1,13 +1,15 @@
 """Tests for the subprocess Runtime, running agent code against real ticketdesk."""
 
+import asyncio
 import re
+import time
 from pathlib import Path
 
 import anyio
 import psutil
 import pytest
 
-from mcpx.sandbox.runtime import RunResult, Runtime
+from mcpx.sandbox.runtime import DRAIN_TASK, RunResult, Runtime, kill_tree
 from tests.sandbox.helpers import ticketdesk_runtime
 
 pytestmark = pytest.mark.anyio
@@ -102,22 +104,93 @@ async def test_infinite_loop_is_killed(tmp_path: Path) -> None:
 
 
 async def test_cancelled_run_kills_the_child(tmp_path: Path) -> None:
+    # The grandchild inherits the child's stdout/stderr pipes and holds them open.
     code = (
-        "import os, pathlib, time\n"
-        "pathlib.Path('pid.txt').write_text(str(os.getpid()))\n"
+        "import os, pathlib, subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        "pathlib.Path('pid.tmp').write_text(f'{os.getpid()} {p.pid}')\n"
+        "os.replace('pid.tmp', 'pid.txt')\n"
         "time.sleep(600)"
     )
     pid_file = tmp_path / "workspace" / "pid.txt"
     async with ticketdesk_runtime(tmp_path, timeout_s=120) as rt:
+        # Cancel run() in this very task, so nothing else (such as a task group's
+        # exit) spins the event loop between the cancellation and the checks. A
+        # plain loop callback (not a task) cancels as soon as the child is up.
+        loop = asyncio.get_running_loop()
         with anyio.move_on_after(30) as scope:
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(rt.run, code)
-                while not pid_file.exists() or not pid_file.read_text():
-                    await anyio.sleep(0.05)
-                tg.cancel_scope.cancel()
-        assert not scope.cancelled_caught, "child never started"
-    assert not _alive(int(pid_file.read_text()))
-    assert _leftover_run_files(tmp_path / "workspace") == []
+
+            def cancel_once_started() -> None:
+                if pid_file.exists():
+                    scope.cancel()
+                else:
+                    loop.call_later(0.05, cancel_once_started)
+
+            loop.call_soon(cancel_once_started)
+            started = time.monotonic()
+            await rt.run(code)
+        cleanup_s = time.monotonic() - started
+        assert scope.cancelled_caught
+        assert pid_file.exists(), "child never started before the deadline"
+        assert cleanup_s < 15, f"cancelled run took {cleanup_s:.1f} s"
+        # Checked at once, before any further await gives cleanup a second chance.
+        leaked = [
+            t.get_name()
+            for t in asyncio.all_tasks()
+            if t.get_name().startswith(DRAIN_TASK) and not t.done()
+        ]
+        assert leaked == [], f"drain tasks still pending after cancel: {leaked}"
+        assert rt.unreaped == 0, "child was not reaped after the cancelled run"
+        for pid in map(int, pid_file.read_text().split()):
+            assert not _alive(pid), f"process {pid} survived the cancelled run"
+        assert _leftover_run_files(tmp_path / "workspace") == []
+
+
+# An intermediate process starts a sleeper and exits at once, so the sleeper is an
+# orphan outside the child's process tree that still holds the child's pipes.
+_SPAWN_ORPHAN = (
+    "import subprocess, sys\n"
+    "subprocess.run([sys.executable, '-c', \"import pathlib, subprocess, sys; "
+    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+    "pathlib.Path('orphan.txt').write_text(str(p.pid))\"])\n"
+)
+
+
+@pytest.mark.parametrize("cancel", [True, False], ids=["cancelled", "normal-exit"])
+async def test_orphan_holding_pipes_does_not_stall_run(
+    tmp_path: Path, cancel: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    tail = "open('pid.txt', 'w').close()\nimport time; time.sleep(600)\n"
+    code = _SPAWN_ORPHAN + (tail if cancel else "print('bye')\n")
+    try:
+        async with ticketdesk_runtime(tmp_path, timeout_s=60) as rt:
+            loop = asyncio.get_running_loop()
+            with anyio.move_on_after(30) as scope:
+
+                def cancel_once_started() -> None:
+                    if (workspace / "pid.txt").exists():
+                        scope.cancel()
+                    else:
+                        loop.call_later(0.05, cancel_once_started)
+
+                if cancel:
+                    loop.call_soon(cancel_once_started)
+                started = time.monotonic()
+                result = await rt.run(code)
+            elapsed = time.monotonic() - started
+            assert scope.cancelled_caught is cancel
+            if not cancel:
+                assert result.exit_code == 0 and "bye" in result.stdout
+            assert elapsed < 10, f"run took {elapsed:.1f} s with an orphan alive"
+            assert rt.unreaped == 0
+            assert _leftover_run_files(workspace) == []
+            assert _alive(int((workspace / "orphan.txt").read_text()))
+    finally:
+        orphan = workspace / "orphan.txt"
+        if orphan.exists():
+            kill_tree(int(orphan.read_text()))
+        await anyio.sleep(0.5)  # let the loop see the pipes close
 
 
 def _alive(pid: int) -> bool:

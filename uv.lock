@@ -1257,6 +1257,7 @@ name = "mcpx"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "google-adk" },
     { name = "litellm" },
     { name = "mcp" },
@@ -1275,6 +1276,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio" },
     { name = "google-adk" },
     { name = "litellm" },
     { name = "mcp" },
