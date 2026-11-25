@@ -3,19 +3,16 @@
 The agent has the direct arm's shape (an ADK ``McpToolset`` over stdio), but the
 server it launches is ``mcpx.codemode.proxy``, which serves ``search``,
 ``get_schema`` and ``execute`` instead of the target's own tools. The proxy is
-started by module name only; this package never imports it.
+started by module name only; this package never imports it. Results reach the
+model through the direct arm's ``structured_result_only`` unchanged.
 """
 
-import json
 import sys
 from pathlib import Path
-from typing import Any
 
 from google.adk.agents import LlmAgent
-from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
-from google.adk.tools.tool_context import ToolContext
 
 from mcpx.agents.direct import (
     AGENT_NAME,
@@ -29,82 +26,6 @@ from mcpx.client.connection import server_parameters
 from mcpx.client.target import Target
 from mcpx.codemode.protocol import CALL_LOG_ENV
 from mcpx.llm.models import ModelConfig
-
-
-def _decoded(text: str) -> Any:
-    """Parse ``text`` when it is a JSON array or object, else return it as is.
-
-    Scalars are never decoded: a script that returns the string ``"42"`` must
-    not turn into the number 42.
-    """
-    if text.lstrip()[:1] in ("[", "{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-    return text
-
-
-def _wraps_result(tool_response: dict[str, Any]) -> bool:
-    """Whether FastMCP wrapped a string return as ``{"result": ...}``.
-
-    ``search`` and ``get_schema`` return one string; FastMCP marks the wrapping
-    in the result's ``meta``.
-    """
-    meta = tool_response.get("meta")
-    fastmcp = meta.get("fastmcp") if isinstance(meta, dict) else None
-    return isinstance(fastmcp, dict) and fastmcp.get("wrap_result") is True
-
-
-def _only_text(tool_response: dict[str, Any]) -> str | None:
-    """The text of a result with exactly one text block, else ``None``."""
-    content = tool_response.get("content")
-    if not isinstance(content, list) or len(content) != 1:
-        return None
-    block = content[0]
-    if not isinstance(block, dict) or block.get("type") != "text":
-        return None
-    text = block.get("text")
-    return text if isinstance(text, str) else None
-
-
-def code_mode_result_only(
-    tool: BaseTool,
-    args: dict[str, Any],
-    tool_context: ToolContext,
-    tool_response: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Give the model one copy of a successful Code Mode result.
-
-    An ADK ``after_tool_callback`` (a non-``None`` return replaces the result
-    the model gets). The proxy answers in three shapes:
-
-    - a dict from ``execute``: text plus ``structuredContent``; the direct arm's
-      ``structured_result_only`` already keeps just the structure;
-    - ``search`` and ``get_schema``: one string, sent as text and again as
-      ``structuredContent={"result": text}``; one copy is kept, and a JSON
-      array or object in it is decoded so the model does not read it with every
-      quote escaped a second time;
-    - a list, string or number from ``execute``: text only, handled the same way
-      (a returned string that is JSON text is decoded too).
-
-    Errors, results without exactly one text block and ADK's own
-    ``{"error": ...}`` dicts return ``None`` and are kept unchanged.
-    """
-    if not isinstance(tool_response, dict) or tool_response.get("isError"):
-        return None
-    wrapped = _wraps_result(tool_response)
-    if not wrapped:
-        kept = structured_result_only(tool, args, tool_context, tool_response)
-        if kept is not None:
-            return kept
-    structured = tool_response.get("structuredContent")
-    text = (
-        structured.get("result") if wrapped and isinstance(structured, dict) else None
-    )
-    if not isinstance(text, str):
-        text = _only_text(tool_response)
-    return None if text is None else {"result": _decoded(text)}
 
 
 def codemode_target(target_name: str, call_log: Path) -> Target:
@@ -142,5 +63,5 @@ def build_codemode_agent(
         instruction=BASE_INSTRUCTION,
         tools=[toolset],
         after_model_callback=recorder.after_model_callback,
-        after_tool_callback=code_mode_result_only,
+        after_tool_callback=structured_result_only,
     )
