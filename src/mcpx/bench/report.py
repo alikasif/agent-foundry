@@ -3,8 +3,9 @@
 Everything here is arithmetic over ``RunRecord`` data; nothing calls a model.
 The honesty rules the report follows:
 
-* A figure the provider did not report is ``None``, never ``0``, and renders as
-  ``n/a``.
+* A figure that was not reported is ``None``, never ``0``, and renders as
+  ``n/a``. Caveat: ADK itself turns some missing counts into ``0`` (see
+  ``mcpx.bench.usage``), and the report's footnote says so.
 * A group with an incorrect (or errored) run is flagged, and no ratio between
   arms is printed for it.
 * Runs made with different settings (``RunRecord.settings``) are never merged:
@@ -29,6 +30,7 @@ _COLUMNS = (
     "prompt tokens",
     "output tokens",
     "cached tokens",
+    "reasoning tokens",
     "model calls",
     "tool calls",
     "MCP calls",
@@ -36,7 +38,13 @@ _COLUMNS = (
     "cost (list)",
     "cost (with reported cache reads)",
 )
-NO_CACHE_NOTE = "provider reported no cached-token counts; cached cost equals list cost"
+USAGE_NOTE = (
+    "ADK fills in usage counts the provider omitted: a missing prompt, output or "
+    "cached-token count becomes 0, and a reasoning count of 0 is dropped. So a 0 "
+    "in the `cached tokens` column may mean the provider did not report it, and "
+    "`reasoning tokens` sums only the calls that reported a count (n/a when none "
+    "did)."
+)
 NOT_RECORDED = "(not recorded)"
 GroupKey = tuple[str, str, str, str]
 
@@ -63,6 +71,17 @@ def prompt_total(record: RunRecord) -> int | None:
 def output_total(record: RunRecord) -> int | None:
     """Total output tokens of a run, or ``None`` when not fully reported."""
     return _total(record, "output_tokens")
+
+
+def reasoning_total(record: RunRecord) -> int | None:
+    """Reasoning tokens of a run, summed over the calls that reported a count.
+
+    ADK reports a reasoning count of 0 as missing, so a missing count is not
+    treated as unknown here; the total is ``None`` only when no call has one.
+    """
+    values = [c.reasoning_tokens for c in record.calls]
+    present = [v for v in values if v is not None]
+    return sum(present) if present else None
 
 
 def _price(model: str) -> Prices | None:
@@ -119,6 +138,7 @@ def _group_row(key: GroupKey, group: list[RunRecord]) -> Row:
         "prompt_tokens": prompt_total,
         "output_tokens": output_total,
         "cached_tokens": lambda r: _total(r, "cached_tokens"),
+        "reasoning_tokens": reasoning_total,
         "model_calls": lambda r: len(r.calls),
         "tool_calls": lambda r: r.tool_calls,
         "mcp_calls": lambda r: r.mcp_calls,
@@ -155,7 +175,8 @@ def summarize(records: list[RunRecord]) -> list[Row]:
     * ``cached_reported``: ``True`` when any call in the group reported a
       cached-token count.
     * ``prompt_tokens``, ``output_tokens``, ``cached_tokens``: per-run totals
-      over the run's model calls.
+      over the run's model calls; ``reasoning_tokens``: the sum over the calls
+      that reported a count (see ``reasoning_total``).
     * ``model_calls``: number of model calls per run; ``tool_calls`` (model-level
       function calls), ``mcp_calls`` (MCP tool calls actually executed;
       ``None`` for records written before it was recorded) and ``wall_s``: the
@@ -223,6 +244,7 @@ def _table_row(row: Row) -> str:
         _cell(row["prompt_tokens"], tokens),
         _cell(row["output_tokens"], tokens),
         _cell(row["cached_tokens"], tokens),
+        _cell(row["reasoning_tokens"], tokens),
         _cell(row["model_calls"], tokens),
         _cell(row["tool_calls"], tokens),
         _cell(row["mcp_calls"], tokens),
@@ -275,24 +297,18 @@ def render_markdown(rows: list[Row]) -> str:
     """Render summary rows as one Markdown table per (model, settings) pair.
 
     Each table is headed by its model and its settings (``settings: (not
-    recorded)`` for older records), and has a row per (task, arm); a group that is not fully correct is
-    marked with a warning sign. Below each table, a per-task line compares the
+    recorded)`` for older records), and has a row per (task, arm); a group that
+    is not fully correct is marked with a warning sign. Below each table, a per-task line compares the
     code arm's median prompt tokens with the direct arm's, only when both arms
     have a value and every run in both was correct. Footnotes say where the
-    numbers come from and which models reported no cached-token counts.
+    numbers come from and how ADK reports missing usage counts.
     """
     if not rows:
         return "No runs.\n"
-    models = list(dict.fromkeys(r["model"] for r in rows))
     lines: list[str] = []
     for model, settings in dict.fromkeys((r["model"], r["settings"]) for r in rows):
         mine = [r for r in rows if (r["model"], r["settings"]) == (model, settings)]
         lines.extend(_section(model, settings, mine))
-    uncached = [
-        m
-        for m in models
-        if not any(r["cached_reported"] for r in rows if r["model"] == m)
-    ]
     lines.append(
         "Tokens are those reported by the provider; costs use `prices.toml` "
         "(USD per million tokens). `cost (with reported cache reads)` equals "
@@ -301,6 +317,5 @@ def render_markdown(rows: list[Row]) -> str:
         "in the code arm); `MCP calls` are the MCP tool calls actually executed "
         "(n/a for records written before they were counted)."
     )
-    if uncached:
-        lines += ["", f"Note ({', '.join(uncached)}): {NO_CACHE_NOTE}."]
+    lines += ["", USAGE_NOTE]
     return "\n".join(lines) + "\n"

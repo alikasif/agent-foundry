@@ -37,6 +37,19 @@ def test_recorder_reads_usage_metadata() -> None:
     assert rec.calls == [CallUsage(100, 20, 40)]
 
 
+def test_recorder_reads_reasoning_tokens() -> None:
+    rec = UsageRecorder()
+    meta = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=100,
+        candidates_token_count=20,
+        cached_content_token_count=0,
+        thoughts_token_count=12,
+    )
+    rec.after_model_callback(CTX, LlmResponse(usage_metadata=meta))
+    rec.after_model_callback(CTX, _response((5, 1, 0)))
+    assert rec.calls == [CallUsage(100, 20, 0, 12), CallUsage(5, 1, 0, None)]
+
+
 def test_recorder_tolerates_missing_usage() -> None:
     rec = UsageRecorder()
     rec.after_model_callback(CTX, _response(None))
@@ -129,6 +142,8 @@ def test_old_records_without_new_fields_still_load() -> None:
     assert r.tool_calls == 1 and r.calls == [CallUsage(6636, 52, 0)]
     assert r.mcp_calls is None
     assert r.trace == []
+    assert r.settings == ""
+    assert r.calls[0].reasoning_tokens is None
 
 
 def test_runrecord_round_trips_trace_and_mcp_calls() -> None:

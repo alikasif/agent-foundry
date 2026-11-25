@@ -184,7 +184,7 @@ def test_render_markdown_snapshot_substrings() -> None:
     assert f"### {MODEL}" in md
     header = (
         "| task | arm | correct | prompt tokens | output tokens | cached tokens "
-        "| model calls | tool calls | MCP calls | wall s | cost (list) "
+        "| reasoning tokens | model calls | tool calls | MCP calls | wall s | cost (list) "
         "| cost (with reported cache reads) |"
     )
     assert header in md
@@ -196,12 +196,35 @@ def test_render_markdown_snapshot_substrings() -> None:
     assert "reported by the provider" in md
 
 
-def test_footnote_when_a_model_reported_no_cached_tokens() -> None:
-    md = render_markdown(summarize([rec(calls=[(10, 5, None)])]))
-    assert "provider reported no cached-token counts" in md
-    assert "cached cost equals list cost" in md
-    reported = render_markdown(summarize([rec(calls=[(10, 5, 4)])]))
-    assert "provider reported no cached-token counts" not in reported
+def test_footnote_explains_that_adk_turns_missing_counts_into_zero() -> None:
+    for cached in (None, 4):
+        md = render_markdown(summarize([rec(calls=[(10, 5, cached)])]))
+        assert "provider reported no cached-token counts" not in md
+        assert "a missing prompt, output or cached-token count becomes 0" in md
+        assert "may mean the provider did not report it" in md
+
+
+def test_reasoning_tokens_sum_reported_calls_and_are_na_when_none_reported() -> None:
+    with_reasoning = RunRecord(
+        task_id="A",
+        arm="direct",
+        model=MODEL,
+        run_index=0,
+        calls=[CallUsage(10, 5, 0, 30), CallUsage(10, 5, 0, None)],
+        tool_calls=1,
+        wall_s=1.0,
+        answer_text="",
+        correct=True,
+        error=None,
+    )
+    second = RunRecord.from_json(with_reasoning.to_json())
+    second.run_index = 1
+    second.calls[1].reasoning_tokens = 20
+    row = summarize([with_reasoning, second])[0]
+    assert row["reasoning_tokens"] == {"median": 40.0, "min": 30, "max": 50}
+    assert "| 40 [30-50] |" in render_markdown([row])
+    none = summarize([rec(calls=[(10, 5, 0)])])[0]
+    assert none["reasoning_tokens"] is None
 
 
 def test_ratio_refused_when_any_run_is_incorrect() -> None:

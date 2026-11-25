@@ -1,4 +1,16 @@
-"""Per-model-call token usage recording and the per-run record."""
+"""Per-model-call token usage recording and the per-run record.
+
+Limitation: the counts are what ADK's ``LiteLlm`` puts in ``usage_metadata``,
+and ADK fills in what the provider left out. When a response carries a usage
+block, a missing prompt, output or cached-token count becomes ``0``
+(``lite_llm.py`` defaults ``prompt_tokens`` and ``completion_tokens`` to 0, and
+``_extract_cached_prompt_tokens`` returns 0 when the field is absent), and a
+reasoning count of 0 becomes ``None`` (``thoughts_token_count`` is set only when
+non-zero). So on the real path ``None`` here mostly means "the response had no
+usage block at all", a ``0`` cached count may mean "not reported", and a
+``None`` reasoning count may mean "zero". The unit tests build
+``usage_metadata`` objects directly and so also exercise the ``None`` paths.
+"""
 
 import json
 from dataclasses import asdict, dataclass, field, fields
@@ -10,11 +22,16 @@ from google.adk.models.llm_response import LlmResponse
 
 @dataclass
 class CallUsage:
-    """Token counts of one model call; ``None`` when the provider omitted them."""
+    """Token counts of one model call; ``None`` when none was reported.
+
+    ``reasoning_tokens`` comes from ``usage_metadata.thoughts_token_count``; it
+    defaults to ``None`` so records written before it was recorded still load.
+    """
 
     prompt_tokens: int | None
     output_tokens: int | None
     cached_tokens: int | None
+    reasoning_tokens: int | None = None
 
 
 @dataclass
@@ -103,6 +120,7 @@ class UsageRecorder:
                     meta.prompt_token_count,
                     meta.candidates_token_count,
                     meta.cached_content_token_count,
+                    meta.thoughts_token_count,
                 )
             )
         return
