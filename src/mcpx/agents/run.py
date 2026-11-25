@@ -275,8 +275,11 @@ async def run_once(
     *,
     run_timeout_s: float = 600.0,
     max_llm_calls: int = 40,
+    settings: str = "",
 ) -> RunRecord:
     """Run ``task`` once on ``arm`` against ``target_name`` and record the outcome.
+
+    ``settings`` is stored as is in ``RunRecord.settings``.
 
     Never raises for a failed run (only for outside cancellation): errors, the
     LLM-call cap and the overall timeout end up in ``RunRecord.error`` with
@@ -320,6 +323,7 @@ async def run_once(
         tool_calls=progress.tool_calls,
         mcp_calls=progress.mcp_calls,
         trace=progress.trace,
+        settings=settings,
         wall_s=progress.wall_s,
         answer_text=progress.final_text,
         correct=correct,

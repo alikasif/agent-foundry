@@ -53,6 +53,24 @@ def _check_inputs(arms: list[str], runs: int) -> None:
         raise ValueError(f"runs must be at least 1, got {runs}")
 
 
+def run_settings(model: ModelConfig, max_llm_calls: int, run_timeout_s: float) -> str:
+    """Describe a batch's configuration as a stable ``key=value;...`` string.
+
+    Stored in every ``RunRecord.settings`` so the report never merges runs made
+    with different settings. ``provider`` is the comma-joined pinned provider
+    order, or ``default`` when OpenRouter may route freely; ``reasoning`` is
+    ``default`` when no effort is sent.
+    """
+    parts = {
+        "reasoning": model.reasoning_effort or "default",
+        "provider": ",".join(model.provider_order) or "default",
+        "max_llm_calls": str(max_llm_calls),
+        "run_timeout_s": f"{run_timeout_s:g}",
+        "temperature": f"{model.temperature:g}",
+    }
+    return ";".join(f"{key}={value}" for key, value in parts.items())
+
+
 def _tokens(value: int | None) -> str:
     return "n/a" if value is None else str(value)
 
@@ -87,6 +105,7 @@ async def run_batch(
 ) -> list[RunRecord]:
     """Run every (task, run index, arm) once, appending a JSON line per run.
 
+    Every record carries ``run_settings(model, max_llm_calls, run_timeout_s)``.
     Each finished record is appended to ``out_path`` immediately (parent
     directories are created), so a crash loses at most the run in progress, and
     one progress line is printed. Run indexes start at 0.
@@ -98,6 +117,7 @@ async def run_batch(
     _check_inputs(arms, runs)
     tasks = _resolve_tasks(target_name, task_ids)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = run_settings(model, max_llm_calls, run_timeout_s)
     records: list[RunRecord] = []
     for task in tasks:
         for run_index in range(runs):
@@ -110,6 +130,7 @@ async def run_batch(
                     run_index,
                     run_timeout_s=run_timeout_s,
                     max_llm_calls=max_llm_calls,
+                    settings=settings,
                 )
                 with out_path.open("a", encoding="utf-8") as out:
                     out.write(record.to_json() + "\n")

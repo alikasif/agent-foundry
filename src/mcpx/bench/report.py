@@ -7,6 +7,8 @@ The honesty rules the report follows:
   ``n/a``.
 * A group with an incorrect (or errored) run is flagged, and no ratio between
   arms is printed for it.
+* Runs made with different settings (``RunRecord.settings``) are never merged:
+  each (model, settings) pair gets its own table.
 """
 
 from collections.abc import Callable, Iterable
@@ -35,6 +37,8 @@ _COLUMNS = (
     "cost (with reported cache reads)",
 )
 NO_CACHE_NOTE = "provider reported no cached-token counts; cached cost equals list cost"
+NOT_RECORDED = "(not recorded)"
+GroupKey = tuple[str, str, str, str]
 
 
 def _total(record: RunRecord, attr: str) -> int | None:
@@ -107,9 +111,9 @@ def _stat(values: Iterable[float | None]) -> Stat | None:
     return {"median": median(present), "min": min(present), "max": max(present)}
 
 
-def _group_row(key: tuple[str, str, str], group: list[RunRecord]) -> Row:
+def _group_row(key: GroupKey, group: list[RunRecord]) -> Row:
     """Build one summary row from the records of one group."""
-    task_id, arm, model = key
+    task_id, arm, model, settings = key
     prices = _price(model)
     figures: dict[str, Callable[[RunRecord], float | None]] = {
         "prompt_tokens": prompt_total,
@@ -122,7 +126,7 @@ def _group_row(key: tuple[str, str, str], group: list[RunRecord]) -> Row:
         "cost_list": lambda r: _cost_list(prompt_total(r), output_total(r), prices),
         "cost_cached": lambda r: _cost_cached(r, prices),
     }
-    row: Row = {"task_id": task_id, "arm": arm, "model": model}
+    row: Row = {"task_id": task_id, "arm": arm, "model": model, "settings": settings}
     row["runs"] = len(group)
     row["correct_runs"] = sum(1 for r in group if r.correct)
     row["error_runs"] = sum(1 for r in group if r.error)
@@ -135,15 +139,16 @@ def _group_row(key: tuple[str, str, str], group: list[RunRecord]) -> Row:
 
 
 def summarize(records: list[RunRecord]) -> list[Row]:
-    """Group records by ``(task_id, arm, model)`` and summarize each group.
+    """Group records by ``(task_id, arm, model, settings)``; summarize each group.
 
     Token counts are the provider's: ``prompt_tokens`` is assumed OpenAI-style,
-    that is, it INCLUDES the cached tokens. Rows are sorted by model, task id,
-    then arm (``direct`` before ``code``).
+    that is, it INCLUDES the cached tokens. Rows are sorted by model, settings,
+    task id, then arm (``direct`` before ``code``).
 
     Each row has these keys:
 
-    * ``task_id``, ``arm``, ``model``: the group key.
+    * ``task_id``, ``arm``, ``model``, ``settings``: the group key
+      (``settings`` is ``""`` for records written before it was recorded).
     * ``runs``: records in the group; ``correct_runs``: those with
       ``correct``; ``error_runs``: those with ``error`` set. Errored runs
       count as runs and as not correct.
@@ -170,11 +175,12 @@ def summarize(records: list[RunRecord]) -> list[Row]:
     figures ``None``); such runs are skipped in the aggregate, never counted as
     zero.
     """
-    groups: dict[tuple[str, str, str], list[RunRecord]] = {}
-    for record in records:
-        groups.setdefault((record.task_id, record.arm, record.model), []).append(record)
+    groups: dict[GroupKey, list[RunRecord]] = {}
+    for r in records:
+        groups.setdefault((r.task_id, r.arm, r.model, r.settings), []).append(r)
     keys = sorted(
-        groups, key=lambda k: (k[2], k[0], _ARM_ORDER.get(k[1], len(_ARM_ORDER)), k[1])
+        groups,
+        key=lambda k: (k[2], k[3], k[0], _ARM_ORDER.get(k[1], len(_ARM_ORDER)), k[1]),
     )
     return [_group_row(key, groups[key]) for key in keys]
 
@@ -244,8 +250,14 @@ def _ratio_line(task_id: str, direct: Row | None, code: Row | None) -> str:
     return f"{task_id}: code uses {shown}% of direct's prompt tokens"
 
 
-def _model_section(model: str, rows: list[Row]) -> list[str]:
-    lines = [f"### {model}", ""]
+def _settings_label(settings: str) -> str:
+    """How a group's settings are shown above its table."""
+    return f"settings: `{settings}`" if settings else f"settings: {NOT_RECORDED}"
+
+
+def _section(model: str, settings: str, rows: list[Row]) -> list[str]:
+    """One table (plus its ratio lines) for one (model, settings) pair."""
+    lines = [f"### {model}", "", _settings_label(settings), ""]
     lines.append("| " + " | ".join(_COLUMNS) + " |")
     lines.append("|" + "|".join(" --- " for _ in _COLUMNS) + "|")
     lines.extend(_table_row(r) for r in rows)
@@ -260,9 +272,10 @@ def _model_section(model: str, rows: list[Row]) -> list[str]:
 
 
 def render_markdown(rows: list[Row]) -> str:
-    """Render summary rows as one Markdown table per model.
+    """Render summary rows as one Markdown table per (model, settings) pair.
 
-    Each table has a row per (task, arm); a group that is not fully correct is
+    Each table is headed by its model and its settings (``settings: (not
+    recorded)`` for older records), and has a row per (task, arm); a group that is not fully correct is
     marked with a warning sign. Below each table, a per-task line compares the
     code arm's median prompt tokens with the direct arm's, only when both arms
     have a value and every run in both was correct. Footnotes say where the
@@ -272,8 +285,9 @@ def render_markdown(rows: list[Row]) -> str:
         return "No runs.\n"
     models = list(dict.fromkeys(r["model"] for r in rows))
     lines: list[str] = []
-    for model in models:
-        lines.extend(_model_section(model, [r for r in rows if r["model"] == model]))
+    for model, settings in dict.fromkeys((r["model"], r["settings"]) for r in rows):
+        mine = [r for r in rows if (r["model"], r["settings"]) == (model, settings)]
+        lines.extend(_section(model, settings, mine))
     uncached = [
         m
         for m in models

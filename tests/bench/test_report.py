@@ -18,6 +18,7 @@ def rec(
     calls: list[tuple[int | None, int | None, int | None]] | None = None,
     tool_calls: int = 1,
     mcp_calls: int | None = None,
+    settings: str = "",
     wall_s: float = 1.0,
     correct: bool = True,
     error: str | None = None,
@@ -36,6 +37,7 @@ def rec(
         correct=correct,
         error=error,
         mcp_calls=mcp_calls,
+        settings=settings,
     )
 
 
@@ -237,3 +239,40 @@ def test_mcp_calls_column_shows_executed_calls_and_na_for_old_records() -> None:
     old = summarize([rec(tool_calls=3)])[0]
     assert old["mcp_calls"] is None
     assert "| 3 [3-3] | n/a |" in render_markdown([old])
+
+
+MEDIUM = "reasoning=medium;provider=default;max_llm_calls=40;run_timeout_s=600"
+LOW = "reasoning=low;provider=default;max_llm_calls=40;run_timeout_s=600"
+
+
+def test_batches_differing_only_in_settings_never_merge() -> None:
+    records = [
+        rec(arm="direct", settings=MEDIUM, calls=[(100, 1, None)]),
+        rec(arm="code", settings=MEDIUM, calls=[(10, 1, None)]),
+        rec(arm="direct", settings=LOW, calls=[(300, 1, None)]),
+        rec(arm="code", settings=LOW, calls=[(60, 1, None)]),
+    ]
+    rows = summarize(records)
+    assert len(rows) == 4
+    assert {(r["arm"], r["settings"]) for r in rows} == {
+        ("direct", MEDIUM),
+        ("code", MEDIUM),
+        ("direct", LOW),
+        ("code", LOW),
+    }
+    md = render_markdown(rows)
+    assert md.count(f"### {MODEL}") == 2
+    assert f"settings: `{MEDIUM}`" in md and f"settings: `{LOW}`" in md
+    # Each table compares its own arms only.
+    assert "A: code uses 10% of direct's prompt tokens" in md
+    assert "A: code uses 20% of direct's prompt tokens" in md
+
+
+def test_old_records_group_under_not_recorded() -> None:
+    old = prompts("A", "direct", [100, 200])
+    new = [rec(settings=MEDIUM, run_index=5)]
+    rows = summarize(old + new)
+    assert [r["settings"] for r in rows] == ["", MEDIUM]
+    assert rows[0]["runs"] == 2 and rows[1]["runs"] == 1
+    md = render_markdown(rows)
+    assert "settings: (not recorded)" in md

@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from mcpx.agents.batch import run_batch
+from mcpx.agents.batch import run_batch, run_settings
 from mcpx.bench.usage import RunRecord
+from mcpx.llm.models import ModelConfig
 from tests.agents.test_arms import _closed_port, _python_children, _UnreachableModel
 
 pytestmark = pytest.mark.anyio
@@ -44,6 +45,11 @@ async def test_batch_writes_one_line_per_run_in_interleaved_order(
     ]
     assert [(r.task_id, r.arm, r.run_index) for r in records] == order
     assert all(r.error for r in saved) and not any(r.correct for r in saved)
+    expected = (
+        "reasoning=default;provider=default;max_llm_calls=5;run_timeout_s=60;"
+        "temperature=0"
+    )
+    assert {r.settings for r in saved} == {expected}
     # LiteLLM prints its own diagnostics to stdout; keep only the progress lines.
     printed = [
         line
@@ -112,3 +118,17 @@ async def test_batch_rejects_an_unknown_target(tmp_path: Path) -> None:
             run_timeout_s=60.0,
             max_llm_calls=5,
         )
+
+
+def test_run_settings_is_stable_and_names_every_knob() -> None:
+    model = ModelConfig(
+        "m/x",
+        temperature=0.5,
+        provider_order=("P1", "P2"),
+        reasoning_effort="low",
+    )
+    assert run_settings(model, 40, 600.0) == (
+        "reasoning=low;provider=P1,P2;max_llm_calls=40;run_timeout_s=600;"
+        "temperature=0.5"
+    )
+    assert run_settings(model, 40, 600.0) == run_settings(model, 40, 600.0)
