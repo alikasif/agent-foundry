@@ -8,13 +8,13 @@ cap, timeout, missing answer) is stored in ``RunRecord.error`` with
 ``correct=False``; ``run_once`` never raises for a failed run.
 
 Timing fairness: ``wall_s`` runs from just before the first ``runner.run_async``
-call to the last event received (or to the failure), for both arms. MCP server
-start-up, tool discovery and workspace generation happen before the clock
-starts in both arms: the code arm opens its ``Connection``, generates the
+call to the last event received (or to the failure), for all three arms. MCP
+server start-up, tool discovery and workspace generation happen before the clock
+starts in every arm: the code arm opens its ``Connection``, generates the
 workspace and starts the ``Bridge`` first; the direct and fastmcp arms warm
-their toolset by listing its tools once (the list is then cached for the run). LiteLLM, which
-ADK imports lazily on the first model call, is imported with this module so
-that its multi-second import never lands inside the first run's clock.
+their toolset by listing its tools once (the list is then cached for the run).
+LiteLLM, which ADK imports lazily on the first model call, is imported with this
+module so that its multi-second import never lands inside the first run's clock.
 
 What a run did is kept in ``RunRecord.trace`` (function calls, ``run_python``
 scripts and the MCP calls those scripts made through the Bridge, each text cut
@@ -27,8 +27,8 @@ Ownership: the code arm's ``Connection`` is entered and exited with
 ``async with`` in the task that runs ``run_once``, because its anyio cancel
 scopes are task-affine. The direct arm's ``McpToolset`` owns its own server
 process and is closed in ``finally``; so is the fastmcp arm's, whose proxy
-process (and the backend it spawns) goes away with it. Every teardown runs on error, timeout and
-cancellation.
+process (and the backend it spawns) goes away with it. Every teardown runs on
+error, timeout and cancellation.
 """
 
 import json

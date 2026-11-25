@@ -298,7 +298,8 @@ async def test_proxy_and_backend_do_not_survive_close(
         with anyio.fail_after(120):
             tools = {t.name: t for t in await toolset.get_tools()}
             execute = tools[EXECUTE_TOOL]
-            # One backend call first, so the backend child exists (lazy start).
+            # The backend is already up after connect and list_tools; this call also
+            # puts one entry in the call log, asserted after close.
             first = "return await call_tool('count_tickets', {})"
             await execute.run_async(
                 args={EXECUTE_CODE_PARAM: first},
@@ -318,4 +319,4 @@ async def test_proxy_and_backend_do_not_survive_close(
             await toolset.close()
     assert [c.tool for c in read_call_log(log)][:1] == ["count_tickets"]
     assert _alive(started) == [], "proxy tree outlived toolset.close()"
-    assert _tree_pids() - before == set()
+    assert _alive(_tree_pids() - before) == []

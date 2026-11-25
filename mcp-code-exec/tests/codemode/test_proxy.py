@@ -258,4 +258,6 @@ async def test_stdout_carries_only_protocol_traffic(call_log: Path) -> None:
             pytest.fail(f"non-protocol line on stdout: {line!r}")
     assert all(isinstance(message, dict) for message in parsed)
     assert all(message.get("jsonrpc") == "2.0" for message in parsed)
-    assert any("result" in message for message in parsed)
+    (reply,) = [m for m in parsed if m.get("id") == 3]
+    assert "result" in reply and "error" not in reply, reply
+    assert reply["result"].get("isError") is not True, reply
