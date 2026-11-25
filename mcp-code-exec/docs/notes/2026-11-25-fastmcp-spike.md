@@ -10,6 +10,12 @@ was a throwaway script outside the repo that drove the proxy with `fastmcp.Clien
   inside `execute` DO pass through it (finding 3). No client wrapping, no stdio shim needed.
   Caveat: the middleware runs inside the proxy subprocess, so it must hand records to the harness
   out of band (for example append JSONL to a path passed by env var). It cannot return them in process.
+- **Sandbox `print()` is safe in the stdio proxy, with one rule.** `mcp` 2.3.0 `stdio_server()` diverts fd 1
+  to stderr while serving, so a script's `print('x')` (and any other stdout write) does not reach the
+  JSON-RPC stream: raw session with `execute` of `print('SANDBOXPRINT')` showed 0 non-JSON stdout lines.
+  Entrypoint rule: use stock `proxy.run(transport="stdio", show_banner=False, log_level="warning")`
+  (no custom streams) and write nothing to stdout before it. No `sys.stdout` swap needed. The print
+  output is not in the `execute` result. Details in Q7.
 - Meta-tool names: `search`, `get_schema`, `execute` (class `GetSchemas` registers as `get_schema`).
 - `execute` code parameter: `code` (required, string). Nothing else.
 - `search` params: `query`, `tags`, `detail` (`brief|detailed|full`), `limit`. `get_schema` params:
@@ -99,7 +105,9 @@ return 'x'*200000          -> 200000 chars returned in full (no truncation by Fa
 ```
 
 A failed `call_tool` raises inside the sandbox, so a script can `try/except Exception as e` it
-(`str(e)` is the `call_tool('x') failed: ...` text). `print()` is accepted but its output is not returned.
+(`str(e)` is the `call_tool('x') failed: ...` text). `print()` is accepted and its output is NOT part of the `execute` result; Monty writes it to the host
+process's stdout (see Q7: harmless in a stdio proxy because `mcp` 2.3.0 diverts fd 1 to stderr, but it
+DOES hit real stdout when the server is run in process, e.g. `Client(FastMCP(...))`).
 The default sandbox limits are 30 s of sandbox time and 100 MB (`MontySandboxProvider` baseline);
 `wall_clock_timeout_secs` is `None` by default (host-callback time is not counted by the 30 s limit).
 
@@ -132,14 +140,57 @@ is rejected before reaching the backend. Configurable via `CodeMode(max_tool_cal
 
 ### 7. Stdio hygiene on Windows
 Scratch proxy: `python proxy_srv.py` ending in `proxy.run(transport="stdio", show_banner=False)`.
-A raw JSON-RPC session (`initialize`, `initialized`, `tools/list`, then stdin close) read every
-stdout line and `json.loads` succeeded for all: `stdout lines: 2 non-json: 0`, both with and without
-the banner. The banner and logs go to **stderr**. Option that silences the banner: `show_banner=False`
-on `run()` (default is on; env `FASTMCP_SHOW_SERVER_BANNER=false` also exists per settings docs, untested).
-The banner is about 1.6 KB of stderr. Even with `show_banner=False` one INFO line
+
+Part 1 (banner and logs). A raw JSON-RPC session (`initialize`, `initialized`, `tools/list`, then
+stdin close) read every stdout line and `json.loads` succeeded for all: `stdout lines: 2 non-json: 0`,
+with and without the banner. The banner and logs go to **stderr**. `show_banner=False` on `run()`
+silences the banner (default on; env `FASTMCP_SHOW_SERVER_BANNER=false` also exists per settings
+docs, untested). The banner is about 1.6 KB of stderr. Even with `show_banner=False` one INFO line
 (`Starting MCP server ...`, 162 bytes) still goes to stderr;
 `proxy.run(transport="stdio", show_banner=False, log_level="warning")` gives 0 bytes of stderr.
-The process exited cleanly when stdin closed.
+
+Part 2 (scripts that print; added after review, the Part 1 session never ran `execute`). Monty's
+`print()` writes to the host process's stdout, not into the result:
+- In process (no stdio transport): `Client(FastMCP("x", transforms=[CodeMode()]))` and `execute`
+  with `print('SANDBOXPRINT'); return 1` -> the line `SANDBOXPRINT` lands on the process's real stdout
+  (stderr empty). Confirms the reviewer's finding.
+- Raw stdio session against the proxy (`raw2.py`: `initialize`, `initialized`, `tools/list`,
+  `execute` with `print('SANDBOXPRINT')
+return 1`, `tools/list` again, close stdin), reading every
+  stdout line:
+  ```
+  execute resp: {"jsonrpc":"2.0","id":3,"result":{"content":[{"text":"1","type":"text"}],"isError":false}}
+  tools/list#2 ok: True
+  remaining stdout after close: b''          non-JSON stdout lines: 0
+  stderr contains SANDBOXPRINT: True
+  ```
+  So under a real stdio proxy the print is NOT in the protocol stream; it goes to stderr. Same with
+  a middleware doing `print("MWPRINT")` and `sys.stdout.write(...)`: 0 non-JSON stdout lines.
+- Why: `mcp` 2.3.0 `mcp.server.stdio.stdio_server()` (which `FastMCP.run(transport="stdio")` uses, see
+  `fastmcp/server/mixins/transport.py`) takes a private duplicate of fd 1 for the wire, then `dup2`s
+  fd 1 onto a duplicate of stderr and rebinds the Windows std handle
+  (`rebind_std_handle_to_fd`). While serving, any write to fd 1, Python-level or native (Monty is
+  native), reaches stderr. Fd 1 and fd 0 are restored on exit; stdin is pointed at the null device.
+- **Mitigation: none needed beyond using the stock `proxy.run(transport="stdio", ...)`**; it is
+  proven by the raw session above (0 non-JSON lines). Rules for the proxy entrypoint: (a) call
+  `proxy.run(transport="stdio", show_banner=False, log_level="warning")`, never a hand-rolled stdio loop
+  and never `stdio_server(stdin=..., stdout=...)` with explicit streams (those skip the diversion);
+  (b) write nothing to stdout before `run()` takes the transport. A module-level `print` is not
+  diverted yet and leaks into the protocol stream (tested with `print("JUNK-BEFORE-TRANSPORT")` at
+  import: the line reached stdout and the Python client logged a parse failure on it; in the raw session
+  it was flushed with the buffered output at exit). Do not add a
+  `sys.stdout = sys.stderr` swap: it is redundant and unnecessary once the transport owns fd 1.
+- What the client does with stray stdout: `fastmcp.Client` over `StdioTransport` against the
+  junk-at-import proxy logged `Failed to parse JSONRPC message from server` (a pydantic
+  ValidationError traceback on its stderr/log) and carried on; `execute` and `list_tools` still
+  succeeded. No error raised, no hang. So a leak would be noisy, not fatal, with this client; other
+  clients (ADK uses the `mcp` SDK client) were not tested.
+- Where Monty's print could be captured instead: `pydantic_monty` `feed_run`/`feed_start` accept a
+  `print_callback(stream, text)`; FastMCP's `MontySandboxProvider._run_monty` does not pass one,
+  so printing goes to stdout. Capturing it would need a custom `SandboxProvider` passed as
+  `CodeMode(sandbox_provider=...)`. Not needed, not tried.
+- Cosmetic: the printed text appears on the proxy's stderr, which ADK/mcp inherit unless `errlog` is set.
+  Either way, tell the model it cannot see print output (`return` the value) in the benchmark prompt.
 
 ### 8. Start-up time
 See the constants section: about 2.4 to 3.0 s to `initialize`, about 0.35 s more for the first
