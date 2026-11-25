@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import asdict, dataclass, field, fields
+from typing import Any
 
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
@@ -18,7 +19,19 @@ class CallUsage:
 
 @dataclass
 class RunRecord:
-    """The outcome and cost data of one task run."""
+    """The outcome and cost data of one task run.
+
+    ``tool_calls`` counts model-level function calls (for the code arm, each
+    ``run_python`` call is one). ``mcp_calls`` counts the MCP tool calls actually
+    executed (direct arm: one per function call; code arm: one per call the
+    script made through the Bridge); ``None`` in records written before it was
+    recorded. ``trace`` is what the run did, in order: one item per function
+    call (direct arm), per ``run_python`` script and per Bridge MCP call (code
+    arm); empty in older records.
+
+    Fields added after the first results were published have defaults, so
+    older JSONL lines still load.
+    """
 
     task_id: str
     arm: str
@@ -30,6 +43,8 @@ class RunRecord:
     answer_text: str
     correct: bool
     error: str | None
+    mcp_calls: int | None = None
+    trace: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Serialize to a JSON string."""
@@ -37,7 +52,9 @@ class RunRecord:
 
     @classmethod
     def from_json(cls, s: str) -> "RunRecord":
-        """Parse a JSON string made by ``to_json``.
+        """Parse a JSON string made by ``to_json`` (this or an older version).
+
+        Keys added in later versions are optional; unknown keys are rejected.
 
         Raises:
             ValueError: If the data has keys this version does not know.

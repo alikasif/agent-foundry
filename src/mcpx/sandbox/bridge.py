@@ -16,12 +16,15 @@ import asyncio
 import hmac
 import json
 import secrets
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 HOST = "127.0.0.1"
 # One request line may carry large arguments; asyncio's default line cap is 64 KiB.
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
+
+# Called with (server, tool, args) for every call the Bridge forwards.
+CallObserver = Callable[[str, str, dict[str, Any]], None]
 
 
 class ToolCaller(Protocol):
@@ -45,13 +48,30 @@ class Bridge:
     scopes in the task that enters it and must be entered and exited in that same
     task with ``async with``; the Bridge's per-client handler tasks only call
     ``call_tool`` on it, which is safe from any task.
+
+    ``on_call``, if given, is told about every request that passed validation
+    and was forwarded to a connection, before the call is made; it must not
+    raise. ``mcp_calls`` counts those forwarded calls (a tool that then reports
+    an error was still executed by the server; a refused request, such as one
+    with a bad token or an unknown server, is not counted).
     """
 
-    def __init__(self, connections: Mapping[str, ToolCaller]) -> None:
+    def __init__(
+        self,
+        connections: Mapping[str, ToolCaller],
+        on_call: CallObserver | None = None,
+    ) -> None:
         self._connections = dict(connections)
+        self._on_call = on_call
         self._token = ""
         self._server: asyncio.Server | None = None
         self._handlers: set[asyncio.Task[None]] = set()
+        self._mcp_calls = 0
+
+    @property
+    def mcp_calls(self) -> int:
+        """How many MCP tool calls this Bridge has forwarded so far."""
+        return self._mcp_calls
 
     async def start(self) -> tuple[str, int, str]:
         """Start listening and return ``(host, port, token)`` for the runtime.
@@ -109,9 +129,12 @@ class Bridge:
     async def _reply(self, line: bytes) -> dict[str, Any]:
         """Turn one raw request line into a reply object; never raises."""
         try:
-            caller, tool, args = self._parse(line)
+            server, caller, tool, args = self._parse(line)
         except _BadRequest as exc:
             return {"ok": False, "error": str(exc)}
+        self._mcp_calls += 1
+        if self._on_call is not None:
+            self._on_call(server, tool, args)
         try:
             result = await caller.call_tool(tool, args)
         except asyncio.CancelledError:
@@ -120,8 +143,8 @@ class Bridge:
             return {"ok": False, "error": str(exc) or type(exc).__name__}
         return {"ok": True, "result": result}
 
-    def _parse(self, line: bytes) -> tuple[ToolCaller, str, dict[str, Any]]:
-        """Validate a request line and return the caller, tool name and arguments."""
+    def _parse(self, line: bytes) -> tuple[str, ToolCaller, str, dict[str, Any]]:
+        """Validate a request line; return the server, caller, tool and arguments."""
         try:
             request = json.loads(line)
         except ValueError:
@@ -146,7 +169,7 @@ class Bridge:
         if caller is None:
             known = ", ".join(sorted(self._connections)) or "none"
             raise _BadRequest(f"unknown server {server!r}; available: {known}")
-        return caller, tool, args
+        return server, caller, tool, args
 
 
 def _encode(reply: dict[str, Any]) -> bytes:

@@ -16,6 +16,11 @@ listing its tools once (the list is then cached for the run). LiteLLM, which
 ADK imports lazily on the first model call, is imported with this module so
 that its multi-second import never lands inside the first run's clock.
 
+What a run did is kept in ``RunRecord.trace`` (function calls, ``run_python``
+scripts and the MCP calls those scripts made through the Bridge, each text cut
+to ``TRACE_ITEM_CHARS``, at most ``TRACE_MAX_ITEMS`` items) and the number of MCP
+tool calls actually executed in ``RunRecord.mcp_calls``.
+
 Ownership: the code arm's ``Connection`` is entered and exited with
 ``async with`` in the task that runs ``run_once``, because its anyio cancel
 scopes are task-affine. The direct arm's ``McpToolset`` owns its own server
@@ -23,12 +28,13 @@ process and is closed in ``finally``. Every teardown runs on error, timeout and
 cancellation.
 """
 
+import json
 import tempfile
 import time
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import anyio
 from google.adk.agents import LlmAgent
@@ -40,7 +46,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.genai import types
 
-from mcpx.agents.code import build_code_agent
+from mcpx.agents.code import RUN_PYTHON, build_code_agent
 from mcpx.agents.direct import build_direct_agent
 from mcpx.bench.tasks import Task, parse_answer
 from mcpx.bench.usage import RunRecord, UsageRecorder
@@ -63,17 +69,54 @@ APP_NAME = "mcpx"
 USER_ID = "bench"
 # Upper bound for each shielded teardown step, so cleanup can never hang a run.
 CLOSE_TIMEOUT_S = 30.0
+# Trace limits: characters kept of each item's text, items kept per run.
+TRACE_ITEM_CHARS = 4000
+TRACE_MAX_ITEMS = 200
+_CLIP_MARK = "...[truncated]"
+
+
+def _clip(text: str) -> str:
+    """Cut ``text`` to at most ``TRACE_ITEM_CHARS`` characters, marking the cut."""
+    if len(text) <= TRACE_ITEM_CHARS:
+        return text
+    return text[: TRACE_ITEM_CHARS - len(_CLIP_MARK)] + _CLIP_MARK
+
+
+def _args_text(args: Any) -> str:
+    """Render call arguments as compact JSON (``str`` if not serializable)."""
+    try:
+        return json.dumps(args, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(args)
 
 
 @dataclass
 class _Progress:
-    """What the run has produced so far; survives an exception mid-run."""
+    """What the run has produced so far; survives an exception mid-run.
+
+    ``code_tool`` names the code arm's tool, whose calls are traced as scripts;
+    ``None`` on the direct arm.
+    """
 
     tool_calls: int = 0
     started: float | None = None
     ended: float | None = None
     final_text: str = ""
     model_error: str | None = None
+    code_tool: str | None = None
+    mcp_calls: int | None = None
+    trace: list[dict[str, Any]] = field(default_factory=list)
+
+    def add_trace(self, item: dict[str, str]) -> None:
+        """Append one trace item (texts clipped) unless the trace is full."""
+        if len(self.trace) < TRACE_MAX_ITEMS:
+            self.trace.append({k: _clip(v) for k, v in item.items()})
+
+    def trace_mcp_call(self, server: str, tool: str, args: dict[str, Any]) -> None:
+        """Trace one MCP call the code arm's script made through the Bridge."""
+        self.add_trace(
+            {"kind": "mcp_call", "name": f"{server}.{tool}", "args": _args_text(args)}
+        )
 
     @property
     def wall_s(self) -> float:
@@ -122,7 +165,19 @@ def _record(event: Event, progress: _Progress) -> None:
     """Fold one ADK event into ``progress``: tool calls, errors, final text."""
     if event.partial:  # streamed chunks repeat in the final aggregated event
         return
-    progress.tool_calls += len(event.get_function_calls())
+    for call in event.get_function_calls():
+        progress.tool_calls += 1
+        args = call.args or {}
+        if progress.code_tool is not None and call.name == progress.code_tool:
+            progress.add_trace({"kind": RUN_PYTHON, "code": str(args.get("code", ""))})
+        else:
+            progress.add_trace(
+                {
+                    "kind": "function_call",
+                    "name": call.name or "",
+                    "args": _args_text(args),
+                }
+            )
     if event.error_code or event.error_message:
         progress.model_error = f"model error {event.error_code}: {event.error_message}"
     if event.is_final_response():
@@ -175,6 +230,8 @@ async def _run_direct(
             await toolset.get_tools()  # start the server before the clock
         await _drive(agent, task, max_llm_calls, progress)
     finally:
+        # Each function call of the direct arm is one MCP tool call.
+        progress.mcp_calls = progress.tool_calls
         with anyio.CancelScope(shield=True), anyio.move_on_after(CLOSE_TIMEOUT_S):
             for toolset in toolsets:
                 await toolset.close()
@@ -195,13 +252,15 @@ async def _run_code(
         workspace = Path(tmp)
         async with Connection(get_target(target_name)) as conn:
             generate_workspace(target_name, await conn.list_tools(), workspace)
-            bridge = Bridge({target_name: conn})
+            bridge = Bridge({target_name: conn}, on_call=progress.trace_mcp_call)
+            progress.code_tool = RUN_PYTHON
             try:
                 addr = await bridge.start()
                 runtime = Runtime(workspace, addr)
                 agent = build_code_agent(runtime, target_name, model, recorder)
                 await _drive(agent, task, max_llm_calls, progress)
             finally:
+                progress.mcp_calls = bridge.mcp_calls
                 with anyio.CancelScope(shield=True):
                     with anyio.move_on_after(CLOSE_TIMEOUT_S):
                         await bridge.stop()
@@ -259,6 +318,8 @@ async def run_once(
         run_index=run_index,
         calls=recorder.calls,
         tool_calls=progress.tool_calls,
+        mcp_calls=progress.mcp_calls,
+        trace=progress.trace,
         wall_s=progress.wall_s,
         answer_text=progress.final_text,
         correct=correct,

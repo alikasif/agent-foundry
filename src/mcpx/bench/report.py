@@ -29,6 +29,7 @@ _COLUMNS = (
     "cached tokens",
     "model calls",
     "tool calls",
+    "MCP calls",
     "wall s",
     "cost (list)",
     "cost (with reported cache reads)",
@@ -116,6 +117,7 @@ def _group_row(key: tuple[str, str, str], group: list[RunRecord]) -> Row:
         "cached_tokens": lambda r: _total(r, "cached_tokens"),
         "model_calls": lambda r: len(r.calls),
         "tool_calls": lambda r: r.tool_calls,
+        "mcp_calls": lambda r: r.mcp_calls,
         "wall_s": lambda r: r.wall_s,
         "cost_list": lambda r: _cost_list(prompt_total(r), output_total(r), prices),
         "cost_cached": lambda r: _cost_cached(r, prices),
@@ -149,8 +151,10 @@ def summarize(records: list[RunRecord]) -> list[Row]:
       cached-token count.
     * ``prompt_tokens``, ``output_tokens``, ``cached_tokens``: per-run totals
       over the run's model calls.
-    * ``model_calls``: number of model calls per run; ``tool_calls`` and
-      ``wall_s``: the record's values.
+    * ``model_calls``: number of model calls per run; ``tool_calls`` (model-level
+      function calls), ``mcp_calls`` (MCP tool calls actually executed;
+      ``None`` for records written before it was recorded) and ``wall_s``: the
+      record's values.
     * ``cost_list``: USD per run, all prompt tokens at the input price plus
       output tokens at the output price.
     * ``cost_cached``: USD per run, ``(prompt - cached)`` tokens at the input
@@ -215,6 +219,7 @@ def _table_row(row: Row) -> str:
         _cell(row["cached_tokens"], tokens),
         _cell(row["model_calls"], tokens),
         _cell(row["tool_calls"], tokens),
+        _cell(row["mcp_calls"], tokens),
         _cell(row["wall_s"], lambda v: f"{v:.1f}"),
         _cell(row["cost_list"], _money),
         _cell(row["cost_cached"], _money),
@@ -277,7 +282,10 @@ def render_markdown(rows: list[Row]) -> str:
     lines.append(
         "Tokens are those reported by the provider; costs use `prices.toml` "
         "(USD per million tokens). `cost (with reported cache reads)` equals "
-        "`cost (list)` for any run where a call lacked cached-token counts."
+        "`cost (list)` for any run where a call lacked cached-token counts. "
+        "`tool calls` are model-level function calls (one per `run_python` call "
+        "in the code arm); `MCP calls` are the MCP tool calls actually executed "
+        "(n/a for records written before they were counted)."
     )
     if uncached:
         lines += ["", f"Note ({', '.join(uncached)}): {NO_CACHE_NOTE}."]

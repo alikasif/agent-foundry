@@ -190,3 +190,24 @@ async def test_large_reply_round_trips_through_real_rpc_client(tmp_path: Path) -
     assert r.exit_code == 0, r.stderr
     assert len(BIG) >= 500_000
     assert r.stdout.split() == [str(len(BIG)), hashlib.sha256(BIG.encode()).hexdigest()]
+
+
+async def test_bridge_counts_and_reports_forwarded_calls() -> None:
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+
+    def observe(server: str, tool: str, args: dict[str, Any]) -> None:
+        seen.append((server, tool, args))
+
+    bridge = Bridge({"demo": Stub()}, on_call=observe)
+    assert bridge.mcp_calls == 0
+    addr = await bridge.start()
+    token = addr[2]
+    try:
+        await _exchange(addr, _request(token, "demo", "echo", {"x": 1}))
+        await _exchange(addr, _request(token, "demo", "fail", {}))  # still executed
+        await _exchange(addr, _request("wrong", "demo", "echo", {}))  # refused
+        await _exchange(addr, _request(token, "nope", "echo", {}))  # refused
+    finally:
+        await bridge.stop()
+    assert bridge.mcp_calls == 2
+    assert seen == [("demo", "echo", {"x": 1}), ("demo", "fail", {})]

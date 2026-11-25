@@ -259,3 +259,25 @@ def test_runtime_rejects_bad_limits(tmp_path: Path) -> None:
         Runtime(tmp_path, ("127.0.0.1", 1, "t"), timeout_s=0)
     with pytest.raises(ValueError):
         Runtime(tmp_path, ("127.0.0.1", 1, "t"), max_output_chars=0)
+
+
+async def test_agent_code_cannot_import_the_harness(tmp_path: Path) -> None:
+    # The child starts without ``site``: neither the editable ``mcpx`` (and so
+    # the ground truth) nor any other venv package is importable, while the
+    # standard library and the generated wrappers still are.
+    code = (
+        "import json, sys\n"
+        "for name in ('mcpx', 'psutil'):\n"
+        "    try:\n"
+        "        __import__(name)\n"
+        "    except ImportError:\n"
+        "        print(name, 'blocked')\n"
+        "    else:\n"
+        "        print(name, 'IMPORTED')\n"
+        "from servers.ticketdesk import count_tickets\n"
+        "print(json.dumps(count_tickets()))"
+    )
+    async with ticketdesk_runtime(tmp_path) as rt:
+        r = await rt.run(code)
+    assert r.exit_code == 0, r.stderr
+    assert r.stdout.split() == ["mcpx", "blocked", "psutil", "blocked", "3000"]

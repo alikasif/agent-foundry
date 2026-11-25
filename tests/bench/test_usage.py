@@ -1,6 +1,7 @@
 """Tests for per-call usage recording and the run record."""
 
 import json
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -113,3 +114,40 @@ def test_benchmark_model_price_is_read_from_toml() -> None:
         output_per_mtok=1.2,
         cache_read_per_mtok=0.006,
     )
+
+
+OLD_LINE = (
+    '{"task_id": "A", "arm": "direct", "model": "m", "run_index": 0, '
+    '"calls": [{"prompt_tokens": 6636, "output_tokens": 52, "cached_tokens": 0}], '
+    '"tool_calls": 1, "wall_s": 4.0, "answer_text": "ANSWER: 1", '
+    '"correct": true, "error": null}'
+)
+
+
+def test_old_records_without_new_fields_still_load() -> None:
+    r = RunRecord.from_json(OLD_LINE)
+    assert r.tool_calls == 1 and r.calls == [CallUsage(6636, 52, 0)]
+    assert r.mcp_calls is None
+    assert r.trace == []
+
+
+def test_runrecord_round_trips_trace_and_mcp_calls() -> None:
+    r = _record()
+    r.mcp_calls = 7
+    r.trace = [
+        {"kind": "run_python", "code": "print(1)"},
+        {"kind": "mcp_call", "name": "t.count_tickets", "args": "{}"},
+    ]
+    line = r.to_json()
+    assert '"trace"' in line and '"mcp_calls": 7' in line
+    assert RunRecord.from_json(line) == r
+
+
+def test_committed_result_files_still_load() -> None:
+    results = Path(__file__).resolve().parents[2] / "docs" / "results"
+    files = sorted(results.glob("*.jsonl"))
+    assert files
+    for path in files:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        records = [RunRecord.from_json(line) for line in lines if line.strip()]
+        assert records and all(r.trace == [] for r in records)

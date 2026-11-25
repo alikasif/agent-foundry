@@ -8,6 +8,9 @@ from mcpx.bench.usage import UsageRecorder
 from mcpx.llm.models import ModelConfig
 from mcpx.sandbox.runtime import Runtime
 
+# The code arm's only tool; its name is the function's name.
+RUN_PYTHON = "run_python"
+
 
 def build_code_agent(
     runtime: Runtime, target_name: str, model: ModelConfig, recorder: UsageRecorder

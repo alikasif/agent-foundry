@@ -10,6 +10,9 @@ and write any file that user can, open network connections and start programs.
 What it does provide: a time limit, an output cap, cleanup of every process it
 started, and an environment built from a small allowlist, so secrets in the
 parent's environment (``OPENROUTER_API_KEY`` and the like) never reach the code.
+The child also starts with ``-S`` (no ``site`` module), so the virtualenv's
+packages, including the editable ``mcpx`` with the tasks' ground truth, are not
+importable; the generated wrappers need only the standard library.
 """
 
 import asyncio
@@ -196,6 +199,7 @@ class Runtime:
         """Start the child, capture its output and enforce the time limit."""
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
+            "-S",  # no site-packages: agent code must not import the harness
             str(script),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,

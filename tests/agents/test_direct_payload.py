@@ -3,33 +3,28 @@
 ADK's ``McpTool`` returns the whole dumped MCP result (``content``,
 ``structuredContent``, ``isError``); without ``structured_result_only`` the model
 would read every result about twice. These tests run no real model: a scripted
-``BaseLlm`` asks for one tool call and records the request ADK sends next.
+``BaseLlm`` (``tests.agents.scripted``) asks for one tool call and records the request ADK sends next.
 """
 
 import json
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
 from typing import Any, cast
 
 import anyio
 import pytest
-from google.adk.models.base_llm import BaseLlm
 from google.adk.models.lite_llm import _safe_json_serialize
 from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
-from pydantic import Field
 
 from mcpx.agents.direct import build_direct_agent, structured_result_only
 from mcpx.bench.usage import UsageRecorder
 from mcpx.client.connection import Connection
-from mcpx.llm.models import ModelConfig
 from mcpx.targets import get_target
+from tests.agents.scripted import ScriptedLlm, ScriptedModel, call, text
 
 pytestmark = pytest.mark.anyio
 
@@ -77,36 +72,6 @@ def test_callback_leaves_text_only_results_untouched() -> None:
     assert structured_result_only(_TOOL, {}, _CTX, text_only) is None
 
 
-class _ScriptedLlm(BaseLlm):
-    """Calls ``list_tickets`` once, then answers; records every request."""
-
-    requests: list[LlmRequest] = Field(default_factory=list)
-
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        self.requests.append(llm_request)
-        if len(self.requests) == 1:
-            part = types.Part(
-                function_call=types.FunctionCall(
-                    id="call-1", name="list_tickets", args=CALL_ARGS
-                )
-            )
-        else:
-            part = types.Part(text="ANSWER: 1")
-        yield LlmResponse(content=types.Content(role="model", parts=[part]))
-
-
-@dataclass(frozen=True)
-class _ScriptedModel(ModelConfig):
-    """A ModelConfig that hands ADK an already built scripted model."""
-
-    llm: Any = None
-
-    def to_llm(self) -> Any:
-        return self.llm
-
-
 def _function_response(request: LlmRequest) -> Any:
     """The (only) function response in the request's history."""
     found = [
@@ -126,9 +91,11 @@ async def _structured() -> Any:
 
 
 async def test_model_receives_the_structured_result_only() -> None:
-    llm = _ScriptedLlm(model="scripted")
+    llm = ScriptedLlm(
+        model="scripted", replies=[[call("list_tickets", **CALL_ARGS)], [text("ok")]]
+    )
     agent = build_direct_agent(
-        get_target("ticketdesk"), _ScriptedModel("x/scripted", llm=llm), UsageRecorder()
+        get_target("ticketdesk"), ScriptedModel("x/scripted", llm=llm), UsageRecorder()
     )
     (toolset,) = agent.tools
     assert isinstance(toolset, McpToolset)

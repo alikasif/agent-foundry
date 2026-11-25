@@ -17,6 +17,7 @@ def rec(
     run_index: int = 0,
     calls: list[tuple[int | None, int | None, int | None]] | None = None,
     tool_calls: int = 1,
+    mcp_calls: int | None = None,
     wall_s: float = 1.0,
     correct: bool = True,
     error: str | None = None,
@@ -34,6 +35,7 @@ def rec(
         answer_text="",
         correct=correct,
         error=error,
+        mcp_calls=mcp_calls,
     )
 
 
@@ -180,7 +182,7 @@ def test_render_markdown_snapshot_substrings() -> None:
     assert f"### {MODEL}" in md
     header = (
         "| task | arm | correct | prompt tokens | output tokens | cached tokens "
-        "| model calls | tool calls | wall s | cost (list) "
+        "| model calls | tool calls | MCP calls | wall s | cost (list) "
         "| cost (with reported cache reads) |"
     )
     assert header in md
@@ -219,3 +221,19 @@ def test_ratio_refused_when_a_median_is_missing_or_an_arm_is_absent() -> None:
     assert "% of direct's prompt tokens" not in md
     only_one = render_markdown(summarize(prompts("A", "direct", [100])))
     assert "not comparable: only the direct arm was run" in only_one
+
+
+def test_mcp_calls_column_shows_executed_calls_and_na_for_old_records() -> None:
+    records = [
+        rec(arm="code", tool_calls=2, mcp_calls=40),
+        rec(arm="code", tool_calls=2, mcp_calls=60, run_index=1),
+    ]
+    row = summarize(records)[0]
+    assert row["tool_calls"] == {"median": 2, "min": 2, "max": 2}
+    assert row["mcp_calls"] == {"median": 50.0, "min": 40, "max": 60}
+    md = render_markdown([row])
+    assert "| 2 [2-2] | 50 [40-60] |" in md
+    assert "`MCP calls` are the MCP tool calls actually executed" in md
+    old = summarize([rec(tool_calls=3)])[0]
+    assert old["mcp_calls"] is None
+    assert "| 3 [3-3] | n/a |" in render_markdown([old])
