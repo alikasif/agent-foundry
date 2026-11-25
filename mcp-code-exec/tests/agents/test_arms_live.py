@@ -64,3 +64,14 @@ async def test_real_runs_record_a_trace_and_mcp_calls() -> None:
     scripts = [item for item in code.trace if item.get("kind") == "run_python"]
     assert scripts and all(item["code"].strip() for item in scripts), code.trace
     assert any("servers" in item["code"] for item in scripts), code.trace
+
+
+async def test_fastmcp_arm_answers_task_a_and_counts_backend_calls() -> None:
+    rec = await _run_task_a("fastmcp")
+    assert rec.error is None, rec
+    assert rec.correct, rec
+    # Backend calls the proxy logged, not the model's own meta-tool calls
+    # (search, get_schema, execute); the other arms make 1 to 2 on task A.
+    assert rec.mcp_calls is not None and 1 <= rec.mcp_calls <= 3, rec
+    executes = [item for item in rec.trace if item.get("kind") == "execute"]
+    assert executes and all(item["code"].strip() for item in executes), rec.trace
