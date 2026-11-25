@@ -1,6 +1,6 @@
 """Run one task once on one arm and return its ``RunRecord``.
 
-Both arms are driven the same way: one ADK ``Runner`` over an in-memory session,
+All arms are driven the same way: one ADK ``Runner`` over an in-memory session,
 the same ``RunConfig(max_llm_calls=...)`` cap and the same overall
 ``run_timeout_s`` deadline (an anyio cancel scope, as ``fail_after`` sets, that
 also covers set-up and teardown). Anything that goes wrong (model error, call
@@ -11,20 +11,23 @@ Timing fairness: ``wall_s`` runs from just before the first ``runner.run_async``
 call to the last event received (or to the failure), for both arms. MCP server
 start-up, tool discovery and workspace generation happen before the clock
 starts in both arms: the code arm opens its ``Connection``, generates the
-workspace and starts the ``Bridge`` first; the direct arm warms its toolset by
-listing its tools once (the list is then cached for the run). LiteLLM, which
+workspace and starts the ``Bridge`` first; the direct and fastmcp arms warm
+their toolset by listing its tools once (the list is then cached for the run). LiteLLM, which
 ADK imports lazily on the first model call, is imported with this module so
 that its multi-second import never lands inside the first run's clock.
 
 What a run did is kept in ``RunRecord.trace`` (function calls, ``run_python``
 scripts and the MCP calls those scripts made through the Bridge, each text cut
 to ``TRACE_ITEM_CHARS``, at most ``TRACE_MAX_ITEMS`` items) and the number of MCP
-tool calls actually executed in ``RunRecord.mcp_calls``.
+tool calls actually executed in ``RunRecord.mcp_calls``. On the fastmcp arm the
+model's ``execute`` scripts are traced like ``run_python`` scripts, and the
+backend calls come from the proxy's call log, read after the toolset is closed.
 
 Ownership: the code arm's ``Connection`` is entered and exited with
 ``async with`` in the task that runs ``run_once``, because its anyio cancel
 scopes are task-affine. The direct arm's ``McpToolset`` owns its own server
-process and is closed in ``finally``. Every teardown runs on error, timeout and
+process and is closed in ``finally``; so is the fastmcp arm's, whose proxy
+process (and the backend it spawns) goes away with it. Every teardown runs on error, timeout and
 cancellation.
 """
 
@@ -47,18 +50,20 @@ from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.genai import types
 
 from mcpx.agents.code import RUN_PYTHON, build_code_agent
+from mcpx.agents.codemode import build_codemode_agent
 from mcpx.agents.direct import build_direct_agent
 from mcpx.agents.redact import env_secrets, redact
 from mcpx.bench.tasks import Task, parse_answer
 from mcpx.bench.usage import RunRecord, UsageRecorder
 from mcpx.client.connection import Connection
 from mcpx.codegen.generator import generate_workspace
+from mcpx.codemode.protocol import EXECUTE_CODE_PARAM, EXECUTE_TOOL, read_call_log
 from mcpx.llm.models import ModelConfig
 from mcpx.sandbox.bridge import Bridge
 from mcpx.sandbox.runtime import Runtime
 from mcpx.targets import get_target
 
-Arm = Literal["direct", "code"]
+Arm = Literal["direct", "code", "fastmcp"]
 
 
 # ADK imports LiteLLM lazily on the first model call, and that import takes
@@ -101,8 +106,9 @@ def _args_text(args: Any) -> str:
 class _Progress:
     """What the run has produced so far; survives an exception mid-run.
 
-    ``code_tool`` names the code arm's tool, whose calls are traced as scripts;
-    ``None`` on the direct arm.
+    ``code_tool`` names the arm's code tool, whose calls are traced as scripts
+    (kind = the tool's name, text = the argument named ``code_param``); ``None``
+    on the direct arm.
     """
 
     tool_calls: int = 0
@@ -111,6 +117,7 @@ class _Progress:
     final_text: str = ""
     model_error: str | None = None
     code_tool: str | None = None
+    code_param: str = "code"
     mcp_calls: int | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
 
@@ -180,7 +187,8 @@ def _record(event: Event, progress: _Progress) -> None:
         progress.tool_calls += 1
         args = call.args or {}
         if progress.code_tool is not None and call.name == progress.code_tool:
-            progress.add_trace({"kind": RUN_PYTHON, "code": str(args.get("code", ""))})
+            script = str(args.get(progress.code_param, ""))
+            progress.add_trace({"kind": progress.code_tool, "code": script})
         else:
             progress.add_trace(
                 {
@@ -277,6 +285,48 @@ async def _run_code(
                         await bridge.stop()
 
 
+def fold_call_log(progress: _Progress, target_name: str, call_log: Path) -> None:
+    """Fold the proxy's call log into ``progress``: one backend call per line.
+
+    Sets ``mcp_calls`` to the number of valid entries and traces each as the
+    Bridge's calls are traced. A missing, empty or half-written log gives the
+    entries that are readable (possibly none), never an error.
+    """
+    entries = read_call_log(call_log)
+    progress.mcp_calls = len(entries)
+    for entry in entries:
+        progress.trace_mcp_call(target_name, entry.tool, entry.args)
+
+
+async def _run_fastmcp(
+    target_name: str,
+    task: Task,
+    model: ModelConfig,
+    recorder: UsageRecorder,
+    max_llm_calls: int,
+    progress: _Progress,
+) -> None:
+    """Fastmcp arm: warm the proxy toolset, run, close it, then read its call log."""
+    progress.code_tool = EXECUTE_TOOL
+    progress.code_param = EXECUTE_CODE_PARAM
+    with tempfile.TemporaryDirectory(
+        prefix="mcpx-codemode-", ignore_cleanup_errors=True
+    ) as tmp:
+        call_log = Path(tmp) / "calls.jsonl"  # fresh per run: nothing truncates it
+        agent = build_codemode_agent(target_name, call_log, model, recorder)
+        toolsets = [t for t in agent.tools if isinstance(t, McpToolset)]
+        try:
+            for toolset in toolsets:
+                await toolset.get_tools()  # start the proxy before the clock
+            await _drive(agent, task, max_llm_calls, progress)
+        finally:
+            with anyio.CancelScope(shield=True), anyio.move_on_after(CLOSE_TIMEOUT_S):
+                for toolset in toolsets:
+                    await toolset.close()
+            # Once the proxy is gone: mcp_calls counts backend calls executed.
+            fold_call_log(progress, target_name, call_log)
+
+
 async def run_once(
     arm: Arm,
     target_name: str,
@@ -314,8 +364,14 @@ async def run_once(
                 await _run_code(
                     target_name, task, model, recorder, max_llm_calls, progress
                 )
+            elif arm == "fastmcp":
+                await _run_fastmcp(
+                    target_name, task, model, recorder, max_llm_calls, progress
+                )
             else:
-                raise ValueError(f"unknown arm {arm!r}; expected 'direct' or 'code'")
+                raise ValueError(
+                    f"unknown arm {arm!r}; expected 'direct', 'code' or 'fastmcp'"
+                )
     except Exception as exc:  # noqa: BLE001 - a failed run is data, not a crash
         error = describe_error(exc)
     if deadline.cancelled_caught:

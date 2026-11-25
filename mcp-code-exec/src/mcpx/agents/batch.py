@@ -5,6 +5,9 @@ index, then arm, so the arms of one task take turns and any drift in provider
 latency over the batch hits both arms equally.
 """
 
+import importlib.metadata
+import inspect
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -15,7 +18,7 @@ from mcpx.bench.usage import RunRecord
 from mcpx.llm.models import ModelConfig
 from mcpx.targets import get_tasks
 
-ARMS = ("direct", "code")
+ARMS = ("direct", "code", "fastmcp")
 
 
 def _resolve_tasks(target_name: str, task_ids: list[str]) -> list[Task]:
@@ -53,13 +56,36 @@ def _check_inputs(arms: list[str], runs: int) -> None:
         raise ValueError(f"runs must be at least 1, got {runs}")
 
 
-def run_settings(model: ModelConfig, max_llm_calls: int, run_timeout_s: float) -> str:
+def _fastmcp_settings() -> dict[str, str]:
+    """The fastmcp arm's own facts: installed version and Code Mode's call cap.
+
+    CodeMode is imported here, not at module level, so that importing this
+    module stays light for batches without the arm.
+    """
+    from fastmcp.experimental.transforms.code_mode import CodeMode
+
+    cap = inspect.signature(CodeMode).parameters["max_tool_calls"].default
+    return {
+        "fastmcp": importlib.metadata.version("fastmcp"),
+        "max_tool_calls": str(cap),
+    }
+
+
+def run_settings(
+    model: ModelConfig,
+    max_llm_calls: int,
+    run_timeout_s: float,
+    arms: Sequence[str] = (),
+) -> str:
     """Describe a batch's configuration as a stable ``key=value;...`` string.
 
     Stored in every ``RunRecord.settings`` so the report never merges runs made
     with different settings. ``provider`` is the comma-joined pinned provider
     order, or ``default`` when OpenRouter may route freely; ``reasoning`` is
-    ``default`` when no effort is sent.
+    ``default`` when no effort is sent. When ``arms`` includes ``fastmcp`` the
+    string also names the installed FastMCP version and the Code Mode call cap
+    in effect, so every record of such a batch (all arms) carries the same
+    settings; otherwise the string is the same as without ``arms``.
     """
     parts = {
         "reasoning": model.reasoning_effort or "default",
@@ -68,6 +94,8 @@ def run_settings(model: ModelConfig, max_llm_calls: int, run_timeout_s: float) -
         "run_timeout_s": f"{run_timeout_s:g}",
         "temperature": f"{model.temperature:g}",
     }
+    if "fastmcp" in arms:
+        parts.update(_fastmcp_settings())
     return ";".join(f"{key}={value}" for key, value in parts.items())
 
 
@@ -105,7 +133,8 @@ async def run_batch(
 ) -> list[RunRecord]:
     """Run every (task, run index, arm) once, appending a JSON line per run.
 
-    Every record carries ``run_settings(model, max_llm_calls, run_timeout_s)``.
+    Every record carries ``run_settings(model, max_llm_calls, run_timeout_s,
+    arms)``.
     Each finished record is appended to ``out_path`` immediately (parent
     directories are created), so a crash loses at most the run in progress, and
     one progress line is printed. Run indexes start at 0.
@@ -117,7 +146,7 @@ async def run_batch(
     _check_inputs(arms, runs)
     tasks = _resolve_tasks(target_name, task_ids)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    settings = run_settings(model, max_llm_calls, run_timeout_s)
+    settings = run_settings(model, max_llm_calls, run_timeout_s, arms)
     records: list[RunRecord] = []
     for task in tasks:
         for run_index in range(runs):

@@ -1,13 +1,18 @@
 """Offline tests for ``run_batch``: the model is an unreachable local port."""
 
+import importlib.metadata
+import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from fastmcp.experimental.transforms.code_mode import CodeMode
 
-from mcpx.agents.batch import run_batch, run_settings
+from mcpx.agents.batch import ARMS, run_batch, run_settings
+from mcpx.agents.run import Arm, run_once
 from mcpx.bench.usage import RunRecord
 from mcpx.llm.models import ModelConfig
+from mcpx.targets import get_tasks
 from tests.agents.helpers import UnreachableModel, closed_port, python_children
 
 pytestmark = pytest.mark.anyio
@@ -132,6 +137,47 @@ def test_run_settings_is_stable_and_names_every_knob() -> None:
         "temperature=0.5"
     )
     assert run_settings(model, 40, 600.0) == run_settings(model, 40, 600.0)
+
+
+def test_arms_include_fastmcp() -> None:
+    assert ARMS == ("direct", "code", "fastmcp")
+
+
+async def test_unknown_arm_message_lists_fastmcp(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="fastmcp"):
+        await run_batch(
+            "ticketdesk",
+            ["nope"],
+            ["A"],
+            _model(),
+            1,
+            tmp_path / "o.jsonl",
+            run_timeout_s=60.0,
+            max_llm_calls=5,
+        )
+    task = get_tasks("ticketdesk")[0]
+    record = await run_once(cast(Arm, "nope"), "ticketdesk", task, _model(), 0)
+    assert record.error is not None
+    for arm in ARMS:
+        assert arm in record.error
+
+
+def test_settings_name_fastmcp_version_and_call_cap_when_in_batch() -> None:
+    cap = inspect.signature(CodeMode).parameters["max_tool_calls"].default
+    base = run_settings(ModelConfig("m/x"), 40, 600.0)
+    settings = run_settings(
+        ModelConfig("m/x"), 40, 600.0, arms=("direct", "code", "fastmcp")
+    )
+    version = importlib.metadata.version("fastmcp")
+    assert settings == f"{base};fastmcp={version};max_tool_calls={cap}"
+    assert f"max_tool_calls={cap}" in settings and cap == 50
+
+
+def test_settings_unchanged_when_fastmcp_not_in_batch() -> None:
+    model = ModelConfig("m/x")
+    base = run_settings(model, 40, 600.0)
+    assert run_settings(model, 40, 600.0, arms=("direct", "code")) == base
+    assert "fastmcp" not in base
 
 
 FAKE_KEY = "sk-or-v1-FAKE-KEY-0123456789"

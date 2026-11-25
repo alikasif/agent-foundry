@@ -18,6 +18,7 @@ from mcpx.agents.run import TRACE_ITEM_CHARS, TRACE_MAX_ITEMS, _Progress, _recor
 from mcpx.bench.usage import CallUsage, RunRecord
 from mcpx.client.connection import Connection
 from mcpx.codegen.generator import generate_workspace
+from mcpx.codemode.protocol import EXECUTE_CODE_PARAM, EXECUTE_TOOL
 from mcpx.sandbox.bridge import Bridge
 from mcpx.sandbox.runtime import Runtime
 from mcpx.targets import get_target
@@ -60,6 +61,29 @@ def test_code_events_trace_the_script_text() -> None:
     _record(_calls((RUN_PYTHON, {"code": SCRIPT})), progress)
     assert progress.tool_calls == 1
     assert progress.trace == [{"kind": RUN_PYTHON, "code": SCRIPT}]
+
+
+def test_execute_calls_are_traced_as_code() -> None:
+    progress = _Progress(code_tool=EXECUTE_TOOL, code_param=EXECUTE_CODE_PARAM)
+    _record(_calls((EXECUTE_TOOL, {EXECUTE_CODE_PARAM: "x = 1"})), progress)
+    _record(_calls(("search", {"query": "ticket"})), progress)
+    _record(_calls(("get_schema", {"tools": ["get_ticket"]})), progress)
+    assert progress.tool_calls == 3
+    assert progress.trace == [
+        {"kind": "execute", "code": "x = 1"},
+        {"kind": "function_call", "name": "search", "args": '{"query":"ticket"}'},
+        {
+            "kind": "function_call",
+            "name": "get_schema",
+            "args": '{"tools":["get_ticket"]}',
+        },
+    ]
+
+
+def test_run_python_trace_is_unchanged() -> None:
+    progress = _Progress(code_tool=RUN_PYTHON)
+    _record(_calls((RUN_PYTHON, {"code": "print(1)"})), progress)
+    assert progress.trace == [{"kind": "run_python", "code": "print(1)"}]
 
 
 def test_partial_events_are_not_traced() -> None:
