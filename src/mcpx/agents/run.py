@@ -12,7 +12,9 @@ call to the last event received (or to the failure), for both arms. MCP server
 start-up, tool discovery and workspace generation happen before the clock
 starts in both arms: the code arm opens its ``Connection``, generates the
 workspace and starts the ``Bridge`` first; the direct arm warms its toolset by
-listing its tools once (the list is then cached for the run).
+listing its tools once (the list is then cached for the run). LiteLLM, which
+ADK imports lazily on the first model call, is imported with this module so
+that its multi-second import never lands inside the first run's clock.
 
 Ownership: the code arm's ``Connection`` is entered and exited with
 ``async with`` in the task that runs ``run_once``, because its anyio cancel
@@ -32,6 +34,7 @@ import anyio
 from google.adk.agents import LlmAgent
 from google.adk.agents.run_config import RunConfig
 from google.adk.events import Event
+from google.adk.models import lite_llm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
@@ -49,6 +52,12 @@ from mcpx.sandbox.runtime import Runtime
 from mcpx.targets import get_target
 
 Arm = Literal["direct", "code"]
+
+
+# ADK imports LiteLLM lazily on the first model call, and that import takes
+# seconds. Do it now, through ADK's own loader (which also stops LiteLLM from
+# autoloading ``.env``), so the cost never lands inside a run's ``wall_s``.
+lite_llm._ensure_litellm_imported()  # pyrefly: ignore[missing-attribute]
 
 APP_NAME = "mcpx"
 USER_ID = "bench"
