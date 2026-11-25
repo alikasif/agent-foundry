@@ -9,6 +9,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 
+from mcpx.bench.report import render_markdown, summarize
 from mcpx.bench.usage import CallUsage, RunRecord, UsageRecorder
 from mcpx.llm.pricing import Prices, price_for
 
@@ -172,3 +173,7 @@ def test_committed_result_files_still_load() -> None:
         else:
             # v1 and v2 predate traces and settings: they load with the defaults.
             assert all(r.trace == [] and r.settings == "" for r in records), path.name
+        # Old results render with the two-arm wording, without error.
+        md = render_markdown(summarize(records))
+        assert "**Code arm vs direct arm** (median total prompt tokens)" in md
+        assert "Code arms" not in md and "fastmcp" not in md, path.name

@@ -22,7 +22,8 @@ from mcpx.llm.pricing import Prices, price_for
 Row = dict[str, Any]
 Stat = dict[str, float | int]
 
-_ARM_ORDER = {"direct": 0, "code": 1}
+_ARM_ORDER = {"direct": 0, "code": 1, "fastmcp": 2}
+_COMPARED_ARMS = ("code", "fastmcp")
 _COLUMNS = (
     "task",
     "arm",
@@ -44,6 +45,11 @@ USAGE_NOTE = (
     "in the `cached tokens` column may mean the provider did not report it, and "
     "`reasoning tokens` sums only the calls that reported a count (n/a when none "
     "did)."
+)
+FASTMCP_NOTE = (
+    " In the fastmcp arm, `tool calls` are the model's own meta-tool calls "
+    "(search, get_schema, execute) and `MCP calls` are the backend calls the "
+    "proxy logged."
 )
 NOT_RECORDED = "(not recorded)"
 GroupKey = tuple[str, str, str, str]
@@ -163,7 +169,7 @@ def summarize(records: list[RunRecord]) -> list[Row]:
 
     Token counts are the provider's: ``prompt_tokens`` is assumed OpenAI-style,
     that is, it INCLUDES the cached tokens. Rows are sorted by model, settings,
-    task id, then arm (``direct`` before ``code``).
+    task id, then arm (``direct``, ``code``, ``fastmcp``).
 
     Each row has these keys:
 
@@ -255,21 +261,39 @@ def _table_row(row: Row) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
-def _ratio_line(task_id: str, direct: Row | None, code: Row | None) -> str:
-    """One 'code vs direct' line for a task, or the reason it is refused."""
-    if direct is None or code is None:
-        ran = "direct" if direct is not None else "code"
+def _ratio_line(
+    task_id: str, direct: Row | None, other: Row | None, arm: str = "code"
+) -> str:
+    """One 'arm vs direct' line for a task, or the reason it is refused.
+
+    Only the two rows given are checked: a refusal for one arm says nothing
+    about another arm's comparison.
+    """
+    if direct is None or other is None:
+        ran = "direct" if direct is not None else arm
         return f"{task_id}: not comparable: only the {ran} arm was run"
-    if any(r["correct_runs"] != r["runs"] for r in (direct, code)):
+    if any(r["correct_runs"] != r["runs"] for r in (direct, other)):
         return f"{task_id}: not comparable: a run was incorrect"
-    d, c = direct["prompt_tokens"], code["prompt_tokens"]
+    d, c = direct["prompt_tokens"], other["prompt_tokens"]
     if d is None or c is None:
         return f"{task_id}: not comparable: prompt tokens were not reported"
     if d["median"] == 0:
         return f"{task_id}: not comparable: direct median prompt tokens is zero"
     pct = c["median"] / d["median"] * 100
     shown = f"{pct:.0f}" if pct >= 10 else f"{pct:.1f}"
-    return f"{task_id}: code uses {shown}% of direct's prompt tokens"
+    return f"{task_id}: {arm} uses {shown}% of direct's prompt tokens"
+
+
+def _ratio_lines(task_id: str, by_arm: dict[str, Row]) -> list[str]:
+    """The task's share-of-direct lines: one per compared arm that ran, in order."""
+    direct = by_arm.get("direct")
+    ran = [arm for arm in _COMPARED_ARMS if arm in by_arm]
+    if not ran:
+        return [_ratio_line(task_id, direct, None)]
+    if direct is None and len(ran) > 1:
+        # "only the X arm was run" would be false when several arms ran.
+        return [f"{task_id}: not comparable: the direct arm was not run"]
+    return [_ratio_line(task_id, direct, by_arm[arm], arm) for arm in ran]
 
 
 def _settings_label(settings: str) -> str:
@@ -283,12 +307,11 @@ def _section(model: str, settings: str, rows: list[Row]) -> list[str]:
     lines.append("| " + " | ".join(_COLUMNS) + " |")
     lines.append("|" + "|".join(" --- " for _ in _COLUMNS) + "|")
     lines.extend(_table_row(r) for r in rows)
-    lines += ["", "**Code arm vs direct arm** (median total prompt tokens)", ""]
+    heading = "Code arms" if any(r["arm"] == "fastmcp" for r in rows) else "Code arm"
+    lines += ["", f"**{heading} vs direct arm** (median total prompt tokens)", ""]
     for task_id in dict.fromkeys(r["task_id"] for r in rows):
         by_arm = {r["arm"]: r for r in rows if r["task_id"] == task_id}
-        lines.append(
-            "- " + _ratio_line(task_id, by_arm.get("direct"), by_arm.get("code"))
-        )
+        lines.extend("- " + line for line in _ratio_lines(task_id, by_arm))
     lines.append("")
     return lines
 
@@ -299,8 +322,9 @@ def render_markdown(rows: list[Row]) -> str:
     Each table is headed by its model and its settings (``settings: (not
     recorded)`` for older records), and has a row per (task, arm); a group that
     is not fully correct is marked with a warning sign. Below each table, a per-task line compares the
-    code arm's median prompt tokens with the direct arm's, only when both arms
-    have a value and every run in both was correct. Footnotes say where the
+    code arm's (and the fastmcp arm's) median prompt tokens with the direct
+    arm's, only when both arms have a value and every run in both was correct;
+    each arm is judged against direct on its own. Footnotes say where the
     numbers come from and how ADK reports missing usage counts.
     """
     if not rows:
@@ -309,7 +333,7 @@ def render_markdown(rows: list[Row]) -> str:
     for model, settings in dict.fromkeys((r["model"], r["settings"]) for r in rows):
         mine = [r for r in rows if (r["model"], r["settings"]) == (model, settings)]
         lines.extend(_section(model, settings, mine))
-    lines.append(
+    footnote = (
         "Tokens are those reported by the provider; costs use `prices.toml` "
         "(USD per million tokens). `cost (with reported cache reads)` equals "
         "`cost (list)` for any run where a call lacked cached-token counts. "
@@ -317,5 +341,8 @@ def render_markdown(rows: list[Row]) -> str:
         "in the code arm); `MCP calls` are the MCP tool calls actually executed "
         "(n/a for records written before they were counted)."
     )
+    if any(r["arm"] == "fastmcp" for r in rows):
+        footnote += FASTMCP_NOTE
+    lines.append(footnote)
     lines += ["", USAGE_NOTE]
     return "\n".join(lines) + "\n"
