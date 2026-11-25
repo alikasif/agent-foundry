@@ -3,6 +3,13 @@
 Run it over stdio with ``python -m mcpx.targets.ticketdesk.server``. The tool
 docstrings are deliberately full paragraphs: their size is part of what the
 benchmark measures when it loads tool definitions into a model's context.
+
+Two data sets are each reachable through exactly one tool, on purpose, so that
+benchmark tasks must chain or page calls instead of finding a shortcut: ticket
+reviewers only through ``list_ticket_reviewers`` (one call per ticket, never a
+``reviewers`` field on a ticket row) and activity events only through
+``list_activity`` (paged, newest first). ``tests/targets/test_server_guards.py``
+enforces both.
 """
 
 from collections import Counter
@@ -35,8 +42,10 @@ Page = dict[str, Any]
 
 
 def _ticket(t: Ticket) -> Row:
-    """Return a full ticket dict including its body and comment count."""
-    return {**asdict(t), "comment_count": get_dataset().comment_count(t.id)}
+    """Return a full ticket dict with its body and comment count, never reviewers."""
+    row = asdict(t)
+    del row["reviewers"]
+    return {**row, "comment_count": get_dataset().comment_count(t.id)}
 
 
 def _brief(t: Ticket) -> Row:
@@ -97,13 +106,9 @@ def _releases(project_id: int | None = None) -> list[Release]:
     return sorted(rels, key=lambda r: r.published_at)
 
 
-def _events(kind: str | None = None, project_id: int | None = None) -> list[Event]:
-    """Return events newest first (id descending) with optional filters."""
-    evs = get_dataset().events
-    keep = [
-        e for e in evs if kind in (None, e.kind) and project_id in (None, e.project_id)
-    ]
-    return sorted(keep, key=lambda e: e.id, reverse=True)
+def _events() -> list[Event]:
+    """Return every event newest first (id descending)."""
+    return sorted(get_dataset().events, key=lambda e: e.id, reverse=True)
 
 
 def _tickets_where(**want: Any) -> list[Ticket]:
@@ -146,7 +151,8 @@ def list_tickets(
     (newest ticket first, the default) or ``closed_at_desc`` (most recently closed
     first, meaningful for closed tickets). ``per_page`` is capped at 100. Returns
     ``{"items", "page", "total"}`` where every item is the full ticket including
-    its body, labels, reviewers, timestamps and ``comment_count``.
+    its body, labels, timestamps and ``comment_count``. Reviewers are not part of
+    a ticket; fetch them per ticket with ``list_ticket_reviewers``.
     """
     if sort not in SORTS:
         raise ToolError(f"Unknown sort {sort!r}; expected one of {', '.join(SORTS)}")
@@ -160,10 +166,10 @@ def list_tickets(
 def get_ticket(ticket_id: int) -> Row:
     """Fetch one ticket by its numeric id, including the full body text.
 
-    Returns the ticket's id, project_id, title, body, status, labels, reviewers,
-    created_at, closed_at and ``comment_count``. Raises a tool error when the
-    ticket id does not exist. Comments are fetched separately with
-    ``list_comments``.
+    Returns the ticket's id, project_id, title, body, status, labels, created_at,
+    closed_at and ``comment_count``. Raises a tool error when the ticket id does
+    not exist. Comments are fetched separately with ``list_comments`` and
+    reviewers with ``list_ticket_reviewers``.
     """
     return _ticket(_ticket_or_raise(ticket_id))
 
@@ -173,7 +179,7 @@ def get_ticket_summary(ticket_id: int) -> Row:
     """Fetch one ticket by id without its long body text, for cheap lookups.
 
     Returns the same fields as ``get_ticket`` except ``body``: id, project_id,
-    title, status, labels, reviewers, created_at, closed_at and comment_count.
+    title, status, labels, created_at, closed_at and comment_count.
     Raises a tool error when the ticket id does not exist.
     """
     return _brief(_ticket_or_raise(ticket_id))
@@ -195,6 +201,7 @@ def list_comments(ticket_id: int, page: int = 1, per_page: int = 100) -> Page:
 def list_ticket_reviewers(ticket_id: int) -> list[int]:
     """List the user ids that reviewed a ticket.
 
+    This is the only place reviewers are exposed: ticket rows never carry them.
     Only closed tickets have reviewers; open tickets return an empty list. The
     ids are sorted ascending and can be resolved with ``get_user``. Raises a tool
     error when the ticket id does not exist.
@@ -232,34 +239,12 @@ def list_activity(page: int = 1, per_page: int = 100) -> Page:
     """List the global activity log, newest event first.
 
     Events cover comments, status changes, deploys and ticket creation across all
-    projects, ordered by id descending. ``per_page`` is capped at 100. Returns
-    ``{"items", "page", "total"}`` where each item has id, kind, project_id,
-    ticket_id (null for deploys) and at.
+    projects, ordered by id descending. ``per_page`` is capped at 100 and this is
+    the only tool that returns events, so finding one means paging through the
+    log. Returns ``{"items", "page", "total"}`` where each item has id, kind,
+    project_id, ticket_id (null for deploys) and at.
     """
     return _page(_events(), page, per_page, asdict)
-
-
-@tool
-def list_deploys(
-    project_id: int | None = None, page: int = 1, per_page: int = 100
-) -> Page:
-    """List deploy events newest first, optionally for a single project.
-
-    ``project_id`` restricts the log to one project. Deploys have no ticket, so
-    ticket_id is null. Returns ``{"items", "page", "total"}`` with event rows
-    carrying id, kind, project_id, ticket_id and at.
-    """
-    return _page(_events("deploy", project_id), page, per_page, asdict)
-
-
-@tool
-def count_activity_by_kind() -> dict[str, int]:
-    """Count activity events grouped by kind.
-
-    Returns a mapping from each event kind (comment, status_change, deploy,
-    ticket_created) to how many events of that kind exist in the log.
-    """
-    return dict(Counter(e.kind for e in get_dataset().events))
 
 
 @tool
@@ -340,11 +325,11 @@ def get_user(user_id: int) -> Row:
 
 @tool
 def get_user_stats(user_id: int) -> Row:
-    """Summarise one user's activity: comments written and tickets reviewed.
+    """Summarise one user's comment activity.
 
-    Returns user_id, name, comments (how many comments they authored) and reviews
-    (how many tickets list them as a reviewer). Raises a tool error when the user
-    id does not exist.
+    Returns user_id, name, comments (how many comments they authored) and
+    tickets_commented (on how many distinct tickets they commented). Raises a
+    tool error when the user id does not exist.
     """
     u = _user_or_raise(user_id)
     ds = get_dataset()
@@ -352,7 +337,9 @@ def get_user_stats(user_id: int) -> Row:
         "user_id": u.id,
         "name": u.name,
         "comments": sum(c.author_id == u.id for c in ds.comments),
-        "reviews": sum(u.id in t.reviewers for t in ds.tickets),
+        "tickets_commented": len(
+            {c.ticket_id for c in ds.comments if c.author_id == u.id}
+        ),
     }
 
 
@@ -367,19 +354,6 @@ def list_user_comments(user_id: int, page: int = 1, per_page: int = 100) -> Page
     _user_or_raise(user_id)
     rows = [c for c in get_dataset().comments if c.author_id == user_id]
     return _page(rows, page, per_page, asdict)
-
-
-@tool
-def list_user_reviews(user_id: int, page: int = 1, per_page: int = 100) -> Page:
-    """List the tickets a user reviewed, newest ticket first, without body text.
-
-    A user reviewed a ticket when their id appears in its reviewers list.
-    ``per_page`` is capped at 100. Returns ``{"items", "page", "total"}`` with
-    compact ticket rows. Raises a tool error when the user id does not exist.
-    """
-    _user_or_raise(user_id)
-    rows = [t for t in _tickets_where() if user_id in t.reviewers]
-    return _page(rows, page, per_page, _brief)
 
 
 @tool
@@ -468,7 +442,8 @@ def list_recently_closed(limit: int = 10) -> list[Row]:
     """List the most recently closed tickets, newest closure first.
 
     ``limit`` is clamped to between 1 and 100. Each row is a compact ticket (no
-    body) including closed_at, reviewers and comment_count.
+    body) including closed_at and comment_count. Reviewers are fetched per ticket
+    with ``list_ticket_reviewers``.
     """
     closed = _tickets_where(status="closed")
     closed.sort(key=lambda t: t.closed_at or "", reverse=True)
@@ -490,6 +465,68 @@ def list_most_commented_tickets(limit: int = 10) -> list[Row]:
         {"ticket_id": t.id, "title": t.title, "comment_count": ds.comment_count(t.id)}
         for t in ranked[: max(1, min(limit, MAX_PER_PAGE))]
     ]
+
+
+@tool
+def list_oldest_open_tickets(limit: int = 10) -> list[Row]:
+    """List the oldest tickets that are still open, lowest id first.
+
+    Useful for spotting stale work. ``limit`` is clamped to between 1 and 100.
+    Each row is a compact ticket (no body) with id, project_id, title, status,
+    labels, created_at, closed_at (always null here) and comment_count.
+    """
+    opened = _tickets_where(status="open")
+    opened.sort(key=lambda t: t.id)
+    return [_brief(t) for t in opened[: max(1, min(limit, MAX_PER_PAGE))]]
+
+
+@tool
+def list_top_commenters(limit: int = 10) -> list[Row]:
+    """List the users who wrote the most comments, busiest first.
+
+    ``limit`` is clamped to between 1 and 100. Ties are broken by lower user id.
+    Each row has user_id, name and comments (how many comments that user wrote
+    across every ticket).
+    """
+    ds = get_dataset()
+    counts = Counter(c.author_id for c in ds.comments)
+    names = {u.id: u.name for u in ds.users}
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [
+        {"user_id": uid, "name": names[uid], "comments": n}
+        for uid, n in ranked[: max(1, min(limit, MAX_PER_PAGE))]
+    ]
+
+
+@tool
+def get_label_stats(label: str) -> Row:
+    """Summarise how one label is used across all tickets.
+
+    ``label`` is one of bug, feature, docs or infra. Returns label, tickets (how
+    many carry it), open and closed. Raises a tool error for an unknown label;
+    ``list_labels`` shows the valid names.
+    """
+    if label not in LABELS:
+        raise ToolError(f"Unknown label {label!r}; expected one of {', '.join(LABELS)}")
+    mine = [t for t in get_dataset().tickets if label in t.labels]
+    return {
+        "label": label,
+        "tickets": len(mine),
+        "open": sum(t.status == "open" for t in mine),
+        "closed": sum(t.status == "closed" for t in mine),
+    }
+
+
+@tool
+def count_releases_by_project() -> dict[str, int]:
+    """Count releases grouped by project key.
+
+    Returns a mapping from project key (ATLAS, BEACON and so on) to how many
+    releases that project has published. Use ``list_releases`` for the tags and
+    publication times.
+    """
+    keys = {p.id: p.key for p in get_dataset().projects}
+    return dict(Counter(keys[r.project_id] for r in get_dataset().releases))
 
 
 @tool

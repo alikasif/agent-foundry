@@ -98,7 +98,8 @@ async def test_list_tickets_items_are_full_dicts() -> None:
     r = await call("list_tickets", per_page=5)
     assert [t["id"] for t in r["items"]] == [3000, 2999, 2998, 2997, 2996]
     first = r["items"][0]
-    assert first["body"] and "comment_count" in first and "reviewers" in first
+    assert first["body"] and "comment_count" in first
+    assert "reviewers" not in first
 
 
 async def test_list_tickets_page_two_continues() -> None:
@@ -147,6 +148,18 @@ async def test_list_tickets_bad_sort_is_an_error() -> None:
 async def test_get_ticket_matches_dataset() -> None:
     t = await call("get_ticket", ticket_id=42)
     assert t["id"] == 42 and t["comment_count"] == get_dataset().comment_count(42)
+
+
+async def test_ticket_rows_never_carry_reviewers() -> None:
+    for name, args in (
+        ("get_ticket", {"ticket_id": 42}),
+        ("get_ticket_summary", {"ticket_id": 42}),
+    ):
+        assert "reviewers" not in await call(name, **args)
+    rows = (await call("list_recently_closed", limit=5)) + (
+        await call("search_tickets", query="a", per_page=5)
+    )["items"]
+    assert rows and all("reviewers" not in r for r in rows)
 
 
 async def test_list_comments_paginates() -> None:
@@ -208,3 +221,51 @@ async def test_unknown_ids_are_errors(tool: str, args: dict[str, Any]) -> None:
 async def test_unknown_ticket_is_an_error() -> None:
     with pytest.raises(ToolError):
         await call("get_ticket", ticket_id=999999)
+
+
+async def test_get_user_stats_has_no_review_count() -> None:
+    ds = get_dataset()
+    stats = await call("get_user_stats", user_id=1)
+    assert stats["comments"] == sum(c.author_id == 1 for c in ds.comments)
+    assert stats["tickets_commented"] == len(
+        {c.ticket_id for c in ds.comments if c.author_id == 1}
+    )
+    assert "reviews" not in stats
+
+
+async def test_list_oldest_open_tickets() -> None:
+    expected = sorted(t.id for t in get_dataset().tickets if t.status == "open")
+    rows = await call("list_oldest_open_tickets", limit=5)
+    assert [r["id"] for r in rows] == expected[:5]
+    assert all(r["status"] == "open" and "body" not in r for r in rows)
+
+
+async def test_list_top_commenters() -> None:
+    ds = get_dataset()
+    counts: dict[int, int] = {}
+    for c in ds.comments:
+        counts[c.author_id] = counts.get(c.author_id, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    rows = await call("list_top_commenters", limit=3)
+    assert [(r["user_id"], r["comments"]) for r in rows] == ranked[:3]
+    assert all(r["name"] for r in rows)
+
+
+async def test_get_label_stats() -> None:
+    ds = get_dataset()
+    mine = [t for t in ds.tickets if "docs" in t.labels]
+    stats = await call("get_label_stats", label="docs")
+    assert stats == {
+        "label": "docs",
+        "tickets": len(mine),
+        "open": sum(t.status == "open" for t in mine),
+        "closed": sum(t.status == "closed" for t in mine),
+    }
+    with pytest.raises(ToolError):
+        await call("get_label_stats", label="nope")
+
+
+async def test_count_releases_by_project() -> None:
+    counts = await call("count_releases_by_project")
+    assert len(counts) == 8 and set(counts.values()) == {3}
+    assert counts["ATLAS"] == 3
