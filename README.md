@@ -121,9 +121,12 @@ uv run pyrefly check
 The code arm executes model-generated Python on your machine, as your user, in
 a subprocess that has timeouts and output limits but no isolation: it can read
 your files, use your network and see your environment. Only run it where that
-is acceptable. The child starts with `python -S`, so model code cannot import
-the harness (including the tasks' ground truth) or the virtualenv's packages;
-that keeps runs honest but is not isolation. The progress output never prints
+is acceptable. The child starts with `python -S`, so by default model code
+cannot import the harness (including the tasks' ground truth) or the
+virtualenv's packages. That stops accidental use, not deliberate use: a script
+could re-enable `site` and import them, which is why every `run_python` script
+is stored in the run's trace and can be audited afterwards. It is not
+isolation. The progress output never prints
 keys or environment values, and API key values are replaced with `[redacted]`
 in the error text, answer and trace stored in the JSONL records.
 
