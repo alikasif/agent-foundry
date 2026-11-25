@@ -1,9 +1,16 @@
 # USD per million tokens, one table per benchmarked OpenRouter model id.
-# Source: https://openrouter.ai/api/v1/models, fetched 2026-11-24.
+# Source: https://openrouter.ai/api/v1/models, fetched 2026-11-25.
 # OpenRouter lists per-token prices; each value below is that price times 1e6.
-# Supports tool calling (supported_parameters includes "tools"); context 1048576.
+# These are the listing's default prices; they can differ by provider (and the
+# -1017 listing also carries UTC time-of-day overrides, half price off-peak).
+# Both models: context 1048576, tool calling and reasoning supported.
 
 ["deepseek/deepseek-v4.1-flash"]
-input_per_mtok = 0.0507         # prompt 0.0000000507
-output_per_mtok = 0.2028        # completion 0.0000002028
-cache_read_per_mtok = 0.001014  # input_cache_read 0.000000001014
+input_per_mtok = 0.14          # prompt 0.00000014
+output_per_mtok = 0.42         # completion 0.00000042
+cache_read_per_mtok = 0.0042   # input_cache_read 0.0000000042
+
+["deepseek/deepseek-v4.1-flash-1017"]
+input_per_mtok = 0.3           # prompt 0.0000003
+output_per_mtok = 1.2          # completion 0.0000012
+cache_read_per_mtok = 0.006    # input_cache_read 0.000000006

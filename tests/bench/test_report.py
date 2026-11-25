@@ -139,10 +139,10 @@ def test_wrong_answers_are_flagged() -> None:
 
 
 def test_cost_numeric_example_uses_cache_price_when_all_calls_report() -> None:
-    # 3000 prompt (2100 cached), 300 output at 0.0507 / 0.2028 / 0.001014 USD/Mtok.
+    # 3000 prompt (2100 cached), 300 output at 0.14 / 0.42 / 0.0042 USD/Mtok.
     row = summarize([rec(calls=[(1000, 100, 600), (2000, 200, 1500)])])[0]
-    list_cost = (3000 * 0.0507 + 300 * 0.2028) / 1e6
-    cached_cost = (900 * 0.0507 + 2100 * 0.001014 + 300 * 0.2028) / 1e6
+    list_cost = (3000 * 0.14 + 300 * 0.42) / 1e6
+    cached_cost = (900 * 0.14 + 2100 * 0.0042 + 300 * 0.42) / 1e6
     assert row["cost_list"]["median"] == pytest.approx(list_cost)
     assert row["cost_cached"]["median"] == pytest.approx(cached_cost)
     assert row["cost_cached"]["median"] < row["cost_list"]["median"]

@@ -30,12 +30,18 @@ from `.env` and exits with a message if it is missing. The test suite, the
 Run tasks and append one JSON line per finished run to a results file:
 
 ```
-uv run mcpx run --target ticketdesk --arm both --task all     --model deepseek/deepseek-v4.1-flash --runs 3 --out runs/first.jsonl
+uv run mcpx run --target ticketdesk --arm both --task all     --model deepseek/deepseek-v4.1-flash-1017 --runs 3 --out runs/first.jsonl
 ```
 
 - `--arm` is `direct`, `code` or `both`; `--task` is `A`, `B`, `C`, `D` or
   `all`. Runs are sequential, taking turns between the arms for each task and
   run index, so provider latency drift hits both arms alike.
+- `--model` is optional: when omitted, the `MODEL` environment variable (for
+  example from `.env`) is used; with neither the command exits with a message.
+- `--reasoning-effort` (default `medium`; also `none`, `minimal`, `low`, `high`,
+  `xhigh`) sets how hard the model reasons. LiteLLM sends it to OpenRouter as the
+  `reasoning_effort` request field. It is a batch setting and is **not** stored
+  in the JSONL records, so `docs/results.md` must state the effort used.
 - Optional: `--run-timeout-s`, `--max-llm-calls`, and `--provider NAME`
   (repeatable) to pin OpenRouter providers with fallbacks disabled.
 - Models need an entry in `src/mcpx/llm/prices.toml` for cost figures; without

@@ -1,7 +1,7 @@
 """Live smoke tests: both arms answer task A through the real model.
 
-Skipped unless ``OPENROUTER_API_KEY`` is set. ``MCPX_LIVE_MODEL`` overrides the
-model id.
+Skipped unless ``OPENROUTER_API_KEY`` is set. The model id is
+``MCPX_LIVE_MODEL``, else ``MODEL``, else the default below.
 """
 
 import os
@@ -18,8 +18,11 @@ pytestmark = [pytest.mark.anyio, pytest.mark.live]
 
 TASKS_BY_ID = {task.id: task for task in get_tasks("ticketdesk")}
 LIVE_MODEL = ModelConfig(
-    os.environ.get("MCPX_LIVE_MODEL", "deepseek/deepseek-v4.1-flash"),
+    os.environ.get("MCPX_LIVE_MODEL")
+    or os.environ.get("MODEL")
+    or "deepseek/deepseek-v4.1-flash-1017",
     timeout_s=120.0,
+    reasoning_effort="medium",
 )
 # Hard ceiling for one live run, above run_once's own 600 s default.
 LIVE_RUN_LIMIT_S = 660
@@ -42,6 +45,10 @@ async def test_task_a_is_answered_correctly(arm: Arm) -> None:
 async def test_code_arm_uses_fewer_prompt_tokens_on_task_a() -> None:
     direct = await _run_task_a("direct")
     code = await _run_task_a("code")
+    # A failed run reports few tokens; comparing it would prove nothing.
+    for rec in (direct, code):
+        assert rec.error is None, rec
+        assert rec.correct, rec
     direct_total = sum(c.prompt_tokens or 0 for c in direct.calls)
     code_total = sum(c.prompt_tokens or 0 for c in code.calls)
     assert direct_total > 0 and code_total > 0, (direct, code)

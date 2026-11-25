@@ -100,7 +100,16 @@ def test_unknown_model_price_is_a_clear_error() -> None:
 def test_known_model_price_is_read_from_toml() -> None:
     prices = price_for("deepseek/deepseek-v4.1-flash")
     assert prices == Prices(
-        input_per_mtok=0.0507,
-        output_per_mtok=0.2028,
-        cache_read_per_mtok=0.001014,
+        input_per_mtok=0.14,
+        output_per_mtok=0.42,
+        cache_read_per_mtok=0.0042,
+    )
+
+
+def test_benchmark_model_price_is_read_from_toml() -> None:
+    prices = price_for("deepseek/deepseek-v4.1-flash-1017")
+    assert prices == Prices(
+        input_per_mtok=0.3,
+        output_per_mtok=1.2,
+        cache_read_per_mtok=0.006,
     )

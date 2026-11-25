@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 # Bounded per-request timeout so a stalled provider cannot hang a batch.
 REQUEST_TIMEOUT_S = 120.0
 KEY_VAR = "OPENROUTER_API_KEY"
+MODEL_VAR = "MODEL"
 
 
 def _positive_int(text: str) -> int:
@@ -45,7 +46,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--arm", choices=["direct", "code", "both"], required=True)
     run.add_argument("--task", required=True, help="task id (A, B, C, D) or 'all'")
-    run.add_argument("--model", required=True, help="OpenRouter model id")
+    run.add_argument(
+        "--model",
+        help="OpenRouter model id (default: the MODEL environment variable)",
+    )
     run.add_argument("--runs", type=_positive_int, required=True, help="runs per task")
     run.add_argument("--out", type=Path, required=True, help="JSONL file to append to")
     run.add_argument(
@@ -53,6 +57,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--max-llm-calls", type=_positive_int, default=40, help="per-run model calls"
+    )
+    run.add_argument(
+        "--reasoning-effort",
+        default="medium",
+        help="reasoning effort: none, minimal, low, medium, high or xhigh "
+        "(default: medium)",
     )
     run.add_argument(
         "--provider",
@@ -89,11 +99,20 @@ def _run(args: argparse.Namespace) -> None:
             task_ids = [args.task]
     except KeyError as exc:
         raise _fail(str(exc.args[0])) from None
-    model = ModelConfig(
-        args.model,
-        timeout_s=REQUEST_TIMEOUT_S,
-        provider_order=tuple(args.provider),
-    )
+    model_id = args.model or os.environ.get(MODEL_VAR)
+    if not model_id:
+        raise _fail(
+            f"no model: pass --model or set {MODEL_VAR} in .env or the environment"
+        )
+    try:
+        model = ModelConfig(
+            model_id,
+            timeout_s=REQUEST_TIMEOUT_S,
+            provider_order=tuple(args.provider),
+            reasoning_effort=args.reasoning_effort,
+        )
+    except ValueError as exc:
+        raise _fail(str(exc)) from None
     arms = ["direct", "code"] if args.arm == "both" else [args.arm]
     batch = functools.partial(
         run_batch,

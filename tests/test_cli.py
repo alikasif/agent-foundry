@@ -107,6 +107,81 @@ def test_run_builds_the_batch_from_its_arguments(
     assert seen["kwargs"] == {"run_timeout_s": 99.0, "max_llm_calls": 7}
 
 
+def _capture_model(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    async def fake_run_batch(*args: Any, **kwargs: Any) -> list[RunRecord]:
+        seen["args"] = args
+        return []
+
+    monkeypatch.setattr("mcpx.agents.batch.run_batch", fake_run_batch)
+    return seen
+
+
+def _without_model(args: list[str]) -> list[str]:
+    at = args.index("--model")
+    return args[:at] + args[at + 2 :]
+
+
+def test_model_flag_wins_over_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    monkeypatch.setenv("MODEL", "env/model")
+    seen = _capture_model(monkeypatch)
+    main(RUN_ARGS, env_file=None)
+    assert seen["args"][3].model_id == "x/y"
+
+
+def test_model_falls_back_to_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    monkeypatch.setenv("MODEL", "env/model")
+    seen = _capture_model(monkeypatch)
+    main(_without_model(RUN_ARGS), env_file=None)
+    assert seen["args"][3].model_id == "env/model"
+
+
+def test_missing_model_everywhere_is_a_clear_exit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    monkeypatch.delenv("MODEL", raising=False)
+    with pytest.raises(SystemExit) as info:
+        main(_without_model(RUN_ARGS), env_file=None)
+    assert info.value.code not in (0, None)
+    err = capsys.readouterr().err
+    assert "--model" in err and "MODEL" in err
+
+
+def test_reasoning_effort_defaults_to_medium(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    seen = _capture_model(monkeypatch)
+    main(RUN_ARGS, env_file=None)
+    assert seen["args"][3].reasoning_effort == "medium"
+
+
+def test_reasoning_effort_flag_is_passed_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    seen = _capture_model(monkeypatch)
+    main([*RUN_ARGS, "--reasoning-effort", "low"], env_file=None)
+    assert seen["args"][3].reasoning_effort == "low"
+
+
+def test_bad_reasoning_effort_is_a_clear_exit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    with pytest.raises(SystemExit):
+        main([*RUN_ARGS, "--reasoning-effort", "extreme"], env_file=None)
+    assert "reasoning_effort" in capsys.readouterr().err
+
+
 def test_run_reports_bad_task_as_a_clean_exit(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

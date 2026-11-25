@@ -1,5 +1,7 @@
 """Tests for the model configuration, including one live call."""
 
+from dataclasses import FrozenInstanceError
+
 import anyio
 import pytest
 from google.adk.models.llm_request import LlmRequest
@@ -38,6 +40,51 @@ async def test_modelconfig_pins_provider_without_fallbacks() -> None:
     assert llm._additional_args["extra_body"] == {
         "provider": {"order": ["DeepInfra", "Novita"], "allow_fallbacks": False}
     }
+
+
+async def test_modelconfig_forwards_reasoning_effort_only_when_set() -> None:
+    assert "reasoning_effort" not in ModelConfig(MODEL_ID).to_llm()._additional_args
+    llm = ModelConfig(MODEL_ID, reasoning_effort="medium").to_llm()
+    assert llm._additional_args["reasoning_effort"] == "medium"
+
+
+@pytest.mark.parametrize(
+    "effort", ["none", "minimal", "low", "medium", "high", "xhigh"]
+)
+async def test_modelconfig_accepts_the_known_efforts(effort: str) -> None:
+    assert ModelConfig(MODEL_ID, reasoning_effort=effort).reasoning_effort == effort
+
+
+@pytest.mark.parametrize("effort", ["", "Medium", "max", "extreme"])
+async def test_modelconfig_rejects_an_unknown_effort(effort: str) -> None:
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        ModelConfig(MODEL_ID, reasoning_effort=effort)
+
+
+async def test_modelconfig_stays_frozen_and_hashable() -> None:
+    config = ModelConfig(MODEL_ID, reasoning_effort="medium")
+    assert hash(config) == hash(ModelConfig(MODEL_ID, reasoning_effort="medium"))
+    with pytest.raises(FrozenInstanceError):
+        config.reasoning_effort = "low"  # type: ignore[misc]
+
+
+async def test_openrouter_request_body_carries_the_effort() -> None:
+    """Offline: LiteLLM turns the kwarg into OpenRouter's request field."""
+    from litellm import get_optional_params
+    from litellm.llms.openrouter.chat.transformation import OpenrouterConfig
+
+    llm = ModelConfig(MODEL_ID, reasoning_effort="medium").to_llm()
+    params = get_optional_params(
+        model=MODEL_ID, custom_llm_provider="openrouter", **llm._additional_args
+    )
+    body = OpenrouterConfig().transform_request(
+        model=MODEL_ID,
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params=dict(params),
+        litellm_params={},
+        headers={},
+    )
+    assert body["reasoning_effort"] == "medium"
 
 
 @pytest.mark.live
