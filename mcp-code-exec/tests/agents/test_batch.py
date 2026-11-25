@@ -11,6 +11,7 @@ from fastmcp.experimental.transforms.code_mode import CodeMode
 from mcpx.agents.batch import ARMS, run_batch, run_settings
 from mcpx.agents.run import Arm, run_once
 from mcpx.bench.usage import RunRecord
+from mcpx.codemode.protocol import CODEMODE_MAX_TOOL_CALLS
 from mcpx.llm.models import ModelConfig
 from mcpx.targets import get_tasks
 from tests.agents.helpers import UnreachableModel, closed_port, python_children
@@ -177,6 +178,42 @@ def test_settings_unchanged_when_fastmcp_not_in_batch() -> None:
     model = ModelConfig("m/x")
     base = run_settings(model, 40, 600.0)
     assert run_settings(model, 40, 600.0, arms=("direct", "code")) == base
+    assert "fastmcp" not in base
+
+
+async def test_run_batch_passes_arms_to_run_settings(tmp_path: Path) -> None:
+    # Dropping ``arms`` would give a fastmcp batch the same settings as v3 files.
+    base = run_settings(_model(), 5, 20.0)
+    suffix = (
+        f";fastmcp={importlib.metadata.version('fastmcp')}"
+        f";max_tool_calls={CODEMODE_MAX_TOOL_CALLS}"
+    )
+    with_fastmcp = tmp_path / "with.jsonl"
+    await run_batch(
+        "ticketdesk",
+        ["direct", "fastmcp"],
+        ["A"],
+        _model(),
+        1,
+        with_fastmcp,
+        run_timeout_s=20.0,
+        max_llm_calls=5,
+    )
+    saved = _read(with_fastmcp)
+    assert [r.arm for r in saved] == ["direct", "fastmcp"]
+    assert {r.settings for r in saved} == {base + suffix}
+    without = tmp_path / "without.jsonl"
+    await run_batch(
+        "ticketdesk",
+        ["direct"],
+        ["A"],
+        _model(),
+        1,
+        without,
+        run_timeout_s=20.0,
+        max_llm_calls=5,
+    )
+    assert {r.settings for r in _read(without)} == {base}
     assert "fastmcp" not in base
 
 
