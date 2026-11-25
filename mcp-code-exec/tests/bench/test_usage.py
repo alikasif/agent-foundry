@@ -167,13 +167,19 @@ def test_committed_result_files_still_load() -> None:
         lines = path.read_text(encoding="utf-8").splitlines()
         records = [RunRecord.from_json(line) for line in lines if line.strip()]
         assert records
-        if "-v3-" in path.name:
+        three_arms = "-v4-" in path.name
+        if "-v3-" in path.name or three_arms:
             # Written after traces and settings existed: both must be present.
             assert all(r.trace and r.settings for r in records), path.name
         else:
             # v1 and v2 predate traces and settings: they load with the defaults.
             assert all(r.trace == [] and r.settings == "" for r in records), path.name
-        # Old results render with the two-arm wording, without error.
         md = render_markdown(summarize(records))
-        assert "**Code arm vs direct arm** (median total prompt tokens)" in md
-        assert "Code arms" not in md and "fastmcp" not in md, path.name
+        if three_arms:
+            # v4 has the fastmcp arm: the three-arm wording, without error.
+            assert "**Code arms vs direct arm** (median total prompt tokens)" in md
+            assert "fastmcp" in md, path.name
+        else:
+            # Older results render with the two-arm wording, without error.
+            assert "**Code arm vs direct arm** (median total prompt tokens)" in md
+            assert "Code arms" not in md and "fastmcp" not in md, path.name
