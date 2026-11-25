@@ -145,20 +145,26 @@ async def _exited(proc: asyncio.subprocess.Process) -> int:
 
 
 def kill_tree(pid: int) -> None:
-    """Kill a process and every descendant, then wait for them to go away."""
+    """Kill a process and every descendant, then wait for them to go away.
+
+    Never raises a ``psutil`` error (a process that vanished, or one we may not
+    touch, such as ``AccessDenied``): it runs inside shielded cleanup, where an
+    exception would skip the rest of the teardown.
+    """
     try:
         parent = psutil.Process(pid)
-    except psutil.NoSuchProcess:
+    except psutil.Error:
         return
     try:
         procs = parent.children(recursive=True)
-    except psutil.NoSuchProcess:
+    except psutil.Error:
         procs = []
     procs.append(parent)  # children first, then the parent
     for proc in procs:
-        with contextlib.suppress(psutil.NoSuchProcess):
+        with contextlib.suppress(psutil.Error):
             proc.kill()
-    psutil.wait_procs(procs, timeout=_KILL_WAIT_S)
+    with contextlib.suppress(psutil.Error):
+        psutil.wait_procs(procs, timeout=_KILL_WAIT_S)
 
 
 class Runtime:
@@ -222,7 +228,9 @@ class Runtime:
             except TimeoutError:
                 timed_out = True
                 await asyncio.to_thread(kill_tree, proc.pid)
-                await _exited(proc)
+                # Bounded: a child that survives the kill must not hang the run.
+                with anyio.move_on_after(_KILL_WAIT_S):
+                    await _exited(proc)
             _, pending = await asyncio.wait(drains, timeout=_DRAIN_GRACE_S)
             for task in pending:
                 task.cancel()

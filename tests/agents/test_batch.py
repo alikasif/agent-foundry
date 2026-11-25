@@ -1,6 +1,7 @@
 """Offline tests for ``run_batch``: the model is an unreachable local port."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,7 +59,6 @@ async def test_batch_writes_one_line_per_run_in_interleaved_order(
     ]
     assert len(printed) == 4
     assert "A" in printed[0] and "direct" in printed[0]
-    assert "dummy-not-a-key" not in "".join(printed)
     assert python_children() == []
 
 
@@ -132,3 +132,38 @@ def test_run_settings_is_stable_and_names_every_knob() -> None:
         "temperature=0.5"
     )
     assert run_settings(model, 40, 600.0) == run_settings(model, 40, 600.0)
+
+
+FAKE_KEY = "sk-or-v1-FAKE-KEY-0123456789"
+
+
+async def test_a_key_in_an_error_reaches_neither_stdout_nor_the_jsonl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+
+    async def leaky(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError(f"provider said: bad request with key {FAKE_KEY}")
+
+    monkeypatch.setattr("mcpx.agents.run._run_direct", leaky)
+    out = tmp_path / "runs.jsonl"
+    (record,) = await run_batch(
+        "ticketdesk",
+        ["direct"],
+        ["A"],
+        _model(),
+        1,
+        out,
+        run_timeout_s=60.0,
+        max_llm_calls=5,
+    )
+    assert (
+        record.error == "RuntimeError: provider said: bad request with key [redacted]"
+    )
+    line = out.read_text(encoding="utf-8")
+    assert FAKE_KEY not in line and "[redacted]" in line
+    captured = capsys.readouterr()
+    assert "error=RuntimeError" in captured.out
+    assert FAKE_KEY not in captured.out + captured.err

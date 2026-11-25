@@ -48,6 +48,7 @@ from google.genai import types
 
 from mcpx.agents.code import RUN_PYTHON, build_code_agent
 from mcpx.agents.direct import build_direct_agent
+from mcpx.agents.redact import env_secrets, redact
 from mcpx.bench.tasks import Task, parse_answer
 from mcpx.bench.usage import RunRecord, UsageRecorder
 from mcpx.client.connection import Connection
@@ -63,7 +64,13 @@ Arm = Literal["direct", "code"]
 # ADK imports LiteLLM lazily on the first model call, and that import takes
 # seconds. Do it now, through ADK's own loader (which also stops LiteLLM from
 # autoloading ``.env``), so the cost never lands inside a run's ``wall_s``.
-lite_llm._ensure_litellm_imported()  # pyrefly: ignore[missing-attribute]
+_ensure_litellm = getattr(lite_llm, "_ensure_litellm_imported", None)
+if _ensure_litellm is not None:
+    _ensure_litellm()
+else:
+    # A later ADK may drop its private loader; a plain import still front-loads
+    # the cost (LiteLLM may then autoload ``.env``, which mcpx loads anyway).
+    import litellm  # noqa: F401
 
 APP_NAME = "mcpx"
 USER_ID = "bench"
@@ -130,8 +137,9 @@ def evaluate_answer(task: Task, text: str) -> tuple[bool, str | None]:
     """Score a final response against the task's ground truth.
 
     Returns ``(correct, error)``. ``error`` explains a response that could not
-    be scored (empty, no ``ANSWER`` line, invalid JSON); a well-formed wrong
-    answer is ``(False, None)``.
+    be scored (empty, no ``ANSWER`` line, invalid JSON, or a ground truth or
+    checker that raised); a well-formed wrong answer is ``(False, None)``.
+    Never raises.
     """
     if not text.strip():
         return False, "empty final response"
@@ -140,7 +148,10 @@ def evaluate_answer(task: Task, text: str) -> tuple[bool, str | None]:
         if "ANSWER" not in text:
             return False, "no ANSWER line in final response"
         return False, "ANSWER line is not valid JSON"
-    return task.check(answer, task.ground_truth()), None
+    try:
+        return task.check(answer, task.ground_truth()), None
+    except Exception as exc:  # noqa: BLE001 - a scoring failure is data too
+        return False, f"scoring failed: {describe_error(exc)}"
 
 
 def describe_error(exc: BaseException) -> str:
@@ -283,7 +294,8 @@ async def run_once(
 
     Never raises for a failed run (only for outside cancellation): errors, the
     LLM-call cap and the overall timeout end up in ``RunRecord.error`` with
-    ``correct=False``.
+    ``correct=False``. API key values (``mcpx.agents.redact``) are replaced in
+    ``error``, ``answer_text`` and the trace before the record is built.
     """
     recorder = UsageRecorder()
     progress = _Progress()
@@ -314,6 +326,12 @@ async def run_once(
         error = progress.model_error
     if error is None:
         correct, error = evaluate_answer(task, progress.final_text)
+    secrets = env_secrets()
+    if error is not None:
+        error = redact(error, secrets)
+    trace = [
+        {k: redact(v, secrets) for k, v in item.items()} for item in progress.trace
+    ]
     return RunRecord(
         task_id=task.id,
         arm=arm,
@@ -322,10 +340,10 @@ async def run_once(
         calls=recorder.calls,
         tool_calls=progress.tool_calls,
         mcp_calls=progress.mcp_calls,
-        trace=progress.trace,
+        trace=trace,
         settings=settings,
         wall_s=progress.wall_s,
-        answer_text=progress.final_text,
+        answer_text=redact(progress.final_text, secrets),
         correct=correct,
         error=error,
     )

@@ -6,6 +6,7 @@ import glob
 import os
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
@@ -15,6 +16,8 @@ from dotenv import load_dotenv
 REQUEST_TIMEOUT_S = 120.0
 KEY_VAR = "OPENROUTER_API_KEY"
 MODEL_VAR = "MODEL"
+DEFAULT_RUNS = 3
+RUNS_DIR = Path("runs")
 
 
 def _positive_int(text: str) -> int:
@@ -50,8 +53,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         help="OpenRouter model id (default: the MODEL environment variable)",
     )
-    run.add_argument("--runs", type=_positive_int, required=True, help="runs per task")
-    run.add_argument("--out", type=Path, required=True, help="JSONL file to append to")
+    run.add_argument(
+        "--runs",
+        type=_positive_int,
+        default=DEFAULT_RUNS,
+        help=f"runs per task (default: {DEFAULT_RUNS})",
+    )
+    run.add_argument(
+        "--out",
+        type=Path,
+        help="JSONL file to append to (default: runs/<target>-<UTC time>.jsonl)",
+    )
     run.add_argument(
         "--run-timeout-s", type=_positive_float, default=600.0, help="per-run deadline"
     )
@@ -77,6 +89,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("demo", help="run the hand-written task-B code demo")
     return parser
+
+
+def default_out_path(target: str, now: datetime | None = None) -> Path:
+    """``runs/<target>-<UTC timestamp>.jsonl``, e.g. ``runs/x-20261125T101530Z``."""
+    moment = now or datetime.now(UTC)
+    return RUNS_DIR / f"{target}-{moment.strftime('%Y%m%dT%H%M%SZ')}.jsonl"
 
 
 def _fail(message: str) -> SystemExit:
@@ -114,6 +132,8 @@ def _run(args: argparse.Namespace) -> None:
     except ValueError as exc:
         raise _fail(str(exc)) from None
     arms = ["direct", "code"] if args.arm == "both" else [args.arm]
+    out_path = args.out or default_out_path(args.target)
+    print(f"writing results to {out_path}", flush=True)
     batch = functools.partial(
         run_batch,
         args.target,
@@ -121,7 +141,7 @@ def _run(args: argparse.Namespace) -> None:
         task_ids,
         model,
         args.runs,
-        args.out,
+        out_path,
         run_timeout_s=args.run_timeout_s,
         max_llm_calls=args.max_llm_calls,
     )
@@ -152,12 +172,19 @@ def _report(args: argparse.Namespace) -> None:
     records: list[RunRecord] = []
     for path in _expand(args.paths):
         lines = path.read_text(encoding="utf-8").splitlines()
-        for number, line in enumerate(lines, start=1):
-            if not line.strip():
-                continue
+        numbered = [(n, line) for n, line in enumerate(lines, start=1) if line.strip()]
+        for index, (number, line) in enumerate(numbered):
             try:
                 records.append(RunRecord.from_json(line))
             except (ValueError, TypeError, KeyError) as exc:
+                if index == len(numbered) - 1:
+                    # A crash mid-write leaves a truncated last line; skip it.
+                    print(
+                        f"mcpx: warning: {path}:{number}: skipping a malformed "
+                        f"last line ({exc})",
+                        file=sys.stderr,
+                    )
+                    continue
                 raise _fail(f"{path}:{number}: not a run record ({exc})") from None
     markdown = render_markdown(summarize(records))
     print(markdown)
@@ -167,7 +194,7 @@ def _report(args: argparse.Namespace) -> None:
 
 
 def _demo() -> None:
-    from mcpx.sandbox import demo
+    from mcpx import demo
 
     print(anyio.run(demo.run_demo))
 

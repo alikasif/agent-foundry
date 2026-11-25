@@ -281,3 +281,51 @@ async def test_agent_code_cannot_import_the_harness(tmp_path: Path) -> None:
         r = await rt.run(code)
     assert r.exit_code == 0, r.stderr
     assert r.stdout.split() == ["mcpx", "blocked", "psutil", "blocked", "3000"]
+
+
+class _DeniedProcess:
+    """A psutil.Process stand-in on which every operation is refused."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def children(self, recursive: bool = False) -> list["_DeniedProcess"]:
+        raise psutil.AccessDenied(self.pid)
+
+    def kill(self) -> None:
+        raise psutil.AccessDenied(self.pid)
+
+
+def test_kill_tree_swallows_access_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied_wait(*args: object, **kwargs: object) -> None:
+        raise psutil.AccessDenied(1)
+
+    monkeypatch.setattr(psutil, "Process", _DeniedProcess)
+    monkeypatch.setattr(psutil, "wait_procs", denied_wait)
+    kill_tree(12345)  # must not raise
+
+    def denied_lookup(pid: int) -> None:
+        raise psutil.AccessDenied(pid)
+
+    monkeypatch.setattr(psutil, "Process", denied_lookup)
+    kill_tree(12345)
+
+
+async def test_a_child_that_never_reports_exit_cannot_hang_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import mcpx.sandbox.runtime as runtime_module
+
+    async def never(proc: object) -> int:
+        await anyio.sleep_forever()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(runtime_module, "_exited", never)
+    monkeypatch.setattr(runtime_module, "_KILL_WAIT_S", 1.0)
+    async with ticketdesk_runtime(tmp_path, timeout_s=1) as rt:
+        started = time.perf_counter()
+        with anyio.fail_after(30):
+            r = await rt.run("print('started', flush=True)\nwhile True: pass")
+        elapsed = time.perf_counter() - started
+    assert r.timed_out
+    assert elapsed < 15, f"run took {elapsed:.1f} s"

@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from mcpx.sandbox.demo import run_demo
+from mcpx.demo import run_demo
 from mcpx.targets.ticketdesk.seed import get_dataset
 
 pytestmark = pytest.mark.anyio

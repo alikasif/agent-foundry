@@ -125,6 +125,16 @@ def test_evaluate_answer_reports_invalid_json() -> None:
     assert error is not None and "not valid JSON" in error
 
 
+def test_evaluate_answer_turns_a_failing_ground_truth_into_an_error() -> None:
+    def broken() -> Any:
+        raise LookupError("dataset changed")
+
+    task = Task("T", "q", broken, lambda a, t: a == t)
+    correct, error = evaluate_answer(task, "ANSWER: 3")
+    assert correct is False
+    assert error == "scoring failed: LookupError: dataset changed"
+
+
 def test_evaluate_answer_reports_an_empty_response() -> None:
     assert evaluate_answer(_task(3), "") == (False, "empty final response")
 

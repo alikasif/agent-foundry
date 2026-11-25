@@ -6,7 +6,9 @@ page inside the child process, so the full ticket JSON never leaves it; only the
 five result rows are printed back. The report compares how many characters of
 raw tool-result JSON the code processed with how many it printed.
 
-Run it with ``python -m mcpx.sandbox.demo``.
+Run it with ``uv run mcpx demo`` (or ``python -m mcpx.demo``). It lives outside
+``mcpx.sandbox`` because it uses ``codegen`` and ``targets``, which the sandbox
+package must not depend on.
 """
 
 import asyncio

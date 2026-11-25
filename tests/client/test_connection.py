@@ -38,7 +38,7 @@ async def test_call_tool_returns_parsed_json() -> None:
 
 async def test_call_tool_unwraps_list_result() -> None:
     async with Connection(get_target("ticketdesk")) as c:
-        listing = await c.call_tool("list_tickets", {"state": "closed", "per_page": 1})
+        listing = await c.call_tool("list_tickets", {"status": "closed", "per_page": 1})
         ticket_id = listing["items"][0]["id"]
         reviewers = await c.call_tool("list_ticket_reviewers", {"ticket_id": ticket_id})
     assert isinstance(reviewers, list)

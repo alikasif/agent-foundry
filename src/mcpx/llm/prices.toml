@@ -1,8 +1,9 @@
 # USD per million tokens, one table per benchmarked OpenRouter model id.
 # Source: https://openrouter.ai/api/v1/models, fetched 2026-11-25.
 # OpenRouter lists per-token prices; each value below is that price times 1e6.
-# These are the listing's default prices; they can differ by provider (and the
-# -1017 listing also carries UTC time-of-day overrides, half price off-peak).
+# Prices are the listing's default (peak) price: an upper bound; off-peak and
+# per-provider prices are lower or differ (the -1017 listing carries UTC
+# time-of-day overrides, half price off-peak).
 # Both models: context 1048576, tool calling and reasoning supported.
 
 ["deepseek/deepseek-v4.1-flash"]
