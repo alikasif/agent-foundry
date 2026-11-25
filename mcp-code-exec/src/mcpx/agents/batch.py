@@ -6,7 +6,6 @@ latency over the batch hits both arms equally.
 """
 
 import importlib.metadata
-import inspect
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -15,6 +14,7 @@ from mcpx.agents.run import Arm, run_once
 from mcpx.bench.report import output_total, prompt_total
 from mcpx.bench.tasks import Task
 from mcpx.bench.usage import RunRecord
+from mcpx.codemode.protocol import CODEMODE_MAX_TOOL_CALLS
 from mcpx.llm.models import ModelConfig
 from mcpx.targets import get_tasks
 
@@ -59,15 +59,13 @@ def _check_inputs(arms: list[str], runs: int) -> None:
 def _fastmcp_settings() -> dict[str, str]:
     """The fastmcp arm's own facts: installed version and Code Mode's call cap.
 
-    CodeMode is imported here, not at module level, so that importing this
-    module stays light for batches without the arm.
+    The version comes from package metadata, not an import: importing FastMCP
+    changes the process (it patches MCP types and configures logging), and the
+    direct and code arms must run in the same process state in every batch.
     """
-    from fastmcp.experimental.transforms.code_mode import CodeMode
-
-    cap = inspect.signature(CodeMode).parameters["max_tool_calls"].default
     return {
         "fastmcp": importlib.metadata.version("fastmcp"),
-        "max_tool_calls": str(cap),
+        "max_tool_calls": str(CODEMODE_MAX_TOOL_CALLS),
     }
 
 

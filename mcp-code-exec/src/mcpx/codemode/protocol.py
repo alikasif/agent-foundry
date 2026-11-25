@@ -15,6 +15,10 @@ from typing import Any
 # Environment variable that names the call log file for the proxy process.
 CALL_LOG_ENV = "MCPX_CODEMODE_CALL_LOG"
 
+# FastMCP's CodeMode ``max_tool_calls`` default, pinned here so the harness can
+# record it without importing FastMCP (a test keeps the two in step).
+CODEMODE_MAX_TOOL_CALLS = 50
+
 # The three tools FastMCP's CodeMode exposes in place of the backend's own.
 SEARCH_TOOL = "search"
 SCHEMA_TOOL = "get_schema"
