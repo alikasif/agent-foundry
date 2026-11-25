@@ -1,14 +1,23 @@
 """End-to-end tests of the Code Mode proxy, launched as a real stdio subprocess.
 
-The client is ``fastmcp.Client`` over a stdio transport, so a proxy that fails
-to start or to serve fails the connect. Stray stdout is not detected here: per
-the spike notes this client logs a parse error and carries on.
+Most tests use ``fastmcp.Client`` over a stdio transport: a proxy that fails to
+start or to serve fails the connect. That client tolerates stray stdout (it logs
+a parse error and carries on, per the spike notes), so one test speaks raw
+JSON-RPC to the subprocess and asserts that stdout carries only protocol
+traffic, including when a sandboxed script prints.
 """
 
+import json
+import os
+import queue
+import subprocess
 import sys
+import threading
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import anyio
 import pytest
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
@@ -155,3 +164,98 @@ async def test_unsupported_python_is_an_error_result(client: Client) -> None:
     # The proxy survived the bad script and still serves requests.
     result = await client.call_tool(SEARCH_TOOL, {"query": "latest release"})
     assert "get_latest_release" in _text(result)
+
+
+SESSION_TIMEOUT = 60.0
+
+
+def _raw_session(call_log: Path) -> list[str]:
+    """Drive the proxy with raw JSON-RPC and return every line it wrote to stdout.
+
+    Sends initialize, initialized, tools/list and an execute that prints, waits
+    for the execute reply, then closes stdin. A hung proxy raises ``TimeoutError``
+    and is always killed.
+    """
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "stdout-check", "version": "0"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": EXECUTE_TOOL,
+                "arguments": {EXECUTE_CODE_PARAM: "print('X')\nreturn 1"},
+            },
+        },
+    ]
+    env = {**os.environ, CALL_LOG_ENV: str(call_log)}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "mcpx.codemode.proxy", "ticketdesk"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    lines: queue.Queue[bytes] = queue.Queue()
+
+    def pump() -> None:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            lines.put(raw)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    seen: list[bytes] = []
+    try:
+        assert proc.stdin is not None
+        for message in messages:
+            proc.stdin.write(json.dumps(message).encode() + b"\n")
+        proc.stdin.flush()
+        deadline = time.monotonic() + SESSION_TIMEOUT
+        answered = False
+        while not answered:
+            try:
+                raw = lines.get(timeout=max(deadline - time.monotonic(), 0.01))
+            except queue.Empty:
+                raise TimeoutError("no execute reply from the proxy") from None
+            seen.append(raw)
+            try:
+                answered = json.loads(raw).get("id") == 3
+            except (json.JSONDecodeError, AttributeError):
+                pass  # stray output: kept in ``seen`` for the caller to judge
+        proc.stdin.close()
+        proc.wait(timeout=SESSION_TIMEOUT)
+        reader.join(timeout=SESSION_TIMEOUT)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    while not lines.empty():
+        seen.append(lines.get_nowait())
+    return [raw.decode("utf-8", errors="replace") for raw in seen]
+
+
+async def test_stdout_carries_only_protocol_traffic(call_log: Path) -> None:
+    out = await anyio.to_thread.run_sync(_raw_session, call_log)
+
+    lines = [line for line in out if line.strip()]
+    parsed = []
+    for line in lines:
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            pytest.fail(f"non-protocol line on stdout: {line!r}")
+    assert all(isinstance(message, dict) for message in parsed)
+    assert all(message.get("jsonrpc") == "2.0" for message in parsed)
+    assert any("result" in message for message in parsed)
