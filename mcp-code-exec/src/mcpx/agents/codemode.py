@@ -7,6 +7,7 @@ started by module name only; this package never imports it. Results reach the
 model through the direct arm's ``structured_result_only`` unchanged.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,7 +17,6 @@ from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
 from mcpx.agents.direct import (
     AGENT_NAME,
-    MCP_TIMEOUT_S,
     TOOL_LIST_TTL_S,
     structured_result_only,
 )
@@ -27,17 +27,27 @@ from mcpx.client.target import Target
 from mcpx.codemode.protocol import CALL_LOG_ENV
 from mcpx.llm.models import ModelConfig
 
+# Per-request read timeout for the proxy: the same 60 s as the code arm's
+# Runtime default, so the harness adds no handicap to ``execute``.
+CODEMODE_TIMEOUT_S = 60.0
+
 
 def codemode_target(target_name: str, call_log: Path) -> Target:
     """Describe how to launch the Code Mode proxy for ``target_name``.
 
     The proxy appends one JSON line per backend call to ``call_log``.
+    ``FASTMCP_ENV_FILE`` points at the null device, because FastMCP otherwise
+    reads ``.env`` from the inherited working directory and a ``FASTMCP_*`` key
+    there would silently retune the arm.
     """
     return Target(
         name=f"{target_name}-codemode",
         command=sys.executable,
         args=("-m", "mcpx.codemode.proxy", target_name),
-        env_factory=lambda: {CALL_LOG_ENV: str(call_log)},
+        env_factory=lambda: {
+            CALL_LOG_ENV: str(call_log),
+            "FASTMCP_ENV_FILE": os.devnull,
+        },
     )
 
 
@@ -52,7 +62,7 @@ def build_codemode_agent(
     toolset = McpToolset(
         connection_params=StdioConnectionParams(
             server_params=server_parameters(codemode_target(target_name, call_log)),
-            timeout=MCP_TIMEOUT_S,
+            timeout=CODEMODE_TIMEOUT_S,
         ),
         tool_list_cache_ttl_seconds=TOOL_LIST_TTL_S,
     )
