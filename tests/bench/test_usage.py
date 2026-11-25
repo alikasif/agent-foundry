@@ -165,4 +165,10 @@ def test_committed_result_files_still_load() -> None:
     for path in files:
         lines = path.read_text(encoding="utf-8").splitlines()
         records = [RunRecord.from_json(line) for line in lines if line.strip()]
-        assert records and all(r.trace == [] for r in records)
+        assert records
+        if "-v3-" in path.name:
+            # Written after traces and settings existed: both must be present.
+            assert all(r.trace and r.settings for r in records), path.name
+        else:
+            # v1 and v2 predate traces and settings: they load with the defaults.
+            assert all(r.trace == [] and r.settings == "" for r in records), path.name
