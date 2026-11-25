@@ -7,13 +7,13 @@ import pytest
 from mcpx.agents.batch import run_batch, run_settings
 from mcpx.bench.usage import RunRecord
 from mcpx.llm.models import ModelConfig
-from tests.agents.test_arms import _closed_port, _python_children, _UnreachableModel
+from tests.agents.helpers import UnreachableModel, closed_port, python_children
 
 pytestmark = pytest.mark.anyio
 
 
-def _model() -> _UnreachableModel:
-    return _UnreachableModel("x/unreachable", timeout_s=5.0, port=_closed_port())
+def _model() -> UnreachableModel:
+    return UnreachableModel("x/unreachable", timeout_s=5.0, port=closed_port())
 
 
 def _read(path: Path) -> list[RunRecord]:
@@ -59,7 +59,7 @@ async def test_batch_writes_one_line_per_run_in_interleaved_order(
     assert len(printed) == 4
     assert "A" in printed[0] and "direct" in printed[0]
     assert "dummy-not-a-key" not in "".join(printed)
-    assert _python_children() == []
+    assert python_children() == []
 
 
 async def test_batch_orders_tasks_as_given_and_appends(tmp_path: Path) -> None:

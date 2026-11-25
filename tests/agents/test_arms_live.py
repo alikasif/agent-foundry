@@ -53,3 +53,14 @@ async def test_code_arm_uses_fewer_prompt_tokens_on_task_a() -> None:
     code_total = sum(c.prompt_tokens or 0 for c in code.calls)
     assert direct_total > 0 and code_total > 0, (direct, code)
     assert code_total < direct_total, (code_total, direct_total)
+
+
+async def test_real_runs_record_a_trace_and_mcp_calls() -> None:
+    direct = await _run_task_a("direct")
+    code = await _run_task_a("code")
+    for rec in (direct, code):
+        assert rec.trace, rec
+        assert rec.mcp_calls is not None and rec.mcp_calls >= 1, rec
+    scripts = [item for item in code.trace if item.get("kind") == "run_python"]
+    assert scripts and all(item["code"].strip() for item in scripts), code.trace
+    assert any("servers" in item["code"] for item in scripts), code.trace

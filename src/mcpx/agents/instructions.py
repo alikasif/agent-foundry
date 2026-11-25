@@ -1,14 +1,15 @@
 """System instructions for the two arms.
 
-``BASE_INSTRUCTION`` is identical for both arms and names no server tool, so the
-only difference the model sees is how its tools are offered. Neither arm gets a
-list of tools in the prompt: the direct arm receives schemas through the
-tool-calling interface, the code arm discovers wrappers by reading files.
+``BASE_INSTRUCTION`` is identical for both arms, names no server tool and no
+target (so a new target needs no change here), so the only difference the
+model sees is how its tools are offered. Neither arm gets a list of tools in the
+prompt: the direct arm receives schemas through the tool-calling interface, the
+code arm discovers wrappers by reading files.
 """
 
 BASE_INSTRUCTION = """\
-You answer questions about the data in a ticket tracker. Look the data up using \
-only the tools you have been given; do not guess.
+You answer questions about data that is available through your tools. Look the \
+data up using only the tools you have been given; do not guess.
 
 Be economical: fetch only the data the question needs and stop as soon as you \
 can answer.

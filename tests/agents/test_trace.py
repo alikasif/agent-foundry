@@ -1,25 +1,29 @@
-"""What a run did: ``RunRecord.trace`` and ``RunRecord.mcp_calls``, offline."""
+"""What a run did: ``RunRecord.trace`` and ``RunRecord.mcp_calls``, no model.
+
+Trace building is tested as a pure function on hand-built ADK events; the
+Bridge's MCP-call counting and tracing run against the real ticketdesk server
+through ``Runtime``. A live test (``test_arms_live.py``) checks a real run.
+"""
 
 import json
+from pathlib import Path
 
 import anyio
 import pytest
+from google.adk.events import Event
+from google.genai import types
 
-from mcpx.agents.run import (
-    TRACE_ITEM_CHARS,
-    TRACE_MAX_ITEMS,
-    _Progress,
-    run_once,
-)
-from mcpx.bench.usage import RunRecord
-from mcpx.targets import get_tasks
-from tests.agents.scripted import ScriptedLlm, ScriptedModel, call, text
-from tests.agents.test_arms import _python_children
+from mcpx.agents.code import RUN_PYTHON
+from mcpx.agents.run import TRACE_ITEM_CHARS, TRACE_MAX_ITEMS, _Progress, _record
+from mcpx.bench.usage import CallUsage, RunRecord
+from mcpx.client.connection import Connection
+from mcpx.codegen.generator import generate_workspace
+from mcpx.sandbox.bridge import Bridge
+from mcpx.sandbox.runtime import Runtime
+from mcpx.targets import get_target
 
 pytestmark = pytest.mark.anyio
 
-TASK_A = next(t for t in get_tasks("ticketdesk") if t.id == "A")
-FINAL = 'ANSWER: "v1.2.0"'
 SCRIPT = (
     "from servers.ticketdesk import count_tickets, get_latest_release\n"
     "print(count_tickets())\n"
@@ -27,21 +31,21 @@ SCRIPT = (
 )
 
 
-def _model(*replies: list) -> ScriptedModel:
-    return ScriptedModel("x/scripted", llm=ScriptedLlm(model="s", replies=[*replies]))
+def _calls(*calls: tuple[str, dict[str, object]]) -> Event:
+    """A model event asking for the given function calls."""
+    parts = [
+        types.Part(function_call=types.FunctionCall(name=name, args=args))
+        for name, args in calls
+    ]
+    return Event(author="a", content=types.Content(role="model", parts=parts))
 
 
-async def test_direct_run_traces_each_function_call() -> None:
-    model = _model(
-        [call("count_tickets")],
-        [call("get_latest_release", project="atlas")],
-        [text(FINAL)],
-    )
-    with anyio.fail_after(120):
-        rec = await run_once("direct", "ticketdesk", TASK_A, model, 0)
-    assert rec.error is None and rec.correct, rec
-    assert rec.tool_calls == 2 and rec.mcp_calls == 2
-    assert rec.trace == [
+def test_direct_events_trace_each_function_call() -> None:
+    progress = _Progress()
+    _record(_calls(("count_tickets", {})), progress)
+    _record(_calls(("get_latest_release", {"project": "atlas"})), progress)
+    assert progress.tool_calls == 2
+    assert progress.trace == [
         {"kind": "function_call", "name": "count_tickets", "args": "{}"},
         {
             "kind": "function_call",
@@ -49,28 +53,21 @@ async def test_direct_run_traces_each_function_call() -> None:
             "args": '{"project":"atlas"}',
         },
     ]
-    assert _python_children() == []
 
 
-async def test_code_run_traces_scripts_and_bridge_calls() -> None:
-    model = _model([call("run_python", code=SCRIPT)], [text(FINAL)])
-    with anyio.fail_after(120):
-        rec = await run_once("code", "ticketdesk", TASK_A, model, 0)
-    assert rec.error is None and rec.correct, rec
-    assert rec.tool_calls == 1  # one model-level call ...
-    assert rec.mcp_calls == 2  # ... that made two MCP calls
-    assert rec.trace == [
-        {"kind": "run_python", "code": SCRIPT},
-        {"kind": "mcp_call", "name": "ticketdesk.count_tickets", "args": "{}"},
-        {
-            "kind": "mcp_call",
-            "name": "ticketdesk.get_latest_release",
-            "args": '{"project":"atlas"}',
-        },
-    ]
-    # The trace survives the JSONL round trip.
-    assert RunRecord.from_json(rec.to_json()) == rec
-    assert _python_children() == []
+def test_code_events_trace_the_script_text() -> None:
+    progress = _Progress(code_tool=RUN_PYTHON)
+    _record(_calls((RUN_PYTHON, {"code": SCRIPT})), progress)
+    assert progress.tool_calls == 1
+    assert progress.trace == [{"kind": RUN_PYTHON, "code": SCRIPT}]
+
+
+def test_partial_events_are_not_traced() -> None:
+    progress = _Progress()
+    chunk = _calls(("count_tickets", {}))
+    chunk.partial = True
+    _record(chunk, progress)
+    assert progress.trace == [] and progress.tool_calls == 0
 
 
 def test_trace_items_are_clipped_and_capped() -> None:
@@ -82,3 +79,48 @@ def test_trace_items_are_clipped_and_capped() -> None:
     assert len(first) == TRACE_ITEM_CHARS and first.endswith("[truncated]")
     assert progress.trace[-1]["code"].startswith(str(TRACE_MAX_ITEMS - 1))
     assert len(json.dumps(progress.trace[0])) < TRACE_ITEM_CHARS + 100
+
+
+async def test_bridge_counts_and_traces_the_scripts_mcp_calls(
+    tmp_path: Path,
+) -> None:
+    progress = _Progress(code_tool=RUN_PYTHON)
+    workspace = tmp_path / "workspace"
+    with anyio.fail_after(120):
+        async with Connection(get_target("ticketdesk")) as conn:
+            generate_workspace("ticketdesk", await conn.list_tools(), workspace)
+            bridge = Bridge({"ticketdesk": conn}, on_call=progress.trace_mcp_call)
+            addr = await bridge.start()
+            try:
+                result = await Runtime(workspace, addr).run(SCRIPT)
+            finally:
+                await bridge.stop()
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.split() == ["3000", "v1.2.0"]
+    assert bridge.mcp_calls == 2
+    assert progress.trace == [
+        {"kind": "mcp_call", "name": "ticketdesk.count_tickets", "args": "{}"},
+        {
+            "kind": "mcp_call",
+            "name": "ticketdesk.get_latest_release",
+            "args": '{"project":"atlas"}',
+        },
+    ]
+
+
+def test_a_traced_record_round_trips_through_json() -> None:
+    record = RunRecord(
+        task_id="A",
+        arm="code",
+        model="m",
+        run_index=0,
+        calls=[CallUsage(1, 1, 0)],
+        tool_calls=1,
+        wall_s=1.0,
+        answer_text="",
+        correct=True,
+        error=None,
+        mcp_calls=2,
+        trace=[{"kind": RUN_PYTHON, "code": SCRIPT}],
+    )
+    assert RunRecord.from_json(record.to_json()) == record

@@ -2,8 +2,9 @@
 
 ADK's ``McpTool`` returns the whole dumped MCP result (``content``,
 ``structuredContent``, ``isError``); without ``structured_result_only`` the model
-would read every result about twice. These tests run no real model: a scripted
-``BaseLlm`` (``tests.agents.scripted``) asks for one tool call and records the request ADK sends next.
+would read every result about twice. These tests run no model at all:
+they call the real ticketdesk server through ADK's ``McpToolset`` and apply the
+agent's after-tool callbacks as ADK's tool caller does.
 """
 
 import json
@@ -12,19 +13,15 @@ from typing import Any, cast
 import anyio
 import pytest
 from google.adk.models.lite_llm import _safe_json_serialize
-from google.adk.models.llm_request import LlmRequest
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.tools.tool_context import ToolContext
-from google.genai import types
 
 from mcpx.agents.direct import build_direct_agent, structured_result_only
 from mcpx.bench.usage import UsageRecorder
 from mcpx.client.connection import Connection
+from mcpx.llm.models import ModelConfig
 from mcpx.targets import get_target
-from tests.agents.scripted import ScriptedLlm, ScriptedModel, call, text
 
 pytestmark = pytest.mark.anyio
 
@@ -72,55 +69,50 @@ def test_callback_leaves_text_only_results_untouched() -> None:
     assert structured_result_only(_TOOL, {}, _CTX, text_only) is None
 
 
-def _function_response(request: LlmRequest) -> Any:
-    """The (only) function response in the request's history."""
-    found = [
-        part.function_response.response
-        for content in request.contents
-        for part in content.parts or []
-        if part.function_response is not None
-    ]
-    assert len(found) == 1
-    return found[0]
-
-
 async def _structured() -> Any:
     """The structured content the server returns, as the code arm receives it."""
     async with Connection(get_target("ticketdesk")) as conn:
         return await conn.call_tool("list_tickets", CALL_ARGS)
 
 
+async def _as_sent_to_model(raw: Any, agent: Any) -> Any:
+    """Apply the agent's after-tool callbacks the way ADK's tool caller does.
+
+    ADK (``flows/llm_flows/tools/_caller.py``, steps 5 and 6) runs
+    ``canonical_after_tool_callbacks`` until one returns non-``None`` and uses
+    that value instead of the tool's result.
+    """
+    for callback in agent.canonical_after_tool_callbacks:
+        replaced = callback(_TOOL, CALL_ARGS, _CTX, raw)
+        if replaced is not None:
+            return replaced
+    return raw
+
+
 async def test_model_receives_the_structured_result_only() -> None:
-    llm = ScriptedLlm(
-        model="scripted", replies=[[call("list_tickets", **CALL_ARGS)], [text("ok")]]
-    )
+    # The real ticketdesk server through ADK's own toolset and McpTool; no model.
     agent = build_direct_agent(
-        get_target("ticketdesk"), ScriptedModel("x/scripted", llm=llm), UsageRecorder()
+        get_target("ticketdesk"), ModelConfig("x/none"), UsageRecorder()
     )
     (toolset,) = agent.tools
     assert isinstance(toolset, McpToolset)
-    sessions = InMemorySessionService()
-    runner = Runner(agent=agent, app_name="t", session_service=sessions)
     try:
         with anyio.fail_after(120):
-            session = await sessions.create_session(app_name="t", user_id="u")
-            message = types.Content(role="user", parts=[types.Part(text="go")])
-            async for _ in runner.run_async(
-                user_id="u", session_id=session.id, new_message=message
-            ):
-                pass
+            tools = {t.name: t for t in await toolset.get_tools()}
+            raw = await tools["list_tickets"].run_async(
+                args=CALL_ARGS, tool_context=_CTX
+            )
     finally:
-        await runner.close()
         await toolset.close()
-    assert len(llm.requests) == 2
-    seen = _function_response(llm.requests[1])
     with anyio.fail_after(60):
         structured = await _structured()
     assert len(structured["items"]) == 100
-    # What LiteLLM puts in the tool message: ADK's own serializer.
-    sent = _safe_json_serialize(seen)
     compact = json.dumps(structured, separators=(",", ":"))
-    ratio = len(sent) / len(compact)
+    # Without the callback the model would read the text copy as well.
+    assert {"content", "structuredContent"} <= set(raw)
+    assert len(_safe_json_serialize(raw)) / len(compact) > 2
+    seen = await _as_sent_to_model(raw, agent)
+    # What LiteLLM puts in the tool message: ADK's own serializer.
+    ratio = len(_safe_json_serialize(seen)) / len(compact)
     assert ratio <= MAX_RATIO, f"model sees {ratio:.2f}x the structured data"
-    assert "content" not in seen and "structuredContent" not in seen
     assert seen == structured
