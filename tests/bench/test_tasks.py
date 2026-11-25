@@ -10,7 +10,7 @@ from mcpx.targets.ticketdesk.seed import get_dataset
 from mcpx.targets.ticketdesk.tasks import TASKS
 
 GOLDEN_A = "v1.2.0"
-GOLDEN_B = [32, 39, 50, 63, 74]
+GOLDEN_B = [39, 1769, 2935, 862, 2494]
 GOLDEN_C = [[19, 6], [2, 5], [3, 5]]
 GOLDEN_D = 4476
 
@@ -118,6 +118,21 @@ def test_b_are_open_bugs_with_most_comments() -> None:
         if t.status == "open" and "bug" in t.labels and t.id not in truth
     ]
     assert max(others) <= min(counts)
+
+
+def test_b_top_five_is_strict_and_spread_over_five_pages() -> None:
+    data = get_dataset()
+    bugs = [t for t in data.tickets if t.status == "open" and "bug" in t.labels]
+    bugs.sort(key=lambda t: t.id, reverse=True)  # list_tickets' id_desc order
+    page_of = {t.id: i // 100 + 1 for i, t in enumerate(bugs)}
+    truth = by_id("B").ground_truth()
+    counts = [data.comment_count(i) for i in truth]
+    assert counts == [13, 12, 11, 10, 9]  # strict: the tie rule is never needed
+    rest = max(data.comment_count(t.id) for t in bugs if t.id not in truth)
+    assert rest == 8
+    pages = [page_of[i] for i in truth]
+    assert len(set(pages)) == 5
+    assert pages == [8, 4, 1, 6, 2]
 
 
 def _recent_closed_reviewer_counts() -> list[tuple[int, int]]:

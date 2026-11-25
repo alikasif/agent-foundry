@@ -169,6 +169,16 @@ async def test_list_comments_paginates() -> None:
     assert all(c["ticket_id"] == 10 for c in r["items"])
 
 
+async def test_get_comment_returns_one_comment() -> None:
+    comment = get_dataset().comments[41]
+    assert await call("get_comment", comment_id=comment.id) == {
+        "id": comment.id,
+        "ticket_id": comment.ticket_id,
+        "author_id": comment.author_id,
+        "body": comment.body,
+    }
+
+
 async def test_list_ticket_reviewers() -> None:
     closed = next(t for t in get_dataset().tickets if t.status == "closed")
     assert await call("list_ticket_reviewers", ticket_id=closed.id) == closed.reviewers
@@ -207,6 +217,7 @@ async def test_projects_and_users() -> None:
     [
         ("get_ticket", {"ticket_id": 999999}),
         ("list_comments", {"ticket_id": 999999}),
+        ("get_comment", {"comment_id": 999999}),
         ("list_ticket_reviewers", {"ticket_id": 999999}),
         ("get_project", {"project_id": 999}),
         ("get_user", {"user_id": 999}),

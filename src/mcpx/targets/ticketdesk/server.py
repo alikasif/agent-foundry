@@ -8,8 +8,10 @@ Two data sets are each reachable through exactly one tool, on purpose, so that
 benchmark tasks must chain or page calls instead of finding a shortcut: ticket
 reviewers only through ``list_ticket_reviewers`` (one call per ticket, never a
 ``reviewers`` field on a ticket row) and activity events only through
-``list_activity`` (paged, newest first). ``tests/targets/test_server_guards.py``
-enforces both.
+``list_activity`` (paged, newest first). Comment counts appear only per ticket
+row, and no tool ranks or filters tickets by them, so finding the most
+commented tickets means paging ``list_tickets``. ``tests/targets/
+test_server_guards.py`` enforces all three.
 """
 
 from collections import Counter
@@ -195,6 +197,21 @@ def list_comments(ticket_id: int, page: int = 1, per_page: int = 100) -> Page:
     """
     _ticket_or_raise(ticket_id)
     return _page(get_dataset().comments_for(ticket_id), page, per_page, asdict)
+
+
+@tool
+def get_comment(comment_id: int) -> Row:
+    """Fetch one comment by its numeric id.
+
+    Returns the comment's id, ticket_id, author_id and full body text. Comment
+    ids are global across the ticketdesk, so this is the way to follow a comment
+    id seen in ``search_comments`` or ``list_user_comments`` back to its text.
+    Raises a tool error when the comment id does not exist.
+    """
+    for comment in get_dataset().comments:
+        if comment.id == comment_id:
+            return asdict(comment)
+    raise ToolError(f"Unknown comment id: {comment_id}")
 
 
 @tool
@@ -448,23 +465,6 @@ def list_recently_closed(limit: int = 10) -> list[Row]:
     closed = _tickets_where(status="closed")
     closed.sort(key=lambda t: t.closed_at or "", reverse=True)
     return [_brief(t) for t in closed[: max(1, min(limit, MAX_PER_PAGE))]]
-
-
-@tool
-def list_most_commented_tickets(limit: int = 10) -> list[Row]:
-    """List the tickets with the most comments, busiest first.
-
-    ``limit`` is clamped to between 1 and 100. Ties are broken by higher ticket
-    id. Each row has ticket_id, title and comment_count.
-    """
-    ds = get_dataset()
-    ranked = sorted(
-        ds.tickets, key=lambda t: (ds.comment_count(t.id), t.id), reverse=True
-    )
-    return [
-        {"ticket_id": t.id, "title": t.title, "comment_count": ds.comment_count(t.id)}
-        for t in ranked[: max(1, min(limit, MAX_PER_PAGE))]
-    ]
 
 
 @tool

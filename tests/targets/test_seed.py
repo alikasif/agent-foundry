@@ -95,3 +95,14 @@ def test_events() -> None:
     for e in d.events:
         if e.ticket_id is not None:
             assert d.ticket(e.ticket_id).project_id == e.project_id
+
+
+def test_planted_comments_are_ordinary_comments() -> None:
+    d = get_dataset()
+    assert [c.id for c in d.comments] == list(range(1, len(d.comments) + 1))
+    user_ids = {u.id for u in d.users}
+    for ticket_id in (39, 1769, 2935, 862, 2494):
+        mine = d.comments_for(ticket_id)
+        assert [c.id for c in mine] == sorted(c.id for c in mine)
+        assert all(250 <= len(c.body) <= 350 for c in mine)
+        assert all(c.author_id in user_ids for c in mine)

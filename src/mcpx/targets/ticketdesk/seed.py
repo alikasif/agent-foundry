@@ -23,6 +23,14 @@ RECENT_WINDOW = 30
 # Reviewer counts forced onto the most recently closed tickets so that ranking
 # them by reviewer count has a strict, tie-free top of the list.
 TOP_REVIEWER_COUNTS = (10, 9, 8, 7, 6, 5)
+# Task B: five open ``bug`` tickets get these distinct comment counts, above the
+# natural maximum of 8, so the top five is strict. Ticket i sits at rank
+# ``(PLANTED_PAGES[i] - 1) * 100 + PLANTED_OFFSET`` of the open-bug list ordered
+# newest id first, so the five are on five different pages of 100.
+PLANTED_COMMENT_COUNTS = (13, 12, 11, 10, 9)
+PLANTED_PAGES = (8, 4, 1, 6, 2)
+PLANTED_OFFSET = 13
+PLANTED_BODY_CHARS = 300
 # The newest ``DEPLOY_FREE_TAIL`` events never contain an Atlas deploy.
 DEPLOY_FREE_TAIL = 500
 ATLAS_DEPLOY_NEWEST_FIRST_INDEX = 650
@@ -263,6 +271,48 @@ def _make_comments(
     return comments
 
 
+def _plain_text(start: int, target: int) -> str:
+    """Build pseudo-prose of about ``target`` characters without the RNG."""
+    words: list[str] = []
+    length = 0
+    index = start
+    while length < target:
+        word = _WORDS[index % len(_WORDS)]
+        words.append(word)
+        length += len(word) + 1
+        index += 7
+    return " ".join(words)[:target].rstrip() + "."
+
+
+def _plant_top_commented(
+    tickets: list[Ticket], comments: list[Comment], user_ids: list[int]
+) -> None:
+    """Give five open bug tickets a strict, tie-free top of comment counts.
+
+    Appends comments (fresh ids after the last one, deterministic authors and
+    bodies of the usual length) so the chosen tickets reach
+    ``PLANTED_COMMENT_COUNTS``. Draws nothing from the RNG, so the rest of the
+    dataset is unchanged.
+    """
+    bugs = [t for t in tickets if t.status == "open" and "bug" in t.labels]
+    bugs.sort(key=lambda t: t.id, reverse=True)
+    deepest = (max(PLANTED_PAGES) - 1) * 100 + PLANTED_OFFSET
+    if len(bugs) <= deepest:
+        raise RuntimeError(f"only {len(bugs)} open bug tickets; need {deepest + 1}")
+    have = Counter(c.ticket_id for c in comments)
+    for page, count in zip(PLANTED_PAGES, PLANTED_COMMENT_COUNTS, strict=True):
+        ticket = bugs[(page - 1) * 100 + PLANTED_OFFSET]
+        for k in range(count - have[ticket.id]):
+            comments.append(
+                Comment(
+                    id=len(comments) + 1,
+                    ticket_id=ticket.id,
+                    author_id=user_ids[(ticket.id + 11 * k) % len(user_ids)],
+                    body=_plain_text(ticket.id + k, PLANTED_BODY_CHARS),
+                )
+            )
+
+
 def _make_releases(rng: random.Random, projects: list[Project]) -> list[Release]:
     """Create three releases per project."""
     releases: list[Release] = []
@@ -312,6 +362,7 @@ def build_dataset(seed: int = DEFAULT_SEED) -> Dataset:
     comments = _make_comments(rng, tickets, user_ids)
     releases = _make_releases(rng, projects)
     events = _make_events(rng, tickets, projects)
+    _plant_top_commented(tickets, comments, user_ids)  # RNG-free, so done last
     return Dataset(users, projects, tickets, comments, releases, events)
 
 
