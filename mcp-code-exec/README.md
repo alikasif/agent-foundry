@@ -1,10 +1,15 @@
 # mcpx
 
-Benchmark harness that compares two ways for an LLM agent to use MCP servers:
-direct MCP tool-calling versus writing and running code against generated
-client wrappers ("code execution with MCP").
+Benchmark harness that compares three ways for an LLM agent to use MCP servers:
 
-Built on Google ADK, LiteLLM (OpenRouter) and the MCP Python SDK.
+- `direct`: MCP tool-calling, every tool schema loaded into the model's context.
+- `code`: the model writes and runs code against generated client wrappers it
+  discovers by reading files ("code execution with MCP").
+- `fastmcp`: FastMCP's experimental Code Mode, applied to a stdio proxy of the
+  server: the model sees three meta-tools (`search`, `get_schema`, `execute`) and
+  writes code that calls `call_tool(...)` in FastMCP's Monty sandbox.
+
+Built on Google ADK, LiteLLM (OpenRouter), the MCP Python SDK and FastMCP.
 
 > **Warning: this is not a security sandbox.** The code-execution path runs
 > model-generated Python in a local subprocess with your user's permissions.
@@ -41,9 +46,10 @@ The shortest form uses the defaults (`--runs 3`, model from `MODEL`, results in
 uv run mcpx run --target ticketdesk --task B --arm direct
 ```
 
-- `--arm` is `direct`, `code` or `both`; `--task` is `A`, `B`, `C`, `D` or
-  `all`. Runs are sequential, taking turns between the arms for each task and
-  run index, so provider latency drift hits both arms alike.
+- `--arm` is `direct`, `code`, `fastmcp`, `both` (direct and code) or `all` (all
+  three); `--task` is `A`, `B`, `C`, `D` or `all`. Runs are sequential, taking
+  turns between the arms for each task and run index, so provider latency drift
+  hits every arm alike.
 - `--model` is optional: when omitted, the `MODEL` environment variable (for
   example from `.env`) is used; with neither the command exits with a message.
 - `--runs` defaults to 3 and `--out` to `runs/<target>-<UTC timestamp>.jsonl`
@@ -64,8 +70,12 @@ uv run mcpx run --target ticketdesk --task B --arm direct
   `settings: (not recorded)`.
 - Every record also stores a `trace` of what the run did (each function call
   with its arguments for the direct arm; each `run_python` script and each MCP
-  call it made for the code arm; texts cut to 4000 characters, at most 200
-  items) and `mcp_calls`, the number of MCP tool calls actually executed.
+  call it made for the code arm; each `execute` script, the other meta-tool
+  calls and the backend calls the proxy logged for the fastmcp arm; texts cut to
+  4000 characters, at most 200 items) and `mcp_calls`, the number of MCP tool
+  calls actually executed against the backend. In a batch that includes the
+  fastmcp arm, every record's settings also carry `fastmcp=<version>;
+  max_tool_calls=<cap>`.
 - Models need an entry in `src/mcpx/llm/prices.toml` for cost figures; without
   one, costs show `n/a`.
 
@@ -79,8 +89,11 @@ uv run mcpx report runs/*.jsonl --md report.md
 Reading the report:
 
 - `tool calls` are model-level function calls (in the code arm, one per
-  `run_python` call); `MCP calls` are the MCP tool calls actually executed (in
-  the code arm, every call a script made through the Bridge).
+  `run_python` call; in the fastmcp arm, one per `search`, `get_schema` or
+  `execute`); `MCP calls` are the MCP tool calls actually executed (in the code
+  arm, every call a script made through the Bridge; in the fastmcp arm, every
+  backend call the proxy logged, so a call FastMCP rejects before dispatch, such
+  as the 51st in one `execute`, is not counted).
 - Usage counts are what ADK reports, and ADK fills in what the provider left
   out: a missing prompt, output or cached-token count becomes 0 (so a cached
   count of 0 may mean the provider did not report it), and a reasoning count of
@@ -109,8 +122,11 @@ uv run pyrefly check
 - `src/mcpx/targets/` MCP servers under test (`ticketdesk`) and their tasks.
 - `src/mcpx/client/`, `codegen/`, `sandbox/` MCP connection, generated Python
   wrappers for the tools, and the subprocess that runs model-written code.
-- `src/mcpx/agents/` the `direct` and `code` arms on Google ADK, `run_once`
-  (one run, never raises) and `run_batch` (the sequential loop).
+- `src/mcpx/agents/` the `direct`, `code` and `fastmcp` arms on Google ADK,
+  `run_once` (one run, never raises) and `run_batch` (the sequential loop).
+- `src/mcpx/codemode/` the FastMCP Code Mode proxy (`python -m
+  mcpx.codemode.proxy <target>`) and the call-log protocol it shares with the
+  harness.
 - `src/mcpx/bench/` task model, usage records and the report.
 - `src/mcpx/llm/` model configuration and the price table.
 - `src/mcpx/demo.py` the hand-written task-B code demo (`mcpx demo`).
@@ -130,6 +146,11 @@ isolation. The progress output never prints
 keys or environment values, and API key values are replaced with `[redacted]`
 in the error text, answer and trace stored in the JSONL records.
 
+The fastmcp arm runs model-written Python in FastMCP's Monty sandbox instead of
+our subprocess. FastMCP's documentation says the code is untrusted; we have not
+evaluated Monty's isolation, and that arm's backend calls run in the proxy
+process tree with your user's permissions.
+
 ## Results
 
 Measured results are in [`docs/results.md`](docs/results.md), with the raw JSONL
@@ -143,6 +164,8 @@ and say nothing about other MCP servers.
 | google-adk    | 2.15.0         |
 | litellm       | 1.110.2        |
 | mcp           | 2.3.0          |
+| fastmcp       | 4.2.6          |
+| pydantic-monty | 1.7.0         |
 | psutil        | 7.2.2          |
 | python-dotenv | 1.2.4          |
 | anyio         | 4.16.0         |
@@ -155,3 +178,6 @@ and say nothing about other MCP servers.
 
 - Design: `docs/specs/2026-11-23-mcp-code-execution-design.md`
 - Plan: `docs/plans/2026-11-23-mcp-code-execution.md`
+- FastMCP arm: spec `docs/specs/2026-11-25-fastmcp-code-mode-arm-design.md`, plan
+  `docs/plans/2026-11-25-fastmcp-code-mode-arm.md`, spike notes
+  `docs/notes/2026-11-25-fastmcp-spike.md`
