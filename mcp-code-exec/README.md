@@ -19,9 +19,10 @@ pydantic-monty.
 
 > **Warning: the sandbox is probed, not proven.** The code arm runs
 > model-written Python in Monty, not in your interpreter, and tests check that it
-> has no network, process or environment access. Monty's isolation is not proven;
-> see [Safety](#safety) before pointing the harness at a server or credentials you
-> care about.
+> has no network, process or environment access. Monty's isolation is not proven,
+> and the fastmcp arm's sandbox (FastMCP's own Monty, in its proxy process) is not
+> evaluated at all. See [Safety](#safety) before pointing the harness at a server
+> or credentials you care about.
 
 ## Setup
 
@@ -161,7 +162,7 @@ point probed by a test in `tests/sandbox/test_monty_runtime.py` or
   script, and the script cannot reach the connection behind it.
 - Limits per script: 60 s wall clock (time spent in tool calls included; the
   worker is killed at the deadline), 20,000 characters of output (the rest is
-  dropped and the result says so) and 256 MB of memory.
+  dropped and the result says so) and 256 MiB of memory.
 
 What this does not give you:
 
@@ -175,9 +176,12 @@ What this does not give you:
 - The model sees whatever the tools return, and that text goes to the model
   provider like any other message.
 
-The fastmcp arm runs model-written Python in FastMCP's own Monty sandbox inside
-the harness process, and its backend calls go through a proxy process that runs
-with your user's permissions. FastMCP's documentation says the code is untrusted;
+The fastmcp arm runs model-written Python in FastMCP's own Monty sandbox, inside
+the proxy process (`python -m mcpx.codemode.proxy`) that the harness launches, not
+in the harness process. That proxy and the backend calls it makes run with your
+user's permissions. Both the code arm and the fastmcp arm therefore execute model
+code in Monty; they differ in who runs it (our runtime vs FastMCP) and in the
+gateway and limits around it. FastMCP's documentation says the code is untrusted;
 we have not evaluated that sandbox's isolation. The progress output never prints
 keys or environment values, and API key values are replaced with `[redacted]` in
 the error text, answer and trace stored in the JSONL records. Every `run_python`

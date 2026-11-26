@@ -34,7 +34,7 @@ async def _run_task_a(arm: Arm) -> RunRecord:
         return await run_once(arm, "ticketdesk", TASKS_BY_ID["A"], LIVE_MODEL, 0)
 
 
-@pytest.mark.parametrize("arm", ["direct", "code", "fastmcp"])
+@pytest.mark.parametrize("arm", ["direct", "code"])
 async def test_task_a_is_answered_correctly(arm: Arm) -> None:
     rec = await _run_task_a(arm)
     assert rec.error is None, rec
@@ -71,6 +71,7 @@ async def test_fastmcp_arm_answers_task_a_and_counts_backend_calls() -> None:
     rec = await _run_task_a("fastmcp")
     assert rec.error is None, rec
     assert rec.correct, rec
+    assert rec.calls and rec.calls[0].prompt_tokens, rec
     # Backend calls the proxy logged, not the model's own meta-tool calls
     # (search, get_schema, execute); the other arms make 1 to 2 on task A.
     assert rec.mcp_calls is not None and 1 <= rec.mcp_calls <= 3, rec
