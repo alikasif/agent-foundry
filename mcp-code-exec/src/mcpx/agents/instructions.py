@@ -44,9 +44,17 @@ def code_instruction(target_name: str) -> str:
 
 # Every sentence is checked against the real proxy in tests/codemode/test_proxy.py
 # (search by name or description, parameters from get_schema, an awaited
-# call_tool inside execute, print discarded, no state kept between calls).
+# call_tool inside execute, print discarded, no state kept between calls, the
+# socket/subprocess/third-party imports that fail).
 FASTMCP_ADDENDUM = f"""
-Your tools are reached through three tools. `{SEARCH_TOOL}` finds tools by name or description. `{SCHEMA_TOOL}` returns the parameters of the tools you name. `{EXECUTE_TOOL}` runs a Python script that calls the tools with `await call_tool(name, params)`. Only the value the script returns reaches you; anything it prints is discarded. Variables do not persist between `{EXECUTE_TOOL}` calls.
+Your tools are reached through three meta-tools. `{SEARCH_TOOL}` finds tools by \
+name or description. `{SCHEMA_TOOL}` returns the parameters of the tools you \
+name. `{EXECUTE_TOOL}` runs a Python script that calls the tools with \
+`await call_tool(name, params)`. The script runs in a restricted Python \
+interpreter: only part of the standard library is available, and there is no \
+network or process access. Only the value the script returns reaches you; \
+anything it prints is discarded. Variables do not persist between \
+`{EXECUTE_TOOL}` calls.
 """
 
 

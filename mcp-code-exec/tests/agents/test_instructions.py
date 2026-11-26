@@ -36,3 +36,12 @@ async def test_addendum_mentions_no_target_tool_names() -> None:
     # No numbers either: no limits, counts or other hints.
     assert re.search(r"\d", FASTMCP_ADDENDUM) is None
     assert "ticket" not in FASTMCP_ADDENDUM.lower()
+
+
+def test_addendum_states_the_interpreter_restriction_and_meta_tools() -> None:
+    assert "three meta-tools." in FASTMCP_ADDENDUM
+    assert (
+        "The script runs in a restricted Python interpreter: only part of the "
+        "standard library is available, and there is no network or process "
+        "access." in FASTMCP_ADDENDUM
+    )

@@ -10,6 +10,7 @@ traffic, including when a sandboxed script prints.
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -23,6 +24,7 @@ from fastmcp import Client
 from fastmcp.client.client import CallToolResult
 from fastmcp.client.transports import StdioTransport
 
+from mcpx.client.connection import Connection
 from mcpx.codemode.protocol import (
     CALL_LOG_ENV,
     EXECUTE_CODE_PARAM,
@@ -32,6 +34,7 @@ from mcpx.codemode.protocol import (
     LoggedCall,
     read_call_log,
 )
+from mcpx.targets import get_target
 
 pytestmark = pytest.mark.anyio
 
@@ -269,13 +272,28 @@ async def test_stdout_carries_only_protocol_traffic(call_log: Path) -> None:
     assert reply["result"].get("isError") is not True, reply
 
 
-async def test_search_matches_names_and_descriptions(client: Client) -> None:
-    by_name = await client.call_tool(SEARCH_TOOL, {"query": "get_latest_release"})
-    # "full body text" occurs only in get_ticket's docstring, never in a name.
-    by_description = await client.call_tool(SEARCH_TOOL, {"query": "full body text"})
+def _hits(result: CallToolResult) -> list[str]:
+    """The tool names in a ``search`` result, which lists ``- name: description``."""
+    return re.findall(r"^- (\w+):", _text(result), flags=re.MULTILINE)
 
-    assert "get_latest_release" in _text(by_name)
-    assert "get_ticket" in _text(by_description)
+
+async def test_search_matches_names_and_descriptions(client: Client) -> None:
+    # Premise: "overview" is part of one tool's name and of no description, and
+    # "stale" is in one description and in no tool name, read from the real list.
+    async with Connection(get_target("ticketdesk")) as conn:
+        specs = await conn.list_tools()
+    assert [s.name for s in specs if "overview" in s.name] == ["get_overview"]
+    assert not [s for s in specs if "overview" in (s.description or "").lower()]
+    assert [s.name for s in specs if "stale" in (s.description or "").lower()] == [
+        "list_oldest_open_tickets"
+    ]
+    assert not [s for s in specs if "stale" in s.name]
+
+    by_name = await client.call_tool(SEARCH_TOOL, {"query": "overview"})
+    by_description = await client.call_tool(SEARCH_TOOL, {"query": "stale"})
+
+    assert _hits(by_name) == ["get_overview"]
+    assert _hits(by_description) == ["list_oldest_open_tickets"]
 
 
 async def test_get_schema_returns_a_tools_parameters(client: Client) -> None:
@@ -296,3 +314,31 @@ async def test_print_is_discarded_and_state_does_not_persist(client: Client) -> 
     is_error, text = await _execute(client, "return kept")
     assert is_error
     assert "NameError" in text
+
+
+async def test_call_tool_must_be_awaited(client: Client) -> None:
+    code = "total = call_tool('count_tickets', {})\nreturn total['result']"
+
+    is_error, text = await _execute(client, code)
+
+    assert is_error
+    assert "TypeError" in text
+    assert "coroutine" in text
+
+
+@pytest.mark.parametrize("module", ["socket", "subprocess", "requests"])
+async def test_script_cannot_import_network_process_or_third_party_modules(
+    client: Client, module: str
+) -> None:
+    is_error, text = await _execute(client, f"import {module}\nreturn 1")
+
+    assert is_error
+    assert "ModuleNotFoundError" in text
+    assert module in text
+
+
+async def test_script_can_import_part_of_the_standard_library(client: Client) -> None:
+    is_error, text = await _execute(client, "import json, re, os\nreturn 1")
+
+    assert not is_error
+    assert text == "1"
