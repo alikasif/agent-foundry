@@ -2,8 +2,10 @@
 
 ``BASE_INSTRUCTION`` is identical for all arms, names no server tool and no
 target (so a new target needs no change here). The direct arm gets it alone; the
-code and fastmcp arms each add an addendum that states the mechanics of their
-interface and nothing else (no task hints, no tool names of the target). No arm
+code and fastmcp arms each add an addendum that explains the mechanics of their
+interface (no task hints, no tool names of the target). Each addendum also carries
+one equivalent sentence advising the model to process results in code (print what
+it needs / return what it needs), so neither arm is nudged harder. No arm
 gets a list of tools in the prompt: the direct arm receives schemas through the
 tool-calling interface, the code arm discovers wrappers by reading files, and
 the fastmcp arm searches for tools through its ``search`` tool.
@@ -53,8 +55,8 @@ name. `{EXECUTE_TOOL}` runs a Python script that calls the tools with \
 `await call_tool(name, params)`. The script runs in a restricted Python \
 interpreter: only part of the standard library is available, and there is no \
 network or process access. Only the value the script returns reaches you; \
-anything it prints is discarded. Variables do not persist between \
-`{EXECUTE_TOOL}` calls.
+anything it prints is discarded. Process results in code and return only what \
+you need. Variables do not persist between `{EXECUTE_TOOL}` calls.
 """
 
 

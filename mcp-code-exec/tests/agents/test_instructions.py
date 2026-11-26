@@ -1,4 +1,4 @@
-"""The shared base text and the fastmcp arm's addendum (mechanics only)."""
+"""The shared base text and the two arms' addenda (mechanics + one efficiency line)."""
 
 import re
 
@@ -6,6 +6,7 @@ import pytest
 
 from mcpx.agents.instructions import (
     BASE_INSTRUCTION,
+    CODE_ADDENDUM,
     FASTMCP_ADDENDUM,
     codemode_instruction,
 )
@@ -45,3 +46,12 @@ def test_addendum_states_the_interpreter_restriction_and_meta_tools() -> None:
         "standard library is available, and there is no network or process "
         "access." in FASTMCP_ADDENDUM
     )
+
+
+def test_both_addenda_carry_the_same_efficiency_sentence() -> None:
+    assert "Process results in code and print only what you need." in CODE_ADDENDUM
+    fastmcp = " ".join(FASTMCP_ADDENDUM.split())
+    assert (
+        "anything it prints is discarded. Process results in code and return only "
+        "what you need. Variables do not persist"
+    ) in fastmcp
