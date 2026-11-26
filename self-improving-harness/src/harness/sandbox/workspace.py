@@ -26,7 +26,7 @@ def check_workspace(path: Path, *, home: Path | None = None) -> Path:
     home = (home or Path.home()).resolve()
     if any(p.exists() and p.samefile(folder) for p in (home, *home.parents)):
         raise WorkspaceError(f"{folder} is or contains your home folder")
-    _refuse_env_files(folder)
+    _refuse_contents(folder)
     return folder
 
 
@@ -42,11 +42,33 @@ def _is_link(entry: os.DirEntry[str]) -> bool:
     return entry.is_symlink() or bool(getattr(status, "st_reparse_tag", 0) & _LINK_TAG)
 
 
-def _refuse_env_files(folder: Path) -> None:
-    """Raise for the first ``.env`` file under ``folder``, outside ``.git``.
+def _is_named(name: str, wanted: str) -> bool:
+    """Whether ``name`` is ``wanted`` in any case, or with trailing dots or spaces."""
+    return name.rstrip(". ").lower() == wanted
 
-    Links are not followed. A folder that cannot be read is refused too, as it
-    could hold one. ``os.walk`` is not used: it follows junctions.
+
+def _git_refusal(folder: Path, found: Path) -> WorkspaceError:
+    """Refuse a repository inside the workspace.
+
+    Only the top ``.git`` is mounted read-only. Mounting nested ones would not
+    help: renaming a folder above such a mount gets around it.
+    """
+    message = (
+        f"{folder} holds {found.as_posix()}; the agent could change that git "
+        "configuration and your own git would run it"
+    )
+    if found.parent != Path():
+        message += f"; open {found.parent.as_posix()} directly instead"
+    return WorkspaceError(message)
+
+
+def _refuse_contents(folder: Path) -> None:
+    """Raise for the first thing under ``folder`` that the agent must not be given.
+
+    That is a ``.env`` file, a nested ``.git`` of any kind, or ``.gitmodules`` at
+    the top, whose submodules the agent could fill in. Only the top ``.git`` is
+    not searched. Links are not followed. A folder that cannot be read is refused
+    too. ``os.walk`` is not used: it follows junctions.
     """
     pending = [folder]
     while pending:
@@ -54,14 +76,21 @@ def _refuse_env_files(folder: Path) -> None:
         try:
             with os.scandir(current) as entries:
                 for entry in sorted(entries, key=lambda e: e.name):
-                    if _is_link(entry) or not entry.is_dir(follow_symlinks=False):
-                        if _is_env_file(entry.name):
-                            found = Path(entry.path).relative_to(folder).as_posix()
-                            raise WorkspaceError(
-                                f"{folder} holds {found}; the agent could read it"
-                            )
-                    elif entry.name.lower() != ".git":
+                    top = current == folder
+                    if top and entry.name.lower() == ".git":
+                        continue  # the workspace's own repository
+                    found = Path(entry.path).relative_to(folder)
+                    if _is_named(entry.name, ".git") or (
+                        top and _is_named(entry.name, ".gitmodules")
+                    ):
+                        raise _git_refusal(folder, found)
+                    if not _is_link(entry) and entry.is_dir(follow_symlinks=False):
                         pending.append(Path(entry.path))
+                    elif _is_env_file(entry.name):
+                        raise WorkspaceError(
+                            f"{folder} holds {found.as_posix()}; the agent could "
+                            "read it"
+                        )
         except OSError as error:
             where = current.relative_to(folder).as_posix()
             raise WorkspaceError(f"cannot check {where}: {error.strerror}") from error

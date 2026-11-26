@@ -132,8 +132,86 @@ def test_accepts_a_folder_named_env_but_looks_inside(workspace: Path) -> None:
 
 
 @pytest.mark.parametrize("git_name", [".git", ".GIT"])
-def test_does_not_look_inside_git(workspace: Path, git_name: str) -> None:
+def test_accepts_the_roots_own_git_without_looking_inside(
+    workspace: Path, git_name: str
+) -> None:
     put(workspace / git_name / ".env")
+    put(workspace / git_name / "modules" / "dep" / ".git")
+
+    assert check(workspace) == workspace.resolve()
+
+
+def refusal(folder: Path) -> str:
+    """The message ``check_workspace`` refuses ``folder`` with."""
+    with pytest.raises(WorkspaceError) as refused:
+        check(folder)
+    message = str(refused.value)
+    assert "\n" not in message
+    return message
+
+
+@pytest.mark.parametrize("kind", ["folder", "file"])
+@pytest.mark.parametrize("name", [".git", ".GIT", ".Git"])
+def test_refuses_a_nested_git(workspace: Path, name: str, kind: str) -> None:
+    put(workspace / ".git" / "config")
+    nested = workspace / "libs" / "dep" / name
+    if kind == "folder":
+        nested.mkdir(parents=True)
+    else:
+        put(nested, "gitdir: ../../.git/modules/dep\n")
+
+    message = refusal(workspace)
+
+    assert f"holds libs/dep/{name};" in message
+    assert "the agent could change that git configuration" in message
+    assert "your own git would run it" in message
+    assert message.endswith("open libs/dep directly instead")
+
+
+@pytest.mark.parametrize("hiding", ["node_modules/pkg", ".env/src/dep", ".venv/dep"])
+def test_looks_for_a_nested_git_everywhere(workspace: Path, hiding: str) -> None:
+    (workspace / hiding / ".git").mkdir(parents=True)
+
+    assert f"{hiding}/.git" in refusal(workspace)
+
+
+@pytest.mark.parametrize("name", [".git.", ".git "])
+def test_refuses_git_with_a_trailing_dot_or_space(workspace: Path, name: str) -> None:
+    (workspace / "dep").mkdir()
+    literal = str(workspace / "dep" / name)
+    if sys.platform == "win32":  # keeps Windows from dropping the last character
+        literal = "\\\\?\\" + literal
+    os.mkdir(literal)
+    try:
+        assert f"dep/{name};" in refusal(workspace)
+    finally:
+        os.rmdir(literal)
+
+
+def test_refuses_a_nested_link_named_git(workspace: Path) -> None:
+    outside = workspace.parent / "outside"
+    outside.mkdir()
+    (workspace / "dep").mkdir()
+    link_folder(workspace / "dep" / ".git", outside)
+
+    assert "dep/.git" in refusal(workspace)
+
+
+@pytest.mark.parametrize("name", [".gitmodules", ".GitModules"])
+def test_refuses_submodules_not_yet_initialised(workspace: Path, name: str) -> None:
+    put(workspace / ".git" / "config")
+    put(workspace / name, '[submodule "dep"]\n\tpath = dep\n')
+    (workspace / "dep").mkdir()
+
+    message = refusal(workspace)
+
+    assert f"holds {name};" in message
+    assert "your own git would run it" in message
+
+
+def test_accepts_other_git_files(workspace: Path) -> None:
+    for path in (".gitignore", ".github/ci.yml", "a/.gitattributes", "a/.gitmodules"):
+        put(workspace / path)
 
     assert check(workspace) == workspace.resolve()
 
