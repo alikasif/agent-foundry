@@ -267,3 +267,32 @@ async def test_stdout_carries_only_protocol_traffic(call_log: Path) -> None:
     (reply,) = [m for m in parsed if m.get("id") == 3]
     assert "result" in reply and "error" not in reply, reply
     assert reply["result"].get("isError") is not True, reply
+
+
+async def test_search_matches_names_and_descriptions(client: Client) -> None:
+    by_name = await client.call_tool(SEARCH_TOOL, {"query": "get_latest_release"})
+    # "full body text" occurs only in get_ticket's docstring, never in a name.
+    by_description = await client.call_tool(SEARCH_TOOL, {"query": "full body text"})
+
+    assert "get_latest_release" in _text(by_name)
+    assert "get_ticket" in _text(by_description)
+
+
+async def test_get_schema_returns_a_tools_parameters(client: Client) -> None:
+    result = await client.call_tool(SCHEMA_TOOL, {"tools": ["get_ticket"]})
+
+    assert "ticket_id" in _text(result)
+
+
+async def test_print_is_discarded_and_state_does_not_persist(client: Client) -> None:
+    is_error, text = await _execute(client, "print('PRINTED-MARK')\nreturn 1")
+
+    assert not is_error
+    assert text == "1"
+    assert "PRINTED-MARK" not in text
+
+    is_error, _ = await _execute(client, "kept = 41\nreturn kept")
+    assert not is_error
+    is_error, text = await _execute(client, "return kept")
+    assert is_error
+    assert "NameError" in text

@@ -4,7 +4,9 @@ The agent has the direct arm's shape (an ADK ``McpToolset`` over stdio), but the
 server it launches is ``mcpx.codemode.proxy``, which serves ``search``,
 ``get_schema`` and ``execute`` instead of the target's own tools. The proxy is
 started by module name only; this package never imports it. Results reach the
-model through the direct arm's ``structured_result_only`` unchanged.
+model through the direct arm's ``structured_result_only`` unchanged. The
+instruction is the shared base text plus an addendum on the mechanics of the
+three tools (``codemode_instruction``), parallel to the code arm's.
 """
 
 import os
@@ -20,7 +22,7 @@ from mcpx.agents.direct import (
     TOOL_LIST_TTL_S,
     structured_result_only,
 )
-from mcpx.agents.instructions import BASE_INSTRUCTION
+from mcpx.agents.instructions import codemode_instruction
 from mcpx.bench.usage import UsageRecorder
 from mcpx.client.connection import server_parameters
 from mcpx.client.target import Target
@@ -70,7 +72,7 @@ def build_codemode_agent(
     return LlmAgent(  # pyrefly: ignore[direct-abstract-base-instantiation]
         name=AGENT_NAME,
         model=model.to_llm(),
-        instruction=BASE_INSTRUCTION,
+        instruction=codemode_instruction(),
         tools=[toolset],
         after_model_callback=recorder.after_model_callback,
         after_tool_callback=structured_result_only,

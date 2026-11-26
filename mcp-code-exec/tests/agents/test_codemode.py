@@ -13,7 +13,7 @@ from mcpx.agents.codemode import (
     codemode_target,
 )
 from mcpx.agents.direct import structured_result_only
-from mcpx.agents.instructions import BASE_INSTRUCTION
+from mcpx.agents.instructions import codemode_instruction
 from mcpx.bench.usage import UsageRecorder
 from mcpx.codemode.protocol import CALL_LOG_ENV
 from mcpx.llm.models import ModelConfig
@@ -34,11 +34,11 @@ def test_codemode_target_launches_the_proxy_module(tmp_path: Path) -> None:
     }
 
 
-def test_agent_has_one_mcp_toolset_and_the_base_instruction(tmp_path: Path) -> None:
+def test_build_codemode_agent_uses_the_codemode_instruction(tmp_path: Path) -> None:
     log = tmp_path / "calls.jsonl"
     recorder = UsageRecorder()
     agent = build_codemode_agent("ticketdesk", log, ModelConfig("x/none"), recorder)
-    assert agent.instruction == BASE_INSTRUCTION
+    assert agent.instruction == codemode_instruction()
     assert agent.after_model_callback == recorder.after_model_callback
     # The direct arm's callback, unchanged: nothing of ours reshapes FastMCP's text.
     assert agent.after_tool_callback is structured_result_only

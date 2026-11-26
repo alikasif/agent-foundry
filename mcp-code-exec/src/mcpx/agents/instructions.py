@@ -1,11 +1,15 @@
-"""System instructions for the two arms.
+"""System instructions for the three arms.
 
-``BASE_INSTRUCTION`` is identical for both arms, names no server tool and no
-target (so a new target needs no change here), so the only difference the
-model sees is how its tools are offered. Neither arm gets a list of tools in the
-prompt: the direct arm receives schemas through the tool-calling interface, the
-code arm discovers wrappers by reading files.
+``BASE_INSTRUCTION`` is identical for all arms, names no server tool and no
+target (so a new target needs no change here). The direct arm gets it alone; the
+code and fastmcp arms each add an addendum that states the mechanics of their
+interface and nothing else (no task hints, no tool names of the target). No arm
+gets a list of tools in the prompt: the direct arm receives schemas through the
+tool-calling interface, the code arm discovers wrappers by reading files, and
+the fastmcp arm searches for tools through its ``search`` tool.
 """
+
+from mcpx.codemode.protocol import EXECUTE_TOOL, SCHEMA_TOOL, SEARCH_TOOL
 
 BASE_INSTRUCTION = """\
 You answer questions about data that is available through your tools. Look the \
@@ -36,3 +40,16 @@ not persist between `run_python` calls.
 def code_instruction(target_name: str) -> str:
     """Return the code arm's instruction: the base text plus the code addendum."""
     return BASE_INSTRUCTION + CODE_ADDENDUM.format(target=target_name)
+
+
+# Every sentence is checked against the real proxy in tests/codemode/test_proxy.py
+# (search by name or description, parameters from get_schema, an awaited
+# call_tool inside execute, print discarded, no state kept between calls).
+FASTMCP_ADDENDUM = f"""
+Your tools are reached through three tools. `{SEARCH_TOOL}` finds tools by name or description. `{SCHEMA_TOOL}` returns the parameters of the tools you name. `{EXECUTE_TOOL}` runs a Python script that calls the tools with `await call_tool(name, params)`. Only the value the script returns reaches you; anything it prints is discarded. Variables do not persist between `{EXECUTE_TOOL}` calls.
+"""
+
+
+def codemode_instruction() -> str:
+    """Return the fastmcp arm's instruction: the base text plus its addendum."""
+    return BASE_INSTRUCTION + FASTMCP_ADDENDUM
