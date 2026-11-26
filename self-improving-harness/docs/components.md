@@ -16,7 +16,7 @@ Nothing in the restarted harness is built yet.
 | Understand request + plan gate | v1 | plan before any code; progress shown |
 | Bash + code execution (CodeAct) | v1 | used when the task needs it; agent decides |
 | Sandbox execution (Docker) | v1 | model calls stay outside the container |
-| Filesystem workspace + git | v1 | one project folder mounted |
+| Filesystem workspace + git | v1 | works on a copy; `/diff`, `/apply` |
 | System prompt, tool descriptions | v1 | minimal |
 | Goal mode: take a goal, loop until complete | next | same loop as chat |
 | Self-verification and keep-going check | next | needed by goal mode (my addition) |
