@@ -1,7 +1,8 @@
 # Monty runtime for the code arm, and a fastmcp addendum: design
 
 Date: 2026-11-26. Status: draft for the owner's approval. Builds on the fastmcp arm
-(PR #10, branch `feat/fastmcp-code-mode-arm`); this work is a stacked branch.
+and lands on the same branch and PR (#10, `feat/fastmcp-code-mode-arm`, not yet
+merged), not a stacked branch.
 
 ## Intent
 
@@ -49,7 +50,8 @@ Anti-goals
    Cost: the sandbox effect cannot be measured from v5 alone. v4's `code` rows are
    the subprocess result and stay valid in `docs/results/`; v5's `code` rows are
    Monty. Records carry `runtime=monty;monty=<version>` in `settings`, so the report
-   never merges them. v4 can be reproduced from commit `059e95c`, not from HEAD.
+   never merges them. v4 can be reproduced from commit `059e95c` (earlier on this
+   branch), not from HEAD.
 
 ## Design
 
