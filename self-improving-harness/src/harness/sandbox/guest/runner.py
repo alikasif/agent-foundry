@@ -66,7 +66,8 @@ def execute(code: str, namespace: dict) -> str | None:
             if value is not None:
                 print(repr(value))
     except BaseException:  # noqa: BLE001 - report SystemExit and friends too
-        return traceback.format_exc()
+        # A message may hold lone surrogates, which the host cannot encode.
+        return traceback.format_exc().encode("utf-8", "replace").decode("utf-8")
     return None
 
 

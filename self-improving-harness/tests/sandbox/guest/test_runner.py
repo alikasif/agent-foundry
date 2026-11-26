@@ -36,6 +36,14 @@ def test_execute_returns_traceback_for_syntax_error() -> None:
     assert "SyntaxError" in error
 
 
+def test_execute_error_is_encodable_with_lone_surrogate() -> None:
+    error = execute("raise ValueError(chr(0xDCFF))", {})
+
+    assert error is not None
+    assert "ValueError: ?" in error
+    error.encode("utf-8")
+
+
 def test_truncate_leaves_short_text_unchanged() -> None:
     assert truncate("abc", 3) == "abc"
 
