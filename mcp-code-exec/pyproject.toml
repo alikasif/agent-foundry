@@ -10,7 +10,6 @@ dependencies = [
     "google-adk",
     "litellm",
     "mcp",
-    "psutil",
     "pydantic-monty==1.7.0",
     "python-dotenv",
 ]
@@ -25,6 +24,7 @@ dev = [
     "ruff",
     "pyrefly",
     "types-psutil",
+    "psutil",
 ]
 
 [build-system]

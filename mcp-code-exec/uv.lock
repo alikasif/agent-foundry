@@ -1501,7 +1501,6 @@ dependencies = [
     { name = "google-adk" },
     { name = "litellm" },
     { name = "mcp" },
-    { name = "psutil" },
     { name = "pydantic-monty" },
     { name = "python-dotenv" },
 ]
@@ -1509,6 +1508,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "anyio" },
+    { name = "psutil" },
     { name = "pyrefly" },
     { name = "pytest" },
     { name = "ruff" },
@@ -1522,7 +1522,6 @@ requires-dist = [
     { name = "google-adk" },
     { name = "litellm" },
     { name = "mcp" },
-    { name = "psutil" },
     { name = "pydantic-monty", specifier = "==1.7.0" },
     { name = "python-dotenv" },
 ]
@@ -1530,6 +1529,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "anyio" },
+    { name = "psutil" },
     { name = "pyrefly" },
     { name = "pytest" },
     { name = "ruff" },

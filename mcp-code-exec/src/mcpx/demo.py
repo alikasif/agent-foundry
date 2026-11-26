@@ -1,8 +1,8 @@
-"""First look: hand-written task-B code run through the Bridge and Runtime.
+"""First look: hand-written task-B code run through the HostGateway and Monty.
 
 Task B: among open tickets labelled ``bug``, find the five with the most comments
 (ties broken by lower id). The code below pages through every ``list_tickets``
-page inside the child process, so the full ticket JSON never leaves it; only the
+page inside the Monty sandbox, so the full ticket JSON never leaves it; only the
 five result rows are printed back. The report compares how many characters of
 raw tool-result JSON the code processed with how many it printed.
 
@@ -17,8 +17,8 @@ from pathlib import Path
 
 from mcpx.client.connection import Connection
 from mcpx.codegen.generator import generate_workspace
-from mcpx.sandbox.bridge import Bridge
-from mcpx.sandbox.runtime import Runtime
+from mcpx.sandbox.gateway import HostGateway
+from mcpx.sandbox.monty_runtime import MontyRuntime
 from mcpx.targets import get_target
 
 RAW_MARKER = "RAW_JSON_CHARS="
@@ -46,7 +46,7 @@ print("{RAW_MARKER}" + str(raw_chars))
 
 
 def _report(stdout: str) -> str:
-    """Split the child's output into result rows and the raw-size figure."""
+    """Split the script's output into result rows and the raw-size figure."""
     rows = [line for line in stdout.splitlines() if not line.startswith(RAW_MARKER)]
     raw = next(
         int(line.removeprefix(RAW_MARKER))
@@ -70,14 +70,12 @@ async def run_demo() -> str:
     with tempfile.TemporaryDirectory(prefix="mcpx-demo-") as tmp:
         workspace = Path(tmp) / "workspace"
         async with Connection(get_target("ticketdesk")) as conn:
-            generate_workspace("ticketdesk", await conn.list_tools(), workspace)
-            bridge = Bridge({"ticketdesk": conn})
-            addr = await bridge.start()
-            try:
-                result = await Runtime(workspace, addr).run(TASK_B_CODE)
-            finally:
-                await bridge.stop()
-    if result.exit_code != 0 or RAW_MARKER not in result.stdout:
+            tools = await conn.list_tools()
+            generate_workspace("ticketdesk", tools, workspace)
+            gateway = HostGateway("ticketdesk", conn, [t.name for t in tools])
+            async with MontyRuntime(workspace, gateway) as runtime:
+                result = await runtime.run(TASK_B_CODE)
+    if not result.ok or RAW_MARKER not in result.stdout:
         raise RuntimeError(f"demo code failed:\n{result.render()}")
     return _report(result.stdout)
 

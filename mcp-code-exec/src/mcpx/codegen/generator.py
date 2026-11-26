@@ -2,14 +2,15 @@
 
 ``generate_workspace`` writes, under the given workspace directory::
 
-    _mcpx_rpc.py                 workspace-side RPC client (copy of rpc_client.py)
     servers/__init__.py
     servers/<target>/__init__.py re-exports every wrapper and defines __all__,
                                  using absolute imports so Monty can run it
     servers/<target>/<tool>.py   one typed wrapper function per tool
 
 An agent explores that tree and writes ordinary Python that imports the
-wrappers, instead of having every tool schema loaded into its context.
+wrappers, instead of having every tool schema loaded into its context. The wrappers
+import ``_mcpx_rpc``, which is not written here: the Monty runtime supplies that
+module and its one function, ``call``, at run time.
 """
 
 import keyword
@@ -238,8 +239,6 @@ def generate_workspace(
     package = workspace / "servers" / target_name
     if package.exists():
         shutil.rmtree(package)
-    rpc_source = Path(__file__).with_name("rpc_client.py").read_text(encoding="utf-8")
-    _write(workspace / "_mcpx_rpc.py", rpc_source)
     _write(
         workspace / "servers" / "__init__.py", '"""MCP servers as importable code."""\n'
     )
