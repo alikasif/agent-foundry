@@ -18,8 +18,12 @@ module so that its multi-second import never lands inside the first run's clock.
 
 What a run did is kept in ``RunRecord.trace`` (function calls, ``run_python``
 scripts and the MCP calls those scripts made through the gateway, each text cut
-to ``TRACE_ITEM_CHARS``, at most ``TRACE_MAX_ITEMS`` items) and the number of MCP
-tool calls actually executed in ``RunRecord.mcp_calls``. On the fastmcp arm the
+to ``TRACE_ITEM_CHARS``) and the number of MCP tool calls actually executed in
+``RunRecord.mcp_calls``. Script and function-call items are capped at
+``TRACE_MAX_ITEMS`` and ``mcp_call`` items, counted apart so that a call-heavy
+script cannot push the scripts out, at ``TRACE_MAX_MCP_ITEMS``. When anything is
+dropped, one last item ``{"kind": "trace_truncated", "dropped": "<n>"}`` says how
+many (``mcp_calls`` stays exact either way). On the fastmcp arm the
 model's ``execute`` scripts are traced like ``run_python`` scripts, and the
 backend calls come from the proxy's call log, read after the toolset is closed.
 
@@ -83,7 +87,9 @@ USER_ID = "bench"
 CLOSE_TIMEOUT_S = 30.0
 # Trace limits: characters kept of each item's text, items kept per run.
 TRACE_ITEM_CHARS = 4000
-TRACE_MAX_ITEMS = 200
+TRACE_MAX_ITEMS = 200  # script and function-call items
+TRACE_MAX_MCP_ITEMS = 600  # mcp_call items (the gateway allows 200 per script)
+TRACE_TRUNCATED = "trace_truncated"
 _CLIP_MARK = "...[truncated]"
 
 
@@ -120,11 +126,40 @@ class _Progress:
     code_param: str = "code"
     mcp_calls: int | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
+    _kept_mcp: int = 0
+    _kept_other: int = 0
+    _dropped: int = 0
 
     def add_trace(self, item: dict[str, str]) -> None:
-        """Append one trace item (texts clipped) unless the trace is full."""
-        if len(self.trace) < TRACE_MAX_ITEMS:
-            self.trace.append({k: _clip(v) for k, v in item.items()})
+        """Append one trace item (texts clipped), or count it as dropped.
+
+        ``mcp_call`` items and all others have separate caps. The first dropped
+        item adds a ``trace_truncated`` marker, which stays the last item and
+        carries the running count of dropped items; it is outside both caps.
+        """
+        is_mcp = item.get("kind") == "mcp_call"
+        kept, cap = (
+            (self._kept_mcp, TRACE_MAX_MCP_ITEMS)
+            if is_mcp
+            else (self._kept_other, TRACE_MAX_ITEMS)
+        )
+        if kept >= cap:
+            self._dropped += 1
+            marker = {"kind": TRACE_TRUNCATED, "dropped": str(self._dropped)}
+            if self._dropped == 1:
+                self.trace.append(marker)
+            else:
+                self.trace[-1] = marker
+            return
+        clipped = {k: _clip(v) for k, v in item.items()}
+        if self._dropped:
+            self.trace.insert(len(self.trace) - 1, clipped)  # keep the marker last
+        else:
+            self.trace.append(clipped)
+        if is_mcp:
+            self._kept_mcp += 1
+        else:
+            self._kept_other += 1
 
     def trace_mcp_call(self, server: str, tool: str, args: dict[str, Any]) -> None:
         """Trace one MCP call the code arm's script made through the gateway."""

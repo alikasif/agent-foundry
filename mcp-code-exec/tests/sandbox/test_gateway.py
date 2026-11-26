@@ -86,6 +86,31 @@ async def test_non_dict_args_raise_type_error() -> None:
     assert caller.calls == []
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [{"data": b"x"}, {"ids": {1, 2}}, {"when": object()}],
+    ids=["bytes", "set", "object"],
+)
+async def test_non_json_args_are_refused_before_observer_and_count(
+    bad: dict[str, Any],
+) -> None:
+    seen: list[str] = []
+    gateway, caller = make(on_call=lambda server, tool, args: seen.append(tool))
+    with pytest.raises(TypeError, match="JSON-serialisable"):
+        await in_thread(gateway.for_script(), "desk", "search", bad)
+    assert seen == []
+    assert gateway.mcp_calls == 0
+    assert caller.calls == []
+
+
+async def test_json_args_are_still_forwarded() -> None:
+    gateway, caller = make()
+    args = {"q": "x", "n": 1, "tags": ["a", None], "deep": {"ok": True}}
+    await in_thread(gateway.for_script(), "desk", "search", args)
+    assert caller.calls == [("search", args)]
+    assert gateway.mcp_calls == 1
+
+
 async def test_budget_is_per_script_and_over_budget_is_not_counted() -> None:
     gateway, caller = make()
     first, second = gateway.for_script(), gateway.for_script()
@@ -181,7 +206,9 @@ async def test_concurrent_scripts_count_exactly() -> None:
             outcomes.append("refused")
 
     # A tiny switch interval makes thread interleaving between the budget check
-    # and the increment likely, so a missing lock shows up as a wrong count.
+    # and the increment likely. This pins the semantics (exact per-script budgets
+    # and counts); it does not prove the lock is needed, since the test also
+    # passes without it.
     interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
     try:

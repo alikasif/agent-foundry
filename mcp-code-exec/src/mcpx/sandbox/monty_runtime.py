@@ -19,7 +19,11 @@ wall deadline is ours: the gateway refuses calls after it, and a watchdog task
 kills the worker process and cancels the call in flight if the script is still
 alive a short grace period after it. Output is capped by our own print callback,
 which drops the excess and lets the script go on (Monty's ``CollectString``
-would raise inside the script instead).
+would raise inside the script instead). The error text (the traceback) is capped
+the same way, separately from stdout (as v4 capped stdout and stderr separately),
+so one run's text is at most twice ``max_output_chars`` plus the notice lines. The
+cap keeps the tail of the error, where the exception line is, and marks the cut
+with a leading ``...``; either cap sets ``truncated``.
 """
 
 import contextlib
@@ -62,6 +66,19 @@ _CLOSE_TIMEOUT_S = 15.0
 _KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 _Stream = Literal["stdout", "stderr"]
+_CUT_MARK = "...\n"
+
+
+def _cap_tail(text: str, max_chars: int) -> tuple[str, bool]:
+    """Cut ``text`` to ``max_chars``, keeping the end; return (text, was_cut).
+
+    The cut is marked with ``_CUT_MARK`` at the head, counted inside the cap.
+    """
+    if len(text) <= max_chars:
+        return text, False
+    keep = max(max_chars - len(_CUT_MARK), 0)
+    tail = text[len(text) - keep :] if keep else ""
+    return (_CUT_MARK + tail)[:max_chars], True
 
 
 class _Collector:
@@ -161,12 +178,20 @@ class MontyRuntime:
         self.max_output_chars = max_output_chars
         self.max_memory_bytes = max_memory_bytes
         self._gateway = gateway
+        self._entered = False
         self._stack: contextlib.ExitStack | None = None
         self._pool: Monty | None = None
         self._mount: MountDir | None = None
 
     async def __aenter__(self) -> Self:
-        await anyio.to_thread.run_sync(self._open)
+        if self._entered:
+            raise RuntimeError("MontyRuntime is already open")
+        self._entered = True
+        try:
+            await anyio.to_thread.run_sync(self._open)
+        except BaseException:
+            self._entered = False
+            raise
         return self
 
     async def __aexit__(
@@ -177,6 +202,7 @@ class MontyRuntime:
     ) -> None:
         stack, self._stack = self._stack, None
         self._pool = self._mount = None
+        self._entered = False
         if stack is None:
             return
         # Shielded so a cancelled caller still closes the pool (no worker may
@@ -193,7 +219,16 @@ class MontyRuntime:
                 )
             )
             # Entered second, so closed first: the pool, then the mount.
-            pool = stack.enter_context(Monty(max_checkouts_per_worker=1, pre_warm=1))
+            # checkout_timeout: more concurrent scripts than workers (the CPU count)
+            # wait for one at most as long as a script may run, so a thread never
+            # blocks in checkout past the watchdog.
+            pool = stack.enter_context(
+                Monty(
+                    max_checkouts_per_worker=1,
+                    pre_warm=1,
+                    checkout_timeout=self.timeout_s,
+                )
+            )
             self._pool, self._mount = pool, mount
             self._stack = stack.pop_all()
 
@@ -201,15 +236,19 @@ class MontyRuntime:
         """Run ``code`` in a fresh session and return what it printed and how it ended.
 
         A script that raises, times out or exceeds a limit is a result, not an
-        exception. If the calling task is cancelled the worker is killed and the
+        exception; ``timed_out`` is also set when the script itself raises
+        ``TimeoutError``. Its error text is capped like stdout (see the module
+        docstring). If the calling task is cancelled the worker is killed and the
         call it was making is cancelled before the cancellation propagates.
         """
-        if self._pool is None or self._mount is None:
+        # Captured now: __aexit__ may clear them while this run is in flight.
+        pool, mount = self._pool, self._mount
+        if pool is None or mount is None:
             raise RuntimeError("MontyRuntime is not open; use 'async with'")
         deadline = time.monotonic() + self.timeout_s
         collector = _Collector(self.max_output_chars)
         worker = _Worker()
-        job = partial(self._execute, code, deadline, collector, worker)
+        job = partial(self._execute, pool, mount, code, deadline, collector, worker)
         # to_thread.run_sync waits for a thread token before its shield starts. If
         # the watchdog cancels the scope while we still wait (every token held for
         # longer than the deadline plus grace), the thread never ran and nothing
@@ -230,27 +269,33 @@ class MontyRuntime:
         await anyio.lowlevel.checkpoint()
         if outcome.failure is not None:
             raise outcome.failure
+        error, error_cut = _cap_tail(outcome.error, self.max_output_chars)
         return RunResult(
             stdout=collector.text(),
-            error=outcome.error,
+            error=error,
             timed_out=outcome.timed_out,
-            truncated=collector.truncated,
+            truncated=collector.truncated or error_cut,
             max_output_chars=self.max_output_chars,
             timeout_s=self.timeout_s,
         )
 
     def _execute(
-        self, code: str, deadline: float, collector: _Collector, worker: _Worker
+        self,
+        pool: Monty,
+        mount: MountDir,
+        code: str,
+        deadline: float,
+        collector: _Collector,
+        worker: _Worker,
     ) -> _Outcome:
         """Run one script on this (worker) thread; map Monty's errors to an outcome."""
-        assert self._pool is not None and self._mount is not None
         limits: ResourceLimits = {
             "max_memory": self.max_memory_bytes,
             "max_feed_duration_secs": self.timeout_s,
         }
         module = ExternalModule({"call": self._gateway.for_script(deadline)})
         try:
-            with self._pool.checkout(
+            with pool.checkout(
                 limits=limits, external_modules={RPC_MODULE: module}
             ) as session:
                 if not worker.attach(session.worker_pid):
@@ -261,12 +306,15 @@ class MontyRuntime:
                 try:
                     session.feed_run(
                         code,
-                        mount=self._mount,
+                        mount=mount,
                         cwd=WORK_DIR,
                         print_callback=collector,
                     )
                 finally:
                     worker.detach()
+        except TimeoutError:
+            # The pool's checkout_timeout: no worker became free in time.
+            return _Outcome(timed_out=True)
         except MontyCrashedError as exc:
             if exc.timed_out or worker.expired:
                 return _Outcome(timed_out=True)

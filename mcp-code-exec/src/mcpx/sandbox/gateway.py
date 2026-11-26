@@ -3,7 +3,9 @@
 ``HostGateway.for_script`` returns a synchronous host function for one script. It
 refuses unknown servers and tools, enforces a per-script call budget and a
 deadline, counts the calls it forwards and tells the trace observer about each.
-Refusals raise inside the sandbox and are not counted.
+Refusals (unknown server or tool, arguments that are not a JSON-serialisable
+dict, an expired deadline, an exhausted budget) raise inside the sandbox and are
+not counted or traced.
 
 The sandbox runs on a worker thread (``anyio.to_thread.run_sync``); the host
 function reaches the async connection with ``anyio.from_thread.run``. It holds no
@@ -13,6 +15,7 @@ This module imports only the standard library and anyio, so it works with any
 sandbox backend.
 """
 
+import json
 import threading
 import time
 from collections.abc import Callable, Collection
@@ -102,6 +105,14 @@ class HostGateway:
                 raise ValueError(f"unknown tool {tool!r} on server {server!r}")
             if not isinstance(args, dict):
                 raise TypeError(f"args must be a dict, not {type(args).__name__}")
+            # Like the old bridge, only JSON ever reaches a server: refuse the rest
+            # here, before it is traced or counted.
+            try:
+                json.dumps(args)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"tool arguments must be JSON-serialisable: {exc}"
+                ) from None
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("script deadline exceeded")
             with self._lock:
