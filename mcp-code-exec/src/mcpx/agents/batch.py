@@ -16,6 +16,7 @@ from mcpx.bench.tasks import Task
 from mcpx.bench.usage import RunRecord
 from mcpx.codemode.protocol import CODEMODE_MAX_TOOL_CALLS
 from mcpx.llm.models import ModelConfig
+from mcpx.sandbox.gateway import MAX_SCRIPT_CALLS
 from mcpx.targets import get_tasks
 
 ARMS = ("direct", "code", "fastmcp")
@@ -56,16 +57,32 @@ def _check_inputs(arms: list[str], runs: int) -> None:
         raise ValueError(f"runs must be at least 1, got {runs}")
 
 
+def _code_settings() -> dict[str, str]:
+    """The code arm's own facts: the runtime, its installed version and call cap.
+
+    The version comes from package metadata, not an import, so reading it
+    cannot start the interpreter or change the process.
+    """
+    return {
+        "runtime": "monty",
+        "monty": importlib.metadata.version("pydantic-monty"),
+        "max_script_calls": str(MAX_SCRIPT_CALLS),
+    }
+
+
 def _fastmcp_settings() -> dict[str, str]:
-    """The fastmcp arm's own facts: installed version and Code Mode's call cap.
+    """The fastmcp arm's own facts: installed version, call cap and addendum.
 
     The version comes from package metadata, not an import: importing FastMCP
     changes the process (it patches MCP types and configures logging), and the
     direct and code arms must run in the same process state in every batch.
+    ``fastmcp_addendum=1`` records that the arm's instructions carry the
+    addendum (``FASTMCP_ADDENDUM``).
     """
     return {
         "fastmcp": importlib.metadata.version("fastmcp"),
         "max_tool_calls": str(CODEMODE_MAX_TOOL_CALLS),
+        "fastmcp_addendum": "1",
     }
 
 
@@ -80,10 +97,13 @@ def run_settings(
     Stored in every ``RunRecord.settings`` so the report never merges runs made
     with different settings. ``provider`` is the comma-joined pinned provider
     order, or ``default`` when OpenRouter may route freely; ``reasoning`` is
-    ``default`` when no effort is sent. When ``arms`` includes ``fastmcp`` the
-    string also names the installed FastMCP version and the Code Mode call cap
-    in effect, so every record of such a batch (all arms) carries the same
-    settings; otherwise the string is the same as without ``arms``.
+    ``default`` when no effort is sent. After those keys, when ``arms`` includes
+    ``code`` the string names the runtime (``runtime=monty``), the installed
+    pydantic-monty version and the per-script call cap
+    (``max_script_calls``); then, when it includes ``fastmcp``, the installed
+    FastMCP version, the Code Mode call cap and ``fastmcp_addendum=1``. Every
+    record of a batch (all arms) carries the same string; with neither arm it
+    is the same as without ``arms``.
     """
     parts = {
         "reasoning": model.reasoning_effort or "default",
@@ -92,6 +112,8 @@ def run_settings(
         "run_timeout_s": f"{run_timeout_s:g}",
         "temperature": f"{model.temperature:g}",
     }
+    if "code" in arms:
+        parts.update(_code_settings())
     if "fastmcp" in arms:
         parts.update(_fastmcp_settings())
     return ";".join(f"{key}={value}" for key, value in parts.items())

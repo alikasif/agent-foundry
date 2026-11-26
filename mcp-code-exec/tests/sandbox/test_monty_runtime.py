@@ -208,6 +208,57 @@ async def test_escape_probe_raises_inside_the_sandbox(
     assert gateway.mcp_calls == 0 and caller.calls == []
 
 
+# What Monty does with os-level escapes, recorded from real probes. Process and
+# environment access is absent or refused; the file system is the read-only mount.
+@pytest.mark.parametrize(
+    ("code", "exception", "detail"),
+    [
+        ("import os; os.system('echo hi')", "AttributeError", "no attribute 'system'"),
+        ("import os; os.popen('echo hi')", "AttributeError", "no attribute 'popen'"),
+        (
+            "import os; print(os.getenv('MCPX_SECRET_PROBE'))",
+            "RuntimeError",
+            "'os.getenv' is not supported",
+        ),
+        ("import os; os.listdir('/')", "PermissionError", "Permission denied: '/'"),
+        (
+            "import os; os.remove('/work/servers')",
+            "PermissionError",
+            "Read-only file system",
+        ),
+        ("import os; os.environ['X']", "RuntimeError", "'os.environ' is not supported"),
+    ],
+    ids=["system", "popen", "getenv", "listdir-root", "remove", "environ-item"],
+)
+async def test_os_escape_probe_has_no_host_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    exception: str,
+    detail: str,
+) -> None:
+    monkeypatch.setenv("MCPX_SECRET_PROBE", "hunter2")
+    async with fake_monty(tmp_path) as (rt, gateway, caller):
+        result = await rt.run(code)
+    assert result.ok is False and not result.timed_out
+    assert f"{exception}: " in result.error and detail in result.error, result.error
+    assert result.stdout == ""
+    rendered = result.render()
+    assert "hunter2" not in rendered
+    # No host file system name leaks through the virtual root.
+    for host_entry in ("Windows", "Users", "C:"):
+        assert host_entry not in rendered
+    assert (tmp_path / "workspace" / "hello.txt").read_text(encoding="utf-8") == "hello"
+    assert gateway.mcp_calls == 0 and caller.calls == []
+
+
+async def test_removing_a_mounted_file_is_refused(tmp_path: Path) -> None:
+    async with fake_monty(tmp_path) as (rt, _, _):
+        result = await rt.run("import os; os.remove('/work/hello.txt')")
+    assert not result.ok and "PermissionError" in result.error
+    assert (tmp_path / "workspace" / "hello.txt").exists()
+
+
 async def test_real_wrapper_call_reaches_ticketdesk(tmp_path: Path) -> None:
     code = (
         "from servers.ticketdesk import count_tickets\n"

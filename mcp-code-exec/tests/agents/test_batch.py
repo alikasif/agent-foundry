@@ -13,6 +13,7 @@ from mcpx.agents.run import Arm, run_once
 from mcpx.bench.usage import RunRecord
 from mcpx.codemode.protocol import CODEMODE_MAX_TOOL_CALLS
 from mcpx.llm.models import ModelConfig
+from mcpx.sandbox.gateway import MAX_SCRIPT_CALLS
 from mcpx.targets import get_tasks
 from tests.agents.helpers import UnreachableModel, closed_port, python_children
 
@@ -54,7 +55,9 @@ async def test_batch_writes_one_line_per_run_in_interleaved_order(
     assert all(r.error for r in saved) and not any(r.correct for r in saved)
     expected = (
         "reasoning=default;provider=default;max_llm_calls=5;run_timeout_s=60;"
-        "temperature=0"
+        "temperature=0;runtime=monty;"
+        f"monty={importlib.metadata.version('pydantic-monty')};"
+        f"max_script_calls={MAX_SCRIPT_CALLS}"
     )
     assert {r.settings for r in saved} == {expected}
     # LiteLLM prints its own diagnostics to stdout; keep only the progress lines.
@@ -170,14 +173,19 @@ def test_settings_name_fastmcp_version_and_call_cap_when_in_batch() -> None:
         ModelConfig("m/x"), 40, 600.0, arms=("direct", "code", "fastmcp")
     )
     version = importlib.metadata.version("fastmcp")
-    assert settings == f"{base};fastmcp={version};max_tool_calls={cap}"
+    monty = importlib.metadata.version("pydantic-monty")
+    assert settings == (
+        f"{base};runtime=monty;monty={monty};max_script_calls={MAX_SCRIPT_CALLS}"
+        f";fastmcp={version};max_tool_calls={cap};fastmcp_addendum=1"
+    )
     assert f"max_tool_calls={cap}" in settings and cap == 50
 
 
-def test_settings_unchanged_when_fastmcp_not_in_batch() -> None:
+def test_settings_have_no_fastmcp_keys_when_fastmcp_not_in_batch() -> None:
     model = ModelConfig("m/x")
     base = run_settings(model, 40, 600.0)
-    assert run_settings(model, 40, 600.0, arms=("direct", "code")) == base
+    code = run_settings(model, 40, 600.0, arms=("direct", "code"))
+    assert code.startswith(base) and "fastmcp" not in code
     assert "fastmcp" not in base
 
 
@@ -186,7 +194,7 @@ async def test_run_batch_passes_arms_to_run_settings(tmp_path: Path) -> None:
     base = run_settings(_model(), 5, 20.0)
     suffix = (
         f";fastmcp={importlib.metadata.version('fastmcp')}"
-        f";max_tool_calls={CODEMODE_MAX_TOOL_CALLS}"
+        f";max_tool_calls={CODEMODE_MAX_TOOL_CALLS};fastmcp_addendum=1"
     )
     with_fastmcp = tmp_path / "with.jsonl"
     await run_batch(
@@ -215,6 +223,119 @@ async def test_run_batch_passes_arms_to_run_settings(tmp_path: Path) -> None:
     )
     assert {r.settings for r in _read(without)} == {base}
     assert "fastmcp" not in base
+
+
+def test_run_settings_names_runtime_for_code_arm() -> None:
+    model = ModelConfig("m/x")
+    base = run_settings(model, 40, 600.0)
+    monty = importlib.metadata.version("pydantic-monty")
+    runtime = f"runtime=monty;monty={monty};max_script_calls={MAX_SCRIPT_CALLS}"
+    assert MAX_SCRIPT_CALLS == 200
+    assert run_settings(model, 40, 600.0, arms=("code",)) == f"{base};{runtime}"
+    both = run_settings(model, 40, 600.0, arms=("direct", "code"))
+    assert both == f"{base};{runtime}"
+
+
+def test_run_settings_names_addendum_for_fastmcp_arm() -> None:
+    model = ModelConfig("m/x")
+    base = run_settings(model, 40, 600.0)
+    fastmcp = (
+        f"fastmcp={importlib.metadata.version('fastmcp')}"
+        f";max_tool_calls={CODEMODE_MAX_TOOL_CALLS};fastmcp_addendum=1"
+    )
+    settings = run_settings(model, 40, 600.0, arms=("fastmcp",))
+    assert settings == f"{base};{fastmcp}"
+    assert "runtime=monty" not in settings
+
+
+def test_run_settings_unchanged_for_direct_only() -> None:
+    model = ModelConfig("m/x")
+    base = (
+        "reasoning=default;provider=default;max_llm_calls=40;run_timeout_s=600;"
+        "temperature=0"
+    )
+    assert run_settings(model, 40, 600.0) == base
+    assert run_settings(model, 40, 600.0, arms=("direct",)) == base
+
+
+def test_run_settings_orders_code_keys_before_fastmcp_keys() -> None:
+    model = ModelConfig("m/x")
+    base = run_settings(model, 40, 600.0)
+    settings = run_settings(model, 40, 600.0, arms=("fastmcp", "code", "direct"))
+    keys = [part.split("=")[0] for part in settings.split(";")]
+    assert keys == [part.split("=")[0] for part in base.split(";")] + [
+        "runtime",
+        "monty",
+        "max_script_calls",
+        "fastmcp",
+        "max_tool_calls",
+        "fastmcp_addendum",
+    ]
+
+
+def test_monty_version_comes_from_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = importlib.metadata.version
+
+    def fake(name: str) -> str:
+        return "9.9.9-sentinel" if name == "pydantic-monty" else real(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", fake)
+    settings = run_settings(ModelConfig("m/x"), 40, 600.0, arms=("code",))
+    assert ";monty=9.9.9-sentinel;" in settings
+
+
+async def test_run_batch_records_identical_settings_for_every_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def fake_run_once(
+        arm: Arm,
+        target_name: str,
+        task: Any,
+        model: ModelConfig,
+        run_index: int,
+        **kwargs: Any,
+    ) -> RunRecord:
+        seen.append(kwargs["settings"])
+        return RunRecord(
+            task_id=task.id,
+            arm=arm,
+            model=model.model_id,
+            run_index=run_index,
+            calls=[],
+            tool_calls=0,
+            wall_s=0.0,
+            answer_text="",
+            correct=True,
+            error=None,
+            settings=kwargs["settings"],
+        )
+
+    monkeypatch.setattr("mcpx.agents.batch.run_once", fake_run_once)
+    out = tmp_path / "o.jsonl"
+    await run_batch(
+        "ticketdesk",
+        ["direct", "code", "fastmcp"],
+        ["A"],
+        _model(),
+        1,
+        out,
+        run_timeout_s=20.0,
+        max_llm_calls=5,
+    )
+    saved = _read(out)
+    assert [r.arm for r in saved] == ["direct", "code", "fastmcp"]
+    assert len({r.settings for r in saved}) == 1 and len(seen) == 3
+    settings = saved[0].settings
+    for key in (
+        "runtime=monty",
+        "monty=",
+        f"max_script_calls={MAX_SCRIPT_CALLS}",
+        "fastmcp=",
+        "fastmcp_addendum=1",
+    ):
+        assert key in settings
 
 
 FAKE_KEY = "sk-or-v1-FAKE-KEY-0123456789"
