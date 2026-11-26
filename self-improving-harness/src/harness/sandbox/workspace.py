@@ -97,34 +97,55 @@ def _refuse_contents(folder: Path) -> None:
             raise WorkspaceError(f"cannot check {where}: {error.strerror}") from error
 
 
-def _refuse_gitlinks(folder: Path) -> None:
-    """Raise if the repository's index records another repository (mode 160000).
-
-    ``git status`` runs git inside such a folder, even one that is empty and has no
-    ``.gitmodules``, which the agent could then fill. A repository that cannot be
-    checked is refused.
-    """
-    git = folder / ".git"
-    if not os.path.lexists(git):
-        return
+def _gitlinks(repository: Path) -> list[Path]:
+    """The paths in ``repository``'s index that record another repository."""
+    git = repository / ".git"
     # Named outright: from a broken .git, git would move up to an enclosing one.
-    where = (f"--git-dir={git}", f"--work-tree={folder}")
+    where = (f"--git-dir={git}", f"--work-tree={repository}")
     try:
-        listed = _git(folder, *where, "ls-files", "--stage", "-z")
+        listed = _git(repository, *where, "ls-files", "--stage", "-z")
     except FileNotFoundError as error:
         raise WorkspaceError(
-            f"{folder} has a .git but git was not found, so its index cannot be checked"
+            f"{repository} has a .git but git was not found, "
+            "so its index cannot be checked"
         ) from error
     if listed.returncode != 0:
         reason = " ".join(listed.stderr.decode(errors="replace").split())
         raise WorkspaceError(
-            f"{folder} has a .git but git cannot read its index: {reason}"
+            f"{repository} has a .git but git cannot read its index: {reason}"
         )
-    for record in listed.stdout.split(b"\0"):
-        if record.startswith(b"160000 "):
-            path = record.partition(b"\t")[2].decode(errors="replace")
+    return [
+        Path(record.partition(b"\t")[2].decode(errors="replace"))
+        for record in listed.stdout.split(b"\0")
+        if record.startswith(b"160000 ")  # the mode of a gitlink
+    ]
+
+
+def _refuse_gitlinks(folder: Path) -> None:
+    """Raise if an enclosing repository records another one under ``folder``.
+
+    ``git status`` runs git inside a gitlink's folder, even one that is empty and
+    has no ``.gitmodules``, which the agent could then fill. Every repository that
+    ``folder`` is in is checked, and one that cannot be read refuses it. The whole
+    index is read because git's own subfolder filter minds the case of names.
+    """
+    for repository in (folder, *folder.parents):
+        if not os.path.lexists(repository / ".git"):
+            continue
+        inside = folder.relative_to(repository)
+        for gitlink in _gitlinks(repository):
+            # Windows paths compare without regard to case, as git opens them.
+            if not gitlink.is_relative_to(inside):
+                continue
+            found = gitlink.relative_to(inside)
+            if found != Path():
+                subject = f"{folder} holds a gitlink at {found.as_posix()}"
+            elif not os.path.lexists(folder / ".git"):
+                subject = f"{folder} is a gitlink"
+            else:  # its own .git is mounted read-only
+                continue
             raise WorkspaceError(
-                f"{folder} records another repository at {path} (a gitlink); the "
+                f"{subject} (another repository in the index of {repository}); the "
                 "agent could fill it with git configuration and your own git would "
                 "run it"
             )

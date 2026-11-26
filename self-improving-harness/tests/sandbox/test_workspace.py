@@ -296,6 +296,102 @@ def test_needs_no_git_for_a_folder_without_one(
     assert check(workspace) == workspace.resolve()
 
 
+def test_refuses_a_gitlink_under_a_subfolder_of_a_repository(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    git(workspace, "init", "-q")
+    add_gitlink(workspace, git, "app/libs/my dep")
+
+    message = refusal(workspace / "app")
+
+    assert "gitlink at libs/my dep " in message  # relative to the workspace
+    assert "your own git would run it" in message
+
+
+def test_accepts_a_subfolder_when_the_gitlinks_are_outside_it(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    git(workspace, "init", "-q")
+    add_gitlink(workspace, git, "other/dep")
+    add_gitlink(workspace, git, "appendix")
+    (workspace / "app").mkdir()
+
+    assert check(workspace / "app") == (workspace / "app").resolve()
+
+
+def test_accepts_an_ordinary_subfolder(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    git(workspace, "init", "-q")
+    put(workspace / "app" / "main.py")
+    git(workspace, "add", ".")
+    git(workspace, "commit", "-qm", "a")
+
+    assert check(workspace / "app") == (workspace / "app").resolve()
+
+
+def test_refuses_a_folder_that_is_itself_a_gitlink(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    """The agent could give it a ``.git``, which the enclosing git would use."""
+    git(workspace, "init", "-q")
+    add_gitlink(workspace, git, "app")
+
+    assert "gitlink" in refusal(workspace / "app")
+
+
+def test_accepts_a_gitlink_folder_that_has_its_own_repository(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    """Its ``.git`` is mounted read-only: a submodule opened directly."""
+    git(workspace, "init", "-q")
+    add_gitlink(workspace, git, "app")
+    git(workspace / "app", "init", "-q")
+
+    assert check(workspace / "app") == (workspace / "app").resolve()
+
+
+def test_looks_past_the_nearest_repository(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    """An outer index can still hold a gitlink below an inner repository."""
+    git(workspace, "init", "-q")
+    add_gitlink(workspace, git, "app/dep")
+    git(workspace / "app", "init", "-q")
+
+    assert "gitlink at dep " in refusal(workspace / "app")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ignores case")
+def test_matches_the_index_without_regard_to_case(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    git(workspace, "init", "-q")
+    (workspace / "app").mkdir()
+    add_gitlink(workspace, git, "App/dep")
+
+    assert "gitlink at dep " in refusal(workspace / "app")
+
+
+def test_refuses_a_subfolder_whose_repository_cannot_be_read(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    (workspace / ".git").mkdir()
+    (workspace / "app").mkdir()
+
+    assert "git cannot read its index" in refusal(workspace / "app")
+
+
+def test_refuses_a_subfolder_when_git_is_missing(
+    workspace: Path, git: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git(workspace, "init", "-q")
+    (workspace / "app").mkdir()
+    monkeypatch.setattr(subprocess, "run", missing_program)
+
+    assert "git was not found" in refusal(workspace / "app")
+
+
 def test_checking_runs_no_command_named_by_the_repository(
     workspace: Path, git: Callable[..., str]
 ) -> None:
