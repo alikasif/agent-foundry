@@ -18,7 +18,7 @@
 | Python state | fresh per call / persistent interpreter | **persistent**: CodeAct reuses variables; later parts become callable functions |
 | Execution | ADK `ContainerCodeExecutor` / own tools on own container | **own**: ADK's mounts no folder, keeps no state, runs only Python |
 
-Prior art: `agent-foundry/codeact_agent` (persistent Python, bash, subagents, REPL). It runs code with `exec` in its own process, so ideas are borrowed, not code.
+Reuse from `agent-foundry/codeact_agent`: persistent-namespace execution, head+tail output cut, REPL commands and panels, persistence guidance in the prompt. It runs code with `exec` in its own process; v1 adds the Docker sandbox. Code is copied; that project is not changed. Its subagents and context store wait for their turn in the component list.
 
 ## How it works
 ```
@@ -39,13 +39,15 @@ sih chat <folder>            (host: terminal, agent loop, model calls, API key)
 
 ## Sandbox
 - Docker CLI. Image: Python 3.13, bash, git, pytest.
-- No network, non-root, all capabilities dropped, no-new-privileges.
+- Network on, so the agent can install packages and read the web. `--no-network` turns it off.
+- Non-root, all capabilities dropped, no-new-privileges. `pip install` goes into a venv the agent owns; no `apt-get`.
 - 2 GB memory, 2 CPUs, 256 processes. 120 s per code call.
 - A call over time kills the interpreter and restarts it; the model is told its variables are gone.
 - Output sent to the model is cut to 20,000 characters (head and tail kept).
 - Only the workspace is mounted. `.git` is mounted read-only: otherwise the agent could plant a hook or config that your own git later runs on the host.
 - Refused as workspace: a folder containing a `.env` file, your home folder, a drive root.
-- Not covered: Docker shares the host kernel; files the agent writes are untrusted if you run them yourself.
+- Accepted risk (owner): with network on, the agent can send workspace contents anywhere and can reach services on your machine and LAN.
+- Not covered: Docker shares the host kernel; files the agent writes are untrusted if you run them yourself; a `.git` the agent creates in a subfolder or a non-git workspace is writable; no disk limit.
 
 ## My calls (correct any)
 - No approval prompt before each command; the sandbox is the guard and the code is shown.
@@ -54,7 +56,7 @@ sih chat <folder>            (host: terminal, agent loop, model calls, API key)
 - At most 30 model calls per message.
 - Model as before: `deepseek/deepseek-v4.1-flash-1017`, reasoning `medium`, provider `parasail`.
 - Python 3.13, uv, pytest, ruff, pyrefly. Google ADK 2.15.0, LiteLLM 1.110.2. No database in v1.
-- Reused from stage 1: model setup, redaction. Dropped: kernel, grader, gateway.
+- Reused from stage 1: model setup, redaction. Dropped: kernel, grader, gateway. Docker Desktop on Windows is the target host.
 
 ## Layout
 ```
@@ -71,7 +73,7 @@ self-improving-harness/
       python/            tool.py
     prompts/             load.py, system_prompt.md, tools.toml
     sandbox/             workspace.py, container.py, shell.py, interpreter.py
-      guest/             runner.py        (runs inside the container)
+      guest/             runner.py        (mounted read-only, runs inside the container)
     trace/               writer.py, redact.py
   tests/                 mirrors src/harness
 ```
@@ -82,7 +84,7 @@ self-improving-harness/
 ## Done when
 - `sih chat <folder>`: ask it to find and fix a small bug; it explores, edits, runs the tests, reports.
 - A variable set in one `python` call is there in the next, also after your next message.
-- From inside the sandbox: no network, no API key, no files outside the workspace, `.git` not writable.
+- From inside the sandbox: no API key, no host files outside the workspace, `.git` not writable, no network under `--no-network`.
 - An endless loop is stopped and the session keeps working.
 - Offline tests use a scripted model; sandbox tests need Docker; one live paid check.
 
