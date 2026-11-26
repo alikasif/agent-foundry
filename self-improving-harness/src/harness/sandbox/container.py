@@ -157,16 +157,6 @@ class Container:
         if code != 0 and not any(text in stderr for text in gone):
             raise SandboxError(f"container {self._name} stays: {_reason(stderr)}")
 
-    async def remove_links(self) -> None:
-        """Delete the links in the workspace, before the container stops.
-
-        Windows cannot open or tidy up a link that was made in a container.
-        """
-        find = ["find", "/workspace", "-type", "l", "-delete"]
-        code, stderr = await _run(self.exec_args(*find))
-        if code != 0:
-            raise SandboxError(f"links stay in the workspace: {_reason(stderr)}")
-
     async def __aenter__(self) -> Self:
         await self.start()
         return self

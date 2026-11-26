@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 import stat
+import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,9 @@ from harness.workspace.source import (
 
 _CHUNK = 2**16
 _DIFF_LIMIT = 1024**2  # per file and side
+# Controls, formatting (bidi, zero width), private use, lone surrogates and
+# the Unicode line and paragraph separators.
+_HIDDEN = {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"}
 
 
 @dataclass(frozen=True)
@@ -95,9 +99,9 @@ def look(root: Path, path: str) -> str:
     return "folder" if stat.S_ISDIR(status.st_mode) else "other"
 
 
-def under_link(path: str, links: set[str]) -> bool:
-    """Whether ``path``, or a folder above it, is one of ``links``, in any case."""
-    covered = {link.casefold() for link in links}
+def under(path: str, entries: set[str]) -> bool:
+    """Whether ``path``, or a folder above it, is one of ``entries``, in any case."""
+    covered = {entry.casefold() for entry in entries}
     parts = path.casefold().split("/")
     return any("/".join(parts[:end]) in covered for end in range(1, len(parts) + 1))
 
@@ -172,7 +176,7 @@ def find_changes(copy: SessionCopy) -> list[Change]:
     added = now - before
     added -= _ignored(copy.source, added)
     # What a link replaced is not "deleted": that would delete the user's file.
-    deleted = [path for path in before - now if not under_link(path, links)]
+    deleted = [path for path in before - now if not under(path, links)]
     modified = [p for p in before & now if _differs(base / p, work / p)]
     changes = [Change(path, "added") for path in added]
     changes += [Change(path, "deleted") for path in deleted]
@@ -196,6 +200,26 @@ def _ignored(source: Path, paths: set[str]) -> set[str]:
     return {r.decode(errors="surrogatepass").removeprefix("./") for r in records if r}
 
 
+def visible(text: str, *, keep: str = "") -> str:
+    """``text`` with each character a reader could miss written out as an escape.
+
+    For anything the agent could have named or written, before it is printed.
+    ``keep`` names the characters to leave as they are; none is right for a name.
+    """
+    return "".join(
+        char
+        if char in keep or unicodedata.category(char) not in _HIDDEN
+        else _escape(ord(char))
+        for char in text
+    )
+
+
+def _escape(code: int) -> str:
+    if code < 0x100:
+        return f"\\x{code:02x}"
+    return f"\\u{code:04x}" if code < 0x10000 else f"\\U{code:08x}"
+
+
 def diff_text(copy: SessionCopy, changes: list[Change]) -> str:
     return "".join(_diff_one(copy, change) for change in changes)
 
@@ -210,32 +234,33 @@ def _read(root: Path, path: str) -> bytes | None:
 
 
 def _lines(data: bytes) -> list[str]:
-    return re.findall(r"[^\n]*\n|[^\n]+", data.decode())
+    # A stray byte must not hide the rest of the file.
+    return re.findall(r"[^\n]*\n|[^\n]+", data.decode(errors="backslashreplace"))
 
 
 def _diff_one(copy: SessionCopy, change: Change) -> str:
     base, work = long_path(copy.base), long_path(copy.work)
     path, kind = change.path, change.kind
+    name = visible(path)
     try:
         old = b"" if kind == "added" else _read(base, path)
         new = b"" if kind == "deleted" else _read(work, path)
         if old is None or new is None:
-            return f"File {path} {kind}: too large to diff\n"
+            return f"File {name} {kind}: too large to diff\n"
         if kind == "modified" and keeps_crlf(base / path, work / path):
             new = new.replace(b"\n", b"\r\n")  # show what would be written
         if b"\0" in old or b"\0" in new:
-            return f"Binary file {path} {kind}\n"
+            return f"Binary file {name} {kind}\n"
         before, after = _lines(old), _lines(new)
-    except UnicodeDecodeError:
-        return f"Binary file {path} {kind}\n"
     except OSError:
-        return f"File {path} {kind}: cannot be read\n"
+        return f"File {name} {kind}: cannot be read\n"
     shown = [
-        f"--- {'/dev/null' if kind == 'added' else 'a/' + path}\n",
-        f"+++ {'/dev/null' if kind == 'deleted' else 'b/' + path}\n",
+        f"--- {'/dev/null' if kind == 'added' else 'a/' + name}\n",
+        f"+++ {'/dev/null' if kind == 'deleted' else 'b/' + name}\n",
     ]
     for line in list(difflib.unified_diff(before, after))[2:]:  # without its header
-        if not line.endswith("\n"):
-            line += "\n\\ No newline at end of file\n"
-        shown.append(line.replace("\r\n", "\n"))
+        if line.endswith("\n"):  # the CR of a CRLF is left out; any other shows
+            shown.append(visible(line[:-1].removesuffix("\r"), keep="\t") + "\n")
+        else:
+            shown.append(visible(line, keep="\t") + "\n\\ No newline at end of file\n")
     return "".join(shown)

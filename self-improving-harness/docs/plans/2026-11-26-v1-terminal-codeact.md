@@ -175,7 +175,7 @@ Replaces in-place editing: Task 2's workspace checks and `.git` mounts go away.
   - CRLF base file rewritten with LF by the agent keeps CRLF after apply.
   - `docker` (modify the existing container tests): `/workspace` is the copy; `git init` and a commit work inside; after `remove_copy` of a copy holding that `.git` and container-made links, the folder is gone.
 - [ ] **Step 2: Run, expect failure**
-- [ ] **Step 3: Implement.** Container-made links cannot be deleted from Windows: before the container stops, `find /workspace -type l -delete` runs inside it (add `Container.remove_links()`).
+- [ ] **Step 3: Implement.** Links made in the container are left in the copy: `remove_copy` can delete them, and deleting them inside the container would turn "a file replaced by a link" into a deletion.
 - [ ] **Step 4: Tests, ruff, pyrefly green**
 - [ ] **Step 5: Commit** `feat(sih): the agent works on a copy; diff and apply`
 
@@ -209,7 +209,7 @@ Replaces in-place editing: Task 2's workspace checks and `.git` mounts go away.
 - `agent.build.build_agent(llm, tools, instruction: str, plan_state: PlanState) -> LlmAgent` (instruction passed as a callable so braces are not templated; `check_gate` wired as `before_tool_callback`)
 - `agent.session.Step(kind: str, name: str, data: dict)`: kinds `text` (`{"text"}`), `tool_call` (the arguments), `tool_result` (the result dict), `error` (`{"message"}`)
 - `agent.session.ChatSession(agent, plan_state, *, max_llm_calls: int = 30)`: `send(message: str) -> AsyncIterator[Step]`, `async close()`
-- `agent.session.open_session(llm, source: Path, *, network: bool, image_dir: Path, sessions_dir: Path)` async context manager yielding a `ChatSession` with `copy: SessionCopy`; makes the copy, starts the container on `copy.work`, runs `git init` and a `baseline` commit inside the container (`git -c user.name=sih -c user.email=sih@localhost`), and on exit removes container links, stops interpreter and container, and removes the copy only when `find_changes` is empty. Also cleans up on error.
+- `agent.session.open_session(llm, source: Path, *, network: bool, image_dir: Path, sessions_dir: Path)` async context manager yielding a `ChatSession` with `copy: SessionCopy`; makes the copy, starts the container on `copy.work`, runs `git init` and a `baseline` commit inside the container (`git -c user.name=sih -c user.email=sih@localhost`), and on exit stops interpreter and container, and removes the copy only when `find_changes` is empty. Also cleans up on error.
 
 **Behaviour:** `send` resets the plan state first. One ADK session for the life of the object. Model errors and the call limit become an `error` step; the session stays usable. Thought parts and partial events are skipped. After a cancelled turn ADK 2.15 drops unanswered tool calls from the next request; test it, do not re-implement it.
 

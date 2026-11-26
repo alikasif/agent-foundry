@@ -21,7 +21,7 @@ from harness.workspace.changes import (
     keeps_crlf,
     look,
     measure,
-    under_link,
+    under,
     walk,
 )
 from harness.workspace.snapshot import SessionCopy
@@ -64,7 +64,12 @@ def apply_changes(copy: SessionCopy, changes: list[Change]) -> ApplyResult:
     for change in changes:
         path = change.path
         try:
-            allowed = _allowed(path) and _stays_inside(source, path)
+            allowed = (
+                _allowed(path)
+                # nested repositories and submodules, which were never copied
+                and not under(path, set(copy.skipped))
+                and _stays_inside(source, path)
+            )
             plan = _plan(change, base, work, files, links) if allowed else None
             if plan is None:
                 blocked.add(path)
@@ -125,7 +130,7 @@ def _plan(
     path = change.path
     if change.kind == "deleted":
         # A link in the file's place, or above it, is not a deletion.
-        if path in files or under_link(path, links):
+        if path in files or under(path, links):
             return None
         # Still found under this name: only a rename that changed case explains it.
         # Otherwise it is in a folder that is never looked into.

@@ -103,7 +103,7 @@ def test_git_source_skips_submodules_and_nested_repositories(
     git(project, "init", "-q")
     entry = f"160000,{'1' * 40},libs/sub"
     git(project, "update-index", "--add", "--cacheinfo", entry)
-    (project / "libs" / "sub").mkdir(parents=True)
+    put(project / "libs" / "sub" / "loose.py")
     (project / "vendored").mkdir()
     git(project / "vendored", "init", "-q")
     put(project / "vendored" / "v.py")
@@ -190,3 +190,16 @@ def test_refuses_a_repository_when_git_is_missing(
 
     with pytest.raises(WorkspaceError, match="git was not found"):
         list_files(project)
+
+
+def test_a_file_that_became_a_folder_is_not_skipped(
+    project: Path, git: Callable[..., str]
+) -> None:
+    """Git lists both the old name and what is now under it."""
+    git(project, "init", "-q")
+    put(project / "foo")
+    git(project, "add", "foo")
+    (project / "foo").unlink()
+    put(project / "foo" / "new.py")
+
+    assert listed(project) == (["foo/new.py"], [])

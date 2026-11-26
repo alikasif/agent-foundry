@@ -7,7 +7,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 MAX_FILES = 20_000
 MAX_BYTES = 500 * 1024**2
@@ -137,8 +137,10 @@ def _git_records(source: Path, *args: str) -> list[str]:
 
 def _from_git(source: Path, skipped: set[str]) -> Iterator[tuple[Path, os.stat_result]]:
     # An unmerged file is listed once per stage, hence the dict.
-    for record in dict.fromkeys(_git_records(source, "-co")):
-        found = _check_listed(source, record.rstrip("/").split("/"), skipped)
+    records = dict.fromkeys(r.rstrip("/") for r in _git_records(source, "-co"))
+    holding = {p.as_posix() for r in records for p in PurePosixPath(r).parents}
+    for record in records:
+        found = _check_listed(source, record.split("/"), holding, skipped)
         if found is not None:
             yield found
     # Ignored files are not copied anyway; this only names the ``.env`` ones.
@@ -148,7 +150,7 @@ def _from_git(source: Path, skipped: set[str]) -> Iterator[tuple[Path, os.stat_r
 
 
 def _check_listed(
-    source: Path, parts: list[str], skipped: set[str]
+    source: Path, parts: list[str], holding: set[str], skipped: set[str]
 ) -> tuple[Path, os.stat_result] | None:
     """The file git listed, unless a rule keeps it or a folder above it out.
 
@@ -170,9 +172,11 @@ def _check_listed(
             return None
         if is_link(status):
             return None
-        # A folder that git lists by itself is a submodule or a repository.
+        # A folder that git lists by itself, with nothing listed under it, is a
+        # submodule or a repository. With files under it, it replaced a file.
         if stat.S_ISDIR(status.st_mode) and (
-            depth == len(parts) or os.path.lexists(path / ".git")
+            (depth == len(parts) and name not in holding)
+            or os.path.lexists(path / ".git")
         ):
             skipped.add(name)
             return None

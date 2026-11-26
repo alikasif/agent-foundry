@@ -309,23 +309,12 @@ def test_the_agent_works_on_a_copy_with_its_own_repository(
         assert (copy.work / "a.txt").read_bytes() == b"changed\n"
         assert (project / "a.txt").read_bytes() == b"one\r\ntwo\r\n"
         assert not (project / ".git").exists()
-        asyncio.run(sandbox.remove_links())
-        assert inside(sandbox, "find", "/workspace", "-type", "l").stdout == ""
-        assert inside(sandbox, "test", "-d", "d").returncode == 0
     finally:
         asyncio.run(sandbox.stop())
 
     remove_copy(copy)
 
     assert not copy.root.exists()
-
-
-@docker
-def test_remove_links_reports_a_missing_container(image: str, workspace: Path) -> None:
-    sandbox = Container(ContainerSpec(image, workspace))
-
-    with pytest.raises(SandboxError, match="links"):
-        asyncio.run(sandbox.remove_links())
 
 
 @docker

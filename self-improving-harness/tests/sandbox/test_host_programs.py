@@ -1,4 +1,4 @@
-"""Host programs the sandbox runs must not be picked up from the current folder."""
+"""Programs the host runs must not be picked up from the current folder."""
 
 import os
 import shutil
@@ -10,7 +10,7 @@ import pytest
 
 PROBE = """
 import subprocess
-import harness.sandbox
+import {package}
 
 result = subprocess.run(["git", "--version"], capture_output=True, check=False)
 print(result.stdout.startswith(b"git version"))
@@ -18,7 +18,10 @@ print(result.stdout.startswith(b"git version"))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows searches the cwd")
-def test_a_program_planted_in_the_current_folder_is_not_run(workspace: Path) -> None:
+@pytest.mark.parametrize("package", ["harness.sandbox", "harness.workspace"])
+def test_a_program_planted_in_the_current_folder_is_not_run(
+    workspace: Path, package: str
+) -> None:
     """``sih chat .`` in a project to which an agent's ``git.exe`` was applied."""
     shutil.copy(os.environ["COMSPEC"], workspace / "git.exe")
     source = Path(__file__).parents[2] / "src"
@@ -27,7 +30,7 @@ def test_a_program_planted_in_the_current_folder_is_not_run(workspace: Path) -> 
     env.pop("NODEFAULTCURRENTDIRECTORYINEXEPATH", None)
 
     probe = subprocess.run(
-        [sys.executable, "-c", PROBE],
+        [sys.executable, "-c", PROBE.format(package=package)],
         cwd=workspace,
         env=env,
         stdin=subprocess.DEVNULL,

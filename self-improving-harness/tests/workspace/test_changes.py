@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.workspace.changes import Change, diff_text, find_changes
+from harness.workspace.changes import Change, diff_text, find_changes, visible
 from harness.workspace.snapshot import SessionCopy
 from harness.workspace.source import WorkspaceError
 from tests.workspace.conftest import link_folder, put
@@ -154,12 +154,10 @@ def test_diff_text_does_not_show_binary_or_large_files(
     put(project / "big.txt", b"x\n")
     copy = make_copy()
     put(copy.work / "nul.bin", b"a\0b")
-    put(copy.work / "latin.txt", b"caf\xe9\n")
     put(copy.work / "big.txt", b"y\n" * 600_000)
 
     assert diff_text(copy, find_changes(copy)).splitlines() == [
         "File big.txt modified: too large to diff",
-        "Binary file latin.txt added",
         "Binary file nul.bin added",
     ]
 
@@ -200,3 +198,93 @@ def test_a_file_that_vanishes_while_listed_hides_no_other(
     monkeypatch.setattr(os, "scandir", with_gone)
 
     assert find_changes(copy) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("plain é 中 \\ text", "plain é 中 \\ text"),
+        ("\x00\x07\x1b[2K\r\x7f", r"\x00\x07\x1b[2K\x0d\x7f"),
+        ("\x85\x9b", r"\x85\x9b"),
+        ("\u202e\u2066\u200b\u200d\ufeff\xad", r"\u202e\u2066\u200b\u200d\ufeff\xad"),
+        ("\ue000\uf05c\uf03a", r"\ue000\uf05c\uf03a"),
+        ("\U000f0000\U000e0041", r"\U000f0000\U000e0041"),
+        ("\udcff\u2028\u2029", r"\udcff\u2028\u2029"),
+        ("a\tb\nc", r"a\x09b\x0ac"),  # a name must stay on its line
+    ],
+)
+def test_visible_writes_out_what_a_reader_could_miss(text: str, shown: str) -> None:
+    assert visible(text) == shown
+
+
+def test_visible_can_keep_tabs_and_newlines() -> None:
+    assert visible("a\tb\nc\r", keep="\t\n") == "a\tb\nc\\x0d"
+
+
+def added_lines(copy: SessionCopy) -> list[str]:
+    """The diff of the one change, without its three header lines."""
+    return diff_text(copy, find_changes(copy)).split("\n")[3:-1]
+
+
+@pytest.mark.parametrize(
+    ("data", "lines"),
+    [
+        (b"ok\x1b[2K\x1b[1Ahidden\n", [r"+ok\x1b[2K\x1b[1Ahidden"]),
+        (b"evil()\r# harmless\n", [r"+evil()\x0d# harmless"]),
+        (b"last\r", [r"+last\x0d", "\\ No newline at end of file"]),
+        (b"two\r\r\n", [r"+two\x0d"]),
+        (b"one\r\ntwo\r\n", ["+one", "+two"]),
+        (b"a\tb\n", ["+a\tb"]),
+        (
+            "if x != '\u202e\u200b\ue000': \x9b\n".encode(),
+            [r"+if x != '\u202e\u200b\ue000': \x9b"],
+        ),
+        (
+            b"import os  # \xff\nos.remove('x')\n",
+            [r"+import os  # \xff", "+os.remove('x')"],
+        ),
+    ],
+)
+def test_diff_text_hides_nothing(
+    make_copy: MakeCopy, data: bytes, lines: list[str]
+) -> None:
+    copy = make_copy()
+    put(copy.work / "a.py", data)
+
+    assert added_lines(copy) == lines
+
+
+@pytest.mark.parametrize("kind", ["added", "modified", "deleted"])
+def test_diff_text_shows_what_a_name_holds(
+    project: Path, make_copy: MakeCopy, kind: str
+) -> None:
+    name = "a\uf05cb\u202e.py"
+    if kind != "added":
+        put(project / name, b"old\n")
+    copy = make_copy()
+    if kind == "deleted":
+        (copy.work / name).unlink()
+    else:
+        put(copy.work / name, b"new\n")
+
+    shown = diff_text(copy, find_changes(copy))
+
+    assert r"a\uf05cb\u202e.py" in shown
+    assert "\uf05c" not in shown and "\u202e" not in shown
+
+
+@pytest.mark.parametrize(
+    ("data", "said"),
+    [(b"\0", "Binary file"), (b"y" * 2**21, "too large to diff")],
+)
+def test_a_file_that_is_not_shown_has_its_name_written_out(
+    make_copy: MakeCopy, data: bytes, said: str
+) -> None:
+    copy = make_copy()
+    put(copy.work / "a\u200b.bin", data)
+
+    shown = diff_text(copy, find_changes(copy))
+    unread = diff_text(copy, [Change("b\u200b", "added")])
+
+    assert said in shown and r"a\u200b.bin" in shown
+    assert unread == "File b\\u200b added: cannot be read\n"

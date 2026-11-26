@@ -397,7 +397,7 @@ def test_what_a_container_makes_stays_out_of_the_source(
     assert {"dot./g", "x."} <= set(result.blocked)
     assert {"lib2/m.py", "real.txt"} <= set(result.written)
     # Docker gives \ and : to Windows as private-use characters: ordinary names.
-    assert {"bs", "cd"} <= set(result.written)
+    assert {"b\uf05cs", "c\uf03ad"} <= set(result.written)
     assert (project / "a.py").read_bytes() == b"x\n"
     assert (project / "lib" / "m.py").read_bytes() == b"x\n"
     names = {path.name for path in project.rglob("*")}
@@ -529,3 +529,33 @@ def test_a_file_with_mixed_line_endings_is_written_as_the_agent_left_it(
     apply(copy)
 
     assert (project / "a.txt").read_bytes() == b"a\nc\n"
+
+
+def test_nothing_is_written_inside_what_was_skipped(
+    project: Path, make_copy: MakeCopy, git: Callable[..., str]
+) -> None:
+    git(project, "init", "-q")
+    entry = f"160000,{'1' * 40},libs/sub"
+    git(project, "update-index", "--add", "--cacheinfo", entry)
+    (project / "libs" / "sub").mkdir(parents=True)
+    (project / "Vendored").mkdir()
+    git(project / "Vendored", "init", "-q")
+    put(project / "Vendored" / "v.py")
+    copy = make_copy()
+    assert copy.skipped == ["Vendored", "libs/sub"]
+    for name in ("VENDORED/new.py", "vendored2/ok.py", "libs/sub/f.py", "libs/ok.py"):
+        put(copy.work / name)
+    before = tree(project / "Vendored")
+    forced = [Change("Vendored/v.py", "deleted"), Change("libs/sub", "added")]
+
+    result = apply_changes(copy, find_changes(copy) + forced)
+
+    assert result.written == ["libs/ok.py", "vendored2/ok.py"]
+    assert result.blocked == [
+        "VENDORED/new.py",
+        "Vendored/v.py",
+        "libs/sub",
+        "libs/sub/f.py",
+    ]
+    assert tree(project / "Vendored") == before
+    assert list((project / "libs" / "sub").iterdir()) == []
