@@ -1,12 +1,70 @@
 # Results: direct tool calls vs code execution (ticketdesk)
 
-**Read v4 for the three-arm comparison and v3 for the two-arm one (both 2026-11-25).** v1 and v2 are kept as history and are superseded (reasons at the end); do not quote their ratios.
+**Read v5 for the current three-arm comparison (2026-11-26): our `code` arm now runs in Monty, and the `fastmcp` arm has an addendum.** v4 is the same three arms before those two changes (our `code` arm in a CPython subprocess, `fastmcp` with no addendum), and v3 is the two-arm run (both 2026-11-25). v1 and v2 are kept as history and are superseded (reasons at the end); do not quote their ratios.
 
+- v5 data: `docs/results/ticketdesk-v5-2026-11-26.jsonl` (60 runs, three arms); full table: `docs/results/ticketdesk-v5-2026-11-26.report.md`
 - v4 data: `docs/results/ticketdesk-v4-2026-11-25.jsonl` (60 runs, three arms); full table: `docs/results/ticketdesk-v4-2026-11-25.report.md`
 - v3 data: `docs/results/ticketdesk-v3-2026-11-25.jsonl` (40 runs); full table: `docs/results/ticketdesk-v3-2026-11-25.report.md`
 - Superseded: `docs/results/ticketdesk-medium-2026-11-25.*` (v1) and `docs/results/ticketdesk-v2-medium-2026-11-25.*` (v2)
 
+## v5: Monty for our code arm, an addendum for the fastmcp arm (three arms)
+
+Still a pilot: one model, one provider, a server and four tasks we wrote, five runs per cell, the v3 settings below plus the third arm. Medians of 5 runs per cell; prompt tokens are cumulative input across all model calls in a run.
+
+**What changed from v4, and only this:**
+
+- **Our `code` arm runs its scripts in Monty** (`pydantic-monty` 1.7.0, a Rust Python interpreter in separate worker processes) instead of a CPython subprocess. The scripts see a read-only mount of the generated wrappers; their tool calls go through a host gateway that allows only the target's own tools (200 calls per script). Limits: 60 s wall, 20,000 characters each for output and for error text, 256 MiB, a fresh worker per script. The addendum gained one sentence: the script runs in a restricted interpreter with only part of the standard library and no network or process access.
+- **The `fastmcp` arm got an addendum** (it was `BASE_INSTRUCTION` alone in v4), equivalent in kind to the code arm's: its three tools and what they do, `await call_tool(name, params)`, only the returned value reaches the model and `print()` is discarded, variables do not persist, the same restricted-interpreter sentence, and "Process results in code and return only what you need". The code arm's addendum carries the matching efficiency sentence ("Process results in code and print only what you need"; unchanged from v4), so the two prompts now have one hint each. Every factual sentence of the fastmcp addendum is checked against the real proxy by a test (the efficiency sentence is advice, not a fact).
+- Run settings now record `runtime=monty;monty=1.7.0;max_script_calls=200` and `fastmcp_addendum=1`, so the report never merges v4 and v5 rows. Direct, task set, model, provider (`parasail`), reasoning effort (`medium`) and caps are as in v4.
+
+Run in four pieces (one task per `mcpx run`, the arms interleaved within each) because the first attempt was stopped by the operating system for low memory after 3 of 60 runs (discarded, kept locally as `runs/ticketdesk-v5-partial-killed.*`); the four files were concatenated. All 60 runs finished, none with an error recorded:
+
+```
+for t in A B C D; do
+  uv run mcpx run --target ticketdesk --arm all --task $t --runs 5 \
+    --model deepseek/deepseek-v4.1-flash-1017 --provider parasail --out runs/ticketdesk-v5-$t.jsonl
+done
+uv run mcpx report docs/results/ticketdesk-v5-2026-11-26.jsonl
+```
+
+| Task | Prompt tokens: direct → code → fastmcp | Share of direct: code, fastmcp | Wall time (s): direct → code → fastmcp | Correct: direct / code / fastmcp |
+|---|---|---|---|---|
+| A | 13,820 → 5,709 → 6,823 | 41%, 49% | 6.6 → 4.5 → 7.9 | 5/5, 5/5, 5/5 |
+| B | 210,299 → 13,725 → 17,886 | withheld (note) | 11.1 → 6.8 → 4.3 | **4/5**, 5/5, 5/5 |
+| C | 27,646 → 11,025 → 20,893 | 40%, 76% | 6.4 → 5.1 → 5.5 | 5/5, 5/5, 5/5 |
+| D | 149,405 → 8,051 → 19,420 | 5.4%, 13% | 7.1 → 19.6 → 6.5 | 5/5, 5/5, 5/5 |
+
+Note on B: one direct run was incorrect, so `mcpx report` withholds the ratios. By the plain ratio of medians the code arm used 6.5% of direct's prompt tokens and the fastmcp arm 8.5%. The wrong run (direct, run 0) answered `[39, 1769, 862, 2494, 2938]`; the fifth ticket is 2935 (a tie on comment count broken by id), so it picked a neighbouring id. 59 of 60 runs were correct.
+
+Model calls (median) direct / code / fastmcp: A 2 / 5 / 3, B 4 / 8 / 4, C 3 / 7 / 6, D 7 / 6 / 6. Executed MCP calls (median): A 1 / 1 / 1, B 8 / 22 / 14, C 31 / 33 / 33, D 7 / 8 / 8. Cost at list price (median, an upper bound), direct / code / fastmcp: A $0.0042 / $0.0021 / $0.0022, B $0.0665 / $0.0050 / $0.0061, C $0.0111 / $0.0041 / $0.0071, D $0.0456 / $0.0030 / $0.0065. With reported cache reads discounted (order-dependent, less stable): A $0.00020 / $0.00051 / $0.00027, B $0.0299 / $0.0015 / $0.0019, C $0.0034 / $0.0011 / $0.0021, D $0.0121 / $0.0012 / $0.0012.
+
+### What v5 shows
+
+- **Both code arms still use far fewer tokens than direct when results are large** (B, D): the code arm 5% to 7% of direct's, the fastmcp arm 8% to 13%. On the small single lookup (A) both are cheaper by tokens, but by cache-adjusted cost direct is cheapest ($0.00020 against $0.00051 and $0.00027).
+- **Our code arm used the fewest tokens on every task, but the gap to fastmcp is much smaller than in v4** (C: 11,025 vs 20,893; v4 was 7,237 vs 67,741). Wall time does not separate them cleanly: fastmcp was faster on B (4.3 vs 6.8 s) and D (6.5 vs 19.6 s), the code arm on A (4.5 vs 7.9 s), and they were close on C.
+- **The fastmcp arm's cost in v4 was mostly turns, and the addendum largely removed them.** Its median prompt tokens fell from v4 to v5 by 58% on B, 69% on C and 53% on D (42,361 → 17,886, 67,741 → 20,893, 41,693 → 19,420), with model calls down from 8 to 4 on B and 12 to 6 on C and D. Scripts that printed without returning (the v4 failure mode, 67 of 120 scripts) were 2 of 47 in v5, in 2 of 20 runs. The direct arm, which did not change, reproduced almost exactly (B 210,587 → 210,299, C 27,644 → 27,646, D 149,206 → 149,405 prompt tokens), so the drop is not provider drift in tokens. It is the addendum and nothing else we changed, but this was not isolated by a run with one sentence at a time.
+- **Our code arm got more expensive going to Monty**: median prompt tokens +30% on A, +10% on B, +52% on C, +21% on D versus v4, with one or two more model calls per run. The cause is scripts Monty cannot run (next section), not the runtime's speed.
+
+### Things we observed about the Monty runtime
+
+- **28% of the code arm's scripts fail in Monty.** Replaying all 106 recorded `run_python` scripts (the traces store scripts, not outputs, and the data is fixed) through the same runtime gives 75 that run and 31 that fail, and every one of the 20 code-arm runs had at least one failing script. Causes: `import inspect` (15, in all four tasks; the model tries to inspect the wrappers), attribute errors on a wrapper function (10: `__name__` 5, `__doc__` 1, and treating a function as a module 4, the same introspection habit), `raise SystemExit` (5, all on D; legal in CPython, an error in Monty), and one wrong keyword argument to a wrapper (not a Monty matter). Most are cheap discovery detours that the model recovers from, but they are the extra turns in the table above. This is the price of the sandbox that the spec predicted; the arm was not coached about it.
+- **Script time is not where wall time goes.** In three extra live task-D runs with timing added (not part of the data), each script took 0.004 to 0.9 s while a whole run took 12.6 to 18.5 s: the time is between scripts, where the gaps were mostly 2.3 to 5.8 s (one was 0.7 s), against about 1 s per model call in the direct arm. Why the code arm's turns were slower in this piece is not established. The code arm's wall time on D (19.6 s) is 4 times v4's (4.6 s); on A, B and C it matches v4 (4.5, 6.8, 5.1 s against 3.7, 7.5, 5.7 s). Treat wall times as noisy: the direct arm's own medians moved too (A 2.0 → 6.6 s, B 8.0 → 11.1 s).
+- **The fastmcp arm's own failures were rare**: 7 of 47 `execute` scripts failed (counted from the proxy's stderr in the batch logs: 3 on C, 4 on D): `AttributeError` 4, `TypeError` 2, `KeyError` 1. All 20 runs called `search` (1 to 2 times) and 8 also called `get_schema`.
+
+### Caveats specific to v5
+
+- **The two code arms still differ in discovery and interface, not only in sandbox**, and both now run in Monty (ours in a runtime we wrote, FastMCP's inside its proxy process). A gap between them cannot be pinned on either alone. Because v5 replaced the CPython runtime, it cannot tell how much of our code arm's change from v4 is Monty and how much is the one added sentence.
+- **Call caps differ and neither is in a prompt**: 200 calls per script for our arm, FastMCP's default 50 per `execute`. No v4 or v5 run reached 50 in one `execute` (the largest backend call count of a v5 fastmcp run was 64, over several scripts).
+- **Setup is outside the clock but each script's worker spawn is inside it** (1 to 10 ms measured), which is small next to v4's CPython subprocess start but is not nothing.
+- **Output format changed from v4**: stderr is replaced by the error text (the traceback), capped separately at 20,000 characters; tool failures raise `RuntimeError` inside a script instead of `ToolError`; Monty's `max_suspensions` stays at its default of 1,000 (about two per file read plus one per host call), which the 200-call budget reaches first in every run we saw.
+- **The tool-call trace has separate caps** (200 script and function-call items, 600 MCP-call items, plus a marker if anything is dropped); no v5 trace reached them (longest 71 items, no marker).
+- The first fastmcp run on task A took 26.1 s (the other four 5.9 to 7.9 s); no error was recorded and the cause was not investigated.
+- The four pieces ran one after another, so provider conditions may differ between tasks; the arms of a task share a piece.
+- Monty's isolation is probed by tests (sockets, subprocess, environment, host files, writes, traversal) and not proven; FastMCP's sandbox was not evaluated. All the v3 caveats below apply: one model, one provider, one dataset, a server and tasks we wrote, five runs per cell, cached-token costs depend on run order, and the reasoning effort was requested but not verified.
+
 ## v4: direct vs our code arm vs FastMCP Code Mode (three arms)
+
+*This section is the three-arm result before Monty and the addendum; the v5 section above replaces it for the current code. Its `code` rows were a CPython subprocess and its `fastmcp` rows had no addendum; do not compare them to v5 without those two differences in mind.*
 
 This is a pilot: one model, one provider, a server and four tasks we wrote, five runs per cell. The v3 settings below apply, plus the third arm. v4 re-ran `direct` and `code` in the same interleaved batch; its numbers are not mixed with v3's rows.
 

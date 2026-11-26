@@ -167,16 +167,23 @@ def test_committed_result_files_still_load() -> None:
         lines = path.read_text(encoding="utf-8").splitlines()
         records = [RunRecord.from_json(line) for line in lines if line.strip()]
         assert records
-        three_arms = "-v4-" in path.name
+        three_arms = "-v4-" in path.name or "-v5-" in path.name
         if "-v3-" in path.name or three_arms:
             # Written after traces and settings existed: both must be present.
             assert all(r.trace and r.settings for r in records), path.name
         else:
             # v1 and v2 predate traces and settings: they load with the defaults.
             assert all(r.trace == [] and r.settings == "" for r in records), path.name
+        if "-v5-" in path.name:
+            # v5 ran our code arm in Monty and gave the fastmcp arm an addendum.
+            assert all("runtime=monty;" in r.settings for r in records), path.name
+            assert all("fastmcp_addendum=1" in r.settings for r in records), path.name
+        elif three_arms:
+            # v4 predates both: its settings must not claim them.
+            assert all("runtime=" not in r.settings for r in records), path.name
         md = render_markdown(summarize(records))
         if three_arms:
-            # v4 has the fastmcp arm: the three-arm wording, without error.
+            # v4 and v5 have the fastmcp arm: the three-arm wording, without error.
             assert "**Code arms vs direct arm** (median total prompt tokens)" in md
             assert "fastmcp" in md, path.name
         else:
