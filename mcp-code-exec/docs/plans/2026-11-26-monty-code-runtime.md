@@ -57,16 +57,15 @@ Failure modes the spec implies that a happy path misses; each has a test in the 
 
 **Files:**
 - Modify: `src/mcpx/codegen/generator.py`, `pyproject.toml`, `uv.lock`, `tests/codegen/test_generator.py`
-- Delete: `src/mcpx/codegen/rpc_client.py`
 
 **Interfaces:**
 - Consumes: spike note (relative imports fail; absolute imports work; `import _mcpx_rpc` is the external module).
-- Produces: `generate_workspace(target_name, tools, workspace) -> Path` writes `servers/__init__.py`, `servers/<target>/__init__.py` using absolute imports (`from servers.<target>.<name> import <name>`), and `servers/<target>/<name>.py`; it no longer writes `_mcpx_rpc.py`. Wrapper bodies are unchanged (`import _mcpx_rpc` / `_mcpx_rpc.call(target, tool, args_without_none)`). `_RESERVED` keeps `_mcpx_rpc`.
+- Produces: `generate_workspace(target_name, tools, workspace) -> Path` writes `servers/__init__.py`, `servers/<target>/__init__.py` using absolute imports (`from servers.<target>.<name> import <name>`), and `servers/<target>/<name>.py`. Wrapper bodies are unchanged (`import _mcpx_rpc` / `_mcpx_rpc.call(target, tool, args_without_none)`). `_RESERVED` keeps `_mcpx_rpc`. **Until Task 5 it still writes `_mcpx_rpc.py` and `rpc_client.py` stays**, because the subprocess runtime, the Bridge, `mcpx demo` and the code arm depend on them until then (ruling: keeps the offline suite green after every task). Task 5 removes both.
 
 - [ ] **Step 1: Add the dependency.** `uv add "pydantic-monty==1.7.0"` (it already resolves transitively; this declares it). Full offline suite still passes before further edits.
-- [ ] **Step 2: Rewrite the tests.** Delete every test about the RPC client and the TCP protocol in `test_generator.py` (everything exercising `_mcpx_rpc.py` as a module: the `rpc` fixture, `serve`, env-var, timeout and reply-format tests, and `test_rpc_client_uses_only_the_standard_library`, `test_rpc_module_is_copied_verbatim...`). Keep the structure, naming, docstring-escaping, parameter and collision tests, adapted: tests that import wrappers into CPython now inject a fake `_mcpx_rpc` module in `sys.modules` (the file's `_import` helper already does this for several tests). Add: `test_no_rpc_file_is_written`; `test_package_init_uses_absolute_imports_only` (no line starts with `from .`); and `test_every_wrapper_runs_in_monty` (generate wrappers for a small spec list covering required, optional, renamed and `Any` parameters; run `from servers.demo import *` plus a call to each through a real `pydantic_monty.Monty` session with the workspace mounted read-only at `/work`, `cwd="/work"`, and an `ExternalModule({"call": recording_fn})`; assert the recorded `(server, tool, args)` triples equal what the CPython-side tests expect, with `None` arguments dropped).
-- [ ] **Step 3: Run (fail); change `_render_package` to absolute imports and delete the rpc copy from `generate_workspace` and `rpc_client.py`; run (pass).** Update the module docstring tree.
-- [ ] **Step 4: Commit** `refactor(codegen): generate Monty-compatible wrappers, drop the RPC client`.
+- [ ] **Step 2: Update the tests.** Change the tests that assert the package `__init__` imports to the absolute form, and add: `test_package_init_uses_absolute_imports_only` (no line starts with `from .`; the wrappers still import in CPython with the workspace on `sys.path`); and `test_every_wrapper_runs_in_monty` (generate wrappers for a small spec list covering required, optional, renamed and `Any` parameters; run `from servers.demo import *` plus a call to each through a real `pydantic_monty.Monty` session with the workspace mounted read-only at `/work`, `cwd="/work"`, and an `ExternalModule({"call": recording_fn})`; assert the recorded `(server, tool, args)` triples equal what the CPython-side tests expect, with `None` arguments dropped). Leave the RPC-client tests alone.
+- [ ] **Step 3: Run (fail); change `_render_package` to absolute imports; run (pass).** Update the module docstring tree.
+- [ ] **Step 4: Commit** `refactor(codegen): generate wrappers with absolute imports for Monty`.
 
 ---
 
@@ -107,12 +106,13 @@ Failure modes the spec implies that a happy path misses; each has a test in the 
 ### Task 5: Delete the subprocess stack, port the demo
 
 **Files:**
-- Delete: `src/mcpx/sandbox/runtime.py`, `src/mcpx/sandbox/bridge.py`, `tests/sandbox/test_runtime.py`, `tests/sandbox/test_bridge.py`, `tests/sandbox/helpers.py`
-- Modify: `src/mcpx/demo.py`, `tests/test_demo.py`, `pyproject.toml`, `uv.lock`, `src/mcpx/sandbox/__init__.py` (docstring), `tests/test_stack.py` if needed
+- Delete: `src/mcpx/sandbox/runtime.py`, `src/mcpx/sandbox/bridge.py`, `src/mcpx/codegen/rpc_client.py`, `tests/sandbox/test_runtime.py`, `tests/sandbox/test_bridge.py`, `tests/sandbox/helpers.py`
+- Modify: `src/mcpx/codegen/generator.py` (stop writing `_mcpx_rpc.py`), `tests/codegen/test_generator.py` (delete every test of the RPC client and TCP protocol: the `rpc` fixture, `serve`, env-var, timeout and reply-format tests, `test_rpc_client_uses_only_the_standard_library`, `test_rpc_module_is_copied_verbatim...`; adapt tests that import wrappers into CPython to inject a fake `_mcpx_rpc` in `sys.modules`; add `test_no_rpc_file_is_written`), `src/mcpx/demo.py`, `tests/test_demo.py`, `pyproject.toml`, `uv.lock`, `src/mcpx/sandbox/__init__.py` (docstring), `tests/test_stack.py` if needed
 
 **Interfaces:**
-- Produces: `run_demo() -> str` unchanged in output format, now through `MontyRuntime` and `HostGateway`; it checks `result.ok` instead of `exit_code`. `psutil` leaves `[project].dependencies` and joins the dev group only if no module under `src/` imports it (`grep`), else it stays.
+- Produces: `generate_workspace` writes no `_mcpx_rpc.py`; `run_demo() -> str` unchanged in output format, now through `MontyRuntime` and `HostGateway`; it checks `result.ok` instead of `exit_code`. `psutil` leaves `[project].dependencies` and joins the dev group only if no module under `src/` imports it (`grep`), else it stays.
 
+- [ ] **Step 0: Remove the RPC copy.** Write `test_no_rpc_file_is_written` and the generator-test deletions first, then stop writing `_mcpx_rpc.py` in `generate_workspace` and delete `rpc_client.py`, the old runtime, Bridge and their tests together with the helpers (they cannot be deleted piecemeal: they depend on each other).
 - [ ] **Step 1: Port the demo and its test first** (`TASK_B_CODE` must run in Monty: it uses `json.dumps`, `sorted` with a lambda, f-strings and a `while` loop; confirm, and adjust the script only if Monty needs it; `tests/test_demo.py` assertions are unchanged). Run it (pass).
 - [ ] **Step 2: Delete the old modules and tests; run `uv run pytest -W error -m "not live"`, ruff, pyrefly; fix leftovers** (`grep -rn "bridge\|Bridge\|sandbox.runtime\|rpc_client\|_mcpx_rpc.py" src tests docs/*.md README.md`: docs under `docs/specs`, `docs/plans` and `docs/results*` keep their history; fix the rest).
 - [ ] **Step 3: Commit** `refactor: remove the subprocess runtime, TCP Bridge and RPC client`.
@@ -143,8 +143,8 @@ Failure modes the spec implies that a happy path misses; each has a test in the 
 
 - [ ] **Step 1: Write the tests first** (`test_run_settings_names_runtime_for_code_arm`, `..._names_addendum_for_fastmcp_arm`, `..._unchanged_for_direct_only`, `test_run_batch_records_identical_settings_for_every_arm`, and a subprocess test that `import mcpx.agents.batch` leaves `fastmcp` out of `sys.modules`). Run (fail); implement; run (pass).
 - [ ] **Step 2: Docs.** README: the Safety section is rewritten to say the code arm runs in Monty with a read-only mount, no network, no process access and no environment, that this is probed by tests but not proven, and that the fastmcp arm runs in the same interpreter; the arm list, usage, layout (`sandbox/` = Monty runtime and gateway; no Bridge) and resolved-versions table (add `pydantic-monty 1.7.0`; drop `psutil` from runtime if it moved) are updated. Spec status becomes "approved, implemented".
-- [ ] **Step 3: Live smoke.** Update `test_arms_live.py` so `test_real_runs_record_a_trace_and_mcp_calls` and the arm parametrization still make sense on Monty (the `servers` substring check stays). Run `uv run pytest -m live tests/agents/test_arms_live.py -q` with the key from `.env` loaded by the harness (never print it): all three arms answer task A correctly. If a live test fails, report it; do not weaken it.
-- [ ] **Step 4: Full checks, commit** `feat: record the Monty runtime and fastmcp addendum in run settings; update docs`.
+- [ ] **Step 3: Live tests.** Update `test_arms_live.py` so `test_real_runs_record_a_trace_and_mcp_calls` and the arm parametrization still make sense on Monty (the `servers` substring check stays). Do NOT run them: they need the API key, which the implementer must never read; the controller runs them (Task 8).
+- [ ] **Step 4: Full offline checks, commit** `feat: record the Monty runtime and fastmcp addendum in run settings; update docs`.
 
 ---
 
@@ -152,6 +152,7 @@ Failure modes the spec implies that a happy path misses; each has a test in the 
 
 Not for an implementer subagent: it spends real money and is run by the controller after the final review (Opus, high effort) and its fix wave.
 
+- [ ] First the live smoke: `uv run pytest -m live tests/agents/test_arms_live.py -q` (the key comes from `.env`; never read or print it): every arm answers task A correctly. A failure is reported, not weakened.
 - [ ] `uv run mcpx run --target ticketdesk --arm all --task all --runs 5 --model deepseek/deepseek-v4.1-flash-1017 --provider parasail --out runs/ticketdesk-v5-<date>.jsonl` (same reasoning effort as v4); watch memory (Monty adds worker processes); if the OS kills it, do not restart without the owner's say.
 - [ ] Copy the finished file to `docs/results/ticketdesk-v5-<date>.jsonl`, generate `.report.md`, add a v5 section to `docs/results.md` next to v4: what changed (runtime, addendum), remaining confounds (discovery and interface differ; v4 and v5 `code` rows differ in runtime; wall times drift between batches), failures by cause including scripts Monty could not run, and only claims the data supports.
 - [ ] Update `tests/bench/test_usage.py::test_committed_result_files_still_load` so `-v5-` is treated as three-arm like v4 (settings must hold `runtime=monty`); run the full suite; commit; push the branch only when the owner says.
