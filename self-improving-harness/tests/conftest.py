@@ -48,7 +48,8 @@ def pgrep(sandbox: Container) -> Callable[[str], list[str]]:
             timeout=60,
             check=False,
         )
-        assert found.returncode in (0, 1), found.stderr
+        # A missing container also exits 1: only a silent one means "none found".
+        assert found.returncode in (0, 1) and not found.stderr, found.stderr
         return found.stdout.split()
 
     return run
