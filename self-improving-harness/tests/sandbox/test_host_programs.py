@@ -19,7 +19,7 @@ print(result.stdout.startswith(b"git version"))
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows searches the cwd")
 def test_a_program_planted_in_the_current_folder_is_not_run(workspace: Path) -> None:
-    """``sih chat .`` from a workspace where the agent had written ``git.exe``."""
+    """``sih chat .`` in a project to which an agent's ``git.exe`` was applied."""
     shutil.copy(os.environ["COMSPEC"], workspace / "git.exe")
     source = Path(__file__).parents[2] / "src"
     env = os.environ | {"PYTHONPATH": str(source)}

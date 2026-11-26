@@ -1,14 +1,10 @@
-"""One Docker container per chat session, with the workspace mounted."""
+"""One Docker container per chat session, with a copy of the project mounted."""
 
 import asyncio
 import csv
-import ctypes
 import hashlib
 import io
-import itertools
-import os
 import subprocess
-import sys
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -35,7 +31,11 @@ class ExecResult:
 
 @dataclass(frozen=True)
 class ContainerSpec:
-    """What a session container is made from. ``workspace`` must be absolute."""
+    """What a session container is made from.
+
+    ``workspace`` must be absolute. It is the session's copy (``SessionCopy.work``),
+    never the user's own folder: the code can change anything in it.
+    """
 
     image: str
     workspace: Path
@@ -55,34 +55,6 @@ def _mount(source: Path, target: str, *, readonly: bool = False) -> list[str]:
     return ["--mount", row.getvalue()]
 
 
-def _short_name(path: Path) -> str:
-    """The 8.3 name of ``path`` (``GIT~1``), or its own name where it has none."""
-    if sys.platform != "win32":
-        return path.name
-    buffer = ctypes.create_unicode_buffer(32768)
-    if not ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer)):
-        raise SandboxError(f"cannot read the short name of {path}")
-    return Path(buffer.value).name
-
-
-def _names_of(path: Path) -> list[str]:
-    """Every name in its folder that opens ``path``.
-
-    Docker Desktop shares Windows folders without regard to case, and a read-only
-    mount covers only the name it is mounted on: ``.GIT`` and ``GIT~1`` would stay
-    writable. Only names the host resolves are returned, since Docker creates a
-    folder for a mount target that does not exist.
-    """
-    found = set()
-    for name in {path.name, _short_name(path)}:
-        cases = ({char.lower(), char.upper()} for char in name)
-        for letters in itertools.product(*cases):
-            other = path.with_name("".join(letters))
-            if os.path.exists(other) and os.path.samefile(other, path):
-                found.add(other.name)
-    return sorted(found)
-
-
 def run_args(spec: ContainerSpec, name: str) -> list[str]:
     """The command that starts the container. Nothing from the host's environment."""
     args = [
@@ -99,10 +71,6 @@ def run_args(spec: ContainerSpec, name: str) -> list[str]:
     if not spec.network:
         args += ["--network", "none"]
     args += _mount(spec.workspace, "/workspace")
-    git = spec.workspace / ".git"
-    if os.path.exists(git):  # a file in a worktree or submodule
-        for alias in _names_of(git):
-            args += _mount(git, f"/workspace/{alias}", readonly=True)
     args += _mount(_GUEST, "/opt/guest", readonly=True)
     return [*args, spec.image, "sleep", "infinity"]
 
@@ -188,6 +156,16 @@ class Container:
         gone = (b"No such container", b"already in progress")
         if code != 0 and not any(text in stderr for text in gone):
             raise SandboxError(f"container {self._name} stays: {_reason(stderr)}")
+
+    async def remove_links(self) -> None:
+        """Delete the links in the workspace, before the container stops.
+
+        Windows cannot open or tidy up a link that was made in a container.
+        """
+        find = ["find", "/workspace", "-type", "l", "-delete"]
+        code, stderr = await _run(self.exec_args(*find))
+        if code != 0:
+            raise SandboxError(f"links stay in the workspace: {_reason(stderr)}")
 
     async def __aenter__(self) -> Self:
         await self.start()

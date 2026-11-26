@@ -2,12 +2,10 @@
 
 import asyncio
 import csv
-import ctypes
 import hashlib
 import itertools
 import json
 import subprocess
-import sys
 from collections.abc import Callable, Iterator
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -23,6 +21,7 @@ from harness.sandbox.container import (
     ensure_image,
     run_args,
 )
+from harness.workspace.snapshot import create_copy, remove_copy
 
 docker = pytest.mark.docker
 
@@ -32,20 +31,6 @@ def mounts(args: list[str]) -> dict[str, list[str]]:
     values = [args[i + 1] for i, arg in enumerate(args) if arg == "--mount"]
     rows = list(csv.reader(values))
     return {row[2].removeprefix("target="): row for row in rows}
-
-
-def case_variants(name: str) -> set[str]:
-    letters = ({char.lower(), char.upper()} for char in name)
-    return {"".join(variant) for variant in itertools.product(*letters)}
-
-
-def short_name(path: Path) -> str:
-    """The 8.3 name of ``path``, or its own name where there is none."""
-    if sys.platform != "win32":
-        return path.name
-    buffer = ctypes.create_unicode_buffer(32768)
-    assert ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
-    return Path(buffer.value).name
 
 
 def has_pair(args: list[str], flag: str, value: str) -> bool:
@@ -103,26 +88,13 @@ def test_run_args_mount_the_workspace_and_guest(workspace: Path) -> None:
     assert len([a for a in args if str(workspace) in a]) == 1
 
 
-@pytest.mark.parametrize("kind", ["folder", "file"])
-def test_run_args_mount_every_name_of_git_read_only(workspace: Path, kind: str) -> None:
-    git = workspace / ".git"
-    if kind == "folder":
-        git.mkdir()
-    else:
-        git.write_text("gitdir: ../elsewhere\n")
+def test_run_args_mount_nothing_extra_for_a_git_folder(workspace: Path) -> None:
+    """The workspace is a copy: its repository is the agent's to change."""
+    (workspace / ".git").mkdir()
 
     found = mounts(run_args(ContainerSpec("img:1", workspace), "n"))
 
-    expected = {".git"}
-    if (workspace / ".GIT").exists():  # a case-insensitive host
-        expected = case_variants(".git")
-        if short_name(git) != ".git":
-            expected |= case_variants(short_name(git))
-    aliases = {t: row for t, row in found.items() if t.startswith("/workspace/")}
-    assert set(aliases) == {f"/workspace/{name}" for name in expected}
-    for row in aliases.values():
-        assert row[1] == f"source={git}"
-        assert row[-1] == "readonly"
+    assert set(found) == {"/workspace", "/opt/guest"}
 
 
 def test_exec_args(workspace: Path) -> None:
@@ -311,72 +283,49 @@ def test_the_guest_folder_is_read_only(start: Start) -> None:
     assert "Read-only file system" in written.stderr
 
 
-# Each line is an attempt to change the repository the host's git will use.
-ATTACK = """
-import os, sys
-
-def put(path, mode="w"):
-    with open(path, mode) as file:
-        file.write("planted")
-
-attempts = {
-    "write .git hook": lambda: put(".git/hooks/x"),
-    "write .GIT hook": lambda: put(".GIT/hooks/x"),
-    "append .Git config": lambda: put(".Git/config", "a"),
-    "rename .GIT": lambda: os.rename(".GIT", "stolen"),
-    "rename .git": lambda: os.rename(".git", "stolen2"),
-    "link .GIT config": lambda: os.link(".GIT/config", "hard"),
-}
-short = sys.argv[1]
-if short != ".git":
-    attempts["write 8.3 hook"] = lambda: put(short + "/hooks/y")
-    attempts["append 8.3 config"] = lambda: put(short.lower() + "/config", "a")
-for label, attempt in attempts.items():
-    try:
-        attempt()
-    except OSError:
-        continue
-    print(label)
-"""
-
-
-def tree(folder: Path) -> dict[str, bytes | None]:
-    return {
-        path.relative_to(folder).as_posix(): path.read_bytes()
-        if path.is_file()
-        else None
-        for path in folder.rglob("*")
-    }
-
-
 @docker
-def test_git_cannot_be_changed_under_any_of_its_names(
-    start: Start, workspace: Path, git: Callable[..., str]
+def test_the_agent_works_on_a_copy_with_its_own_repository(
+    image: str, tmp_path: Path
 ) -> None:
-    git(workspace, "init", "-q")
-    (workspace / ".git" / "hooks").mkdir(exist_ok=True)
-    before = tree(workspace)
-    sandbox = start()
+    project = tmp_path / "my project, v1"
+    project.mkdir()
+    (project / "a.txt").write_bytes(b"one\r\ntwo\r\n")
+    copy = create_copy(project, tmp_path / "sessions")
+    sandbox = Container(ContainerSpec(image, copy.work))
+    commit = (
+        "git init -q && git add -A"
+        " && git -c user.name=sih -c user.email=sih@localhost commit -qm baseline"
+        " && git status --porcelain && cat a.txt && echo changed > a.txt"
+        " && ln -s a.txt file-link && mkdir d && ln -s d folder-link"
+        " && ln -s /nowhere d/dangling"
+    )
 
-    attack = inside(sandbox, "python", "-c", ATTACK, short_name(workspace / ".git"))
+    asyncio.run(sandbox.start())
+    try:
+        done = inside(sandbox, "sh", "-c", commit)
+        assert done.returncode == 0, done.stderr  # git warns about the CRLF
+        assert done.stdout == "one\ntwo\n"  # text mode reads CRLF as LF
+        assert (copy.work / ".git" / "HEAD").is_file()
+        assert (copy.work / "a.txt").read_bytes() == b"changed\n"
+        assert (project / "a.txt").read_bytes() == b"one\r\ntwo\r\n"
+        assert not (project / ".git").exists()
+        asyncio.run(sandbox.remove_links())
+        assert inside(sandbox, "find", "/workspace", "-type", "l").stdout == ""
+        assert inside(sandbox, "test", "-d", "d").returncode == 0
+    finally:
+        asyncio.run(sandbox.stop())
 
-    assert (attack.returncode, attack.stderr) == (0, "")
-    assert attack.stdout == ""  # names the attempts that succeeded
-    assert tree(workspace) == before
+    remove_copy(copy)
+
+    assert not copy.root.exists()
 
 
 @docker
-def test_a_git_file_cannot_be_changed(start: Start, workspace: Path) -> None:
-    pointer = workspace / ".git"
-    pointer.write_bytes(b"gitdir: ../elsewhere\n")
-    sandbox = start()
+def test_remove_links_reports_a_missing_container(image: str, workspace: Path) -> None:
+    sandbox = Container(ContainerSpec(image, workspace))
 
-    for name in (".git", ".GIT", short_name(pointer)):
-        written = inside(sandbox, "sh", "-c", f'echo planted > "{name}"')
-        assert written.returncode != 0, name
-
-    assert pointer.read_bytes() == b"gitdir: ../elsewhere\n"
-    assert [path.name for path in workspace.iterdir()] == [".git"]
+    with pytest.raises(SandboxError, match="links"):
+        asyncio.run(sandbox.remove_links())
 
 
 @docker
@@ -504,25 +453,3 @@ def test_kill_group_kills_the_whole_group(start: Start) -> None:
     assert inside(sandbox, "pgrep", "-f", "sleep 7[78]").stdout == ""
     assert inside(sandbox, "pgrep", "-f", "sleep infinity").stdout != ""
     asyncio.run(sandbox.kill_group(pgid))  # already gone: not an error
-
-
-@docker
-def test_git_sees_a_crlf_checkout_as_clean(
-    start: Start, workspace: Path, git: Callable[..., str]
-) -> None:
-    autocrlf = ("-c", "core.autocrlf=true")  # as set globally on Windows
-    git(workspace, "init", "-q")
-    (workspace / "a.txt").write_bytes(b"one\ntwo\n")
-    git(workspace, *autocrlf, "add", "a.txt")
-    git(workspace, *autocrlf, "commit", "-qm", "a")
-    (workspace / "a.txt").unlink()
-    git(workspace, *autocrlf, "checkout", "-q", "--", "a.txt")
-    assert (workspace / "a.txt").read_bytes() == b"one\r\ntwo\r\n"
-    sandbox = start()
-
-    status = inside(sandbox, "git", "status", "--porcelain")
-
-    assert (status.returncode, status.stdout, status.stderr) == (0, "", "")
-    # control: without the image's setting the same file shows as changed
-    raw = inside(sandbox, "git", "-c", "core.autocrlf=false", "status", "--porcelain")
-    assert raw.stdout == " M a.txt\n"
