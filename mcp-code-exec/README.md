@@ -189,7 +189,9 @@ gateway and limits around it. FastMCP's documentation says the code is untrusted
 we have not evaluated that sandbox's isolation. The progress output never prints
 keys or environment values, and API key values are replaced with `[redacted]` in
 the error text, answer and trace stored in the JSONL records. Every `run_python`
-and `execute` script is stored in the run's trace and can be audited afterwards.
+and `execute` script is stored in the run's trace (up to 200 script and
+function-call items per run; a final `trace_truncated` item says how many were
+dropped, if any) and can be audited afterwards.
 
 ## Results
 

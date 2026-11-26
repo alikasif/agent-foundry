@@ -44,10 +44,12 @@ def code_instruction(target_name: str) -> str:
     return BASE_INSTRUCTION + CODE_ADDENDUM.format(target=target_name)
 
 
-# Every sentence is checked against the real proxy in tests/codemode/test_proxy.py
-# (search by name or description, parameters from get_schema, an awaited
-# call_tool inside execute, print discarded, no state kept between calls, the
-# socket/subprocess/third-party imports that fail).
+# Every sentence about mechanics is checked against the real proxy in
+# tests/codemode/test_proxy.py (search by name or description, parameters from
+# get_schema, an awaited call_tool inside execute, print discarded, no state kept
+# between calls, the socket/subprocess/third-party imports that fail). The one
+# sentence advising to process results in code is advice, not a mechanic, and is
+# there to match the code arm's (see the module docstring).
 FASTMCP_ADDENDUM = f"""
 Your tools are reached through three meta-tools. `{SEARCH_TOOL}` finds tools by \
 name or description. `{SCHEMA_TOOL}` returns the parameters of the tools you \

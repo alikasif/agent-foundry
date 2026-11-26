@@ -379,6 +379,20 @@ async def test_huge_single_line_exception_is_capped(tmp_path: Path) -> None:
     assert len(result.render()) <= 20_000 + RENDER_SLACK
 
 
+async def test_a_long_traceback_keeps_the_exception_line(tmp_path: Path) -> None:
+    # Monty echoes the failing source line in the traceback, so a huge line puts
+    # the bulk before the exception line, which is what the tail cap must keep.
+    code = "a = '" + "y" * 200_000 + "'; raise ValueError('boom')"
+    async with fake_monty(tmp_path) as (rt, _, _):
+        result = await rt.run(code)
+    assert result.truncated and len(result.error) == 20_000
+    assert result.error.startswith("...\n")
+    assert result.render().endswith(
+        "ValueError('boom')\nValueError: boom\n[output truncated at 20000 chars]\n"
+    )
+    assert len(result.render()) <= 20_000 + RENDER_SLACK
+
+
 async def test_stdout_and_error_are_capped_separately(tmp_path: Path) -> None:
     code = "print('x' * 30_000)\nraise ValueError('E' * 30_000)"
     async with fake_monty(tmp_path, max_output_chars=1_000) as (rt, _, _):

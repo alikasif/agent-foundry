@@ -6,7 +6,8 @@ server it launches is ``mcpx.codemode.proxy``, which serves ``search``,
 started by module name only; this package never imports it. Results reach the
 model through the direct arm's ``structured_result_only`` unchanged. The
 instruction is the shared base text plus an addendum on the mechanics of the
-three tools (``codemode_instruction``), parallel to the code arm's.
+three tools and one sentence of efficiency advice (``codemode_instruction``),
+parallel to the code arm's.
 """
 
 import os
