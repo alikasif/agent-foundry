@@ -195,12 +195,15 @@ def main(argv: list[str] | None = None) -> int:
     shell_mode = modes.add_parser("shell")
     shell_mode.add_argument("--limit", type=int, required=True)
     shell_mode.add_argument("--timeout", type=float, required=True)
-    shell_mode.add_argument("command")
+    shell_mode.add_argument("command", nargs="?", help="read from stdin if absent")
     args = parser.parse_args(argv)
     if args.mode == "serve":
         serve(args.limit)
     else:
-        shell(args.command, args.limit, args.timeout)
+        command = args.command
+        if command is None:  # the host's command line is too short for some
+            command = sys.stdin.buffer.read().decode(errors="replace")
+        shell(command, args.limit, args.timeout)
     return 0
 
 

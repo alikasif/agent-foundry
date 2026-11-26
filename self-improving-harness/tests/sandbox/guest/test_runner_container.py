@@ -106,3 +106,14 @@ def test_shell_survives_command_that_empties_tmp() -> None:
     assert [json.loads(line) for line in lines[1:]] == [
         {"output": "hi\n", "exit_code": 0, "timed_out": False}
     ]
+
+
+def test_shell_reads_the_command_from_stdin() -> None:
+    lines = run_in_container(
+        "python", "/opt/guest/runner.py", "shell",
+        "--limit", "1000", "--timeout", "10", stdin="echo 'from stdin'\ncat; echo end",
+    )  # fmt: skip
+
+    assert [json.loads(line) for line in lines[1:]] == [
+        {"output": "from stdin\nend\n", "exit_code": 0, "timed_out": False}
+    ]
