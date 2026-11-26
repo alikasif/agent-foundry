@@ -1,21 +1,17 @@
-"""Tests for the wrapper generator and the workspace-side RPC client."""
+"""Tests for the wrapper generator."""
 
-import ast
 import importlib
 import inspect
-import json
-import socket
 import sys
-import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
+from pydantic_monty import ExternalModule, Monty, MountDir
 
 from mcpx.client.connection import ToolSpec
-from mcpx.codegen import generator
 from mcpx.codegen.generator import generate_workspace
 
 NO_PARAMS: dict[str, Any] = {"type": "object", "properties": {}}
@@ -30,8 +26,6 @@ LIST_ITEMS = ToolSpec(
     },
 )
 
-ENV_VARS = ("MCPX_RPC_HOST", "MCPX_RPC_PORT", "MCPX_RPC_TOKEN")
-
 
 def _purge_generated_modules() -> None:
     for name in list(sys.modules):
@@ -41,8 +35,20 @@ def _purge_generated_modules() -> None:
 
 @pytest.fixture(autouse=True)
 def isolated_imports() -> Iterator[None]:
-    """Keep generated packages from leaking between tests."""
+    """Keep generated packages from leaking between tests.
+
+    The wrappers import ``_mcpx_rpc``, which the Monty runtime supplies and the
+    generator does not write; CPython tests get a stand-in module whose ``call``
+    fails loudly unless a test replaces it with ``_record_calls``.
+    """
     _purge_generated_modules()
+    stand_in = ModuleType("_mcpx_rpc")
+
+    def unexpected_call(server: str, tool: str, args: dict[str, Any]) -> Any:
+        raise AssertionError(f"unexpected call {server}.{tool}")
+
+    stand_in.call = unexpected_call  # type: ignore[attr-defined]
+    sys.modules["_mcpx_rpc"] = stand_in
     yield
     _purge_generated_modules()
 
@@ -111,7 +117,14 @@ def test_workspace_has_one_file_per_tool(tmp_path: Path) -> None:
         "__init__.py",
     }
     assert (tmp_path / "servers" / "__init__.py").is_file()
-    assert (tmp_path / "_mcpx_rpc.py").is_file()
+
+
+def test_no_rpc_file_is_written(tmp_path: Path) -> None:
+    generate_workspace("demo", [LIST_ITEMS], tmp_path)
+    assert not (tmp_path / "_mcpx_rpc.py").exists()
+    assert {p.name for p in tmp_path.iterdir()} == {"servers"}
+    for path in tmp_path.rglob("*.py"):
+        assert b"\r" not in path.read_bytes(), path
 
 
 def test_package_reexports_every_wrapper_in_all(
@@ -124,25 +137,83 @@ def test_package_reexports_every_wrapper_in_all(
     assert callable(mod.get_item) and callable(mod.list_items)
 
 
-def test_rpc_module_is_copied_verbatim_with_lf_endings(tmp_path: Path) -> None:
-    generate_workspace("demo", [LIST_ITEMS], tmp_path)
-    source = Path(generator.__file__).with_name("rpc_client.py").read_bytes()
-    copied = (tmp_path / "_mcpx_rpc.py").read_bytes()
-    assert copied == source.replace(b"\r\n", b"\n")
-    for path in tmp_path.rglob("*.py"):
-        assert b"\r" not in path.read_bytes(), path
+def test_package_init_uses_absolute_imports_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    other = ToolSpec("get_item", "Get one.", NO_PARAMS)
+    generate_workspace("demo", [LIST_ITEMS, other], tmp_path)
+    lines = (tmp_path / "servers" / "demo" / "__init__.py").read_text().splitlines()
+    assert not [line for line in lines if line.startswith("from .")]
+    assert "from servers.demo.list_items import list_items" in lines
+    assert "from servers.demo.get_item import get_item" in lines
+    mod = _import(monkeypatch, tmp_path, "servers.demo")
+    assert callable(mod.list_items) and callable(mod.get_item)
 
 
-def test_rpc_client_uses_only_the_standard_library() -> None:
-    path = Path(generator.__file__).with_name("rpc_client.py")
-    modules: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.Import):
-            modules.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0
-            modules.add((node.module or "").split(".")[0])
-    assert modules <= set(sys.stdlib_module_names)
+MONTY_SPECS = [
+    LIST_ITEMS,
+    ToolSpec("ping", "Ping.", NO_PARAMS),
+    ToolSpec(
+        "search",
+        "Search.",
+        {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string"},
+                "payload": {},
+                "limit": {"type": "integer"},
+            },
+            "required": ["from"],
+        },
+    ),
+]
+MONTY_SCRIPT = """from servers.demo import *
+list_items("x")
+list_items(q="y", page=2)
+ping()
+search("a")
+search(from_="b", payload={"k": [1, None]}, limit=0)
+"done"
+"""
+MONTY_EXPECTED = [
+    ("demo", "list_items", {"q": "x"}),
+    ("demo", "list_items", {"q": "y", "page": 2}),
+    ("demo", "ping", {}),
+    ("demo", "search", {"from": "a"}),
+    ("demo", "search", {"from": "b", "payload": {"k": [1, None]}, "limit": 0}),
+]
+
+
+def test_every_wrapper_runs_in_monty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    generate_workspace("demo", MONTY_SPECS, tmp_path)
+    # The CPython side is the reference for what each call must send.
+    mod = _import(monkeypatch, tmp_path, "servers.demo")
+    cpython_calls = _record_calls(monkeypatch)
+    mod.list_items("x")
+    mod.list_items(q="y", page=2)
+    mod.ping()
+    mod.search("a")
+    mod.search(from_="b", payload={"k": [1, None]}, limit=0)
+    assert cpython_calls == MONTY_EXPECTED
+
+    recorded: list[tuple[str, str, dict[str, Any]]] = []
+
+    def call(server: str, tool: str, args: dict[str, Any]) -> str:
+        recorded.append((server, tool, args))
+        return "ok"
+
+    with (
+        Monty() as pool,
+        MountDir(host_path=tmp_path, virtual_path="/work", mode="read-only") as mount,
+        pool.checkout(
+            external_modules={"_mcpx_rpc": ExternalModule({"call": call})}
+        ) as session,
+    ):
+        result = session.feed_run(MONTY_SCRIPT, mount=mount, cwd="/work")
+    assert result == "done"
+    assert recorded == MONTY_EXPECTED
 
 
 def test_keyword_and_invalid_parameter_names_are_sanitized(
@@ -396,7 +467,7 @@ def test_every_generated_file_compiles(tmp_path: Path) -> None:
     ]
     generate_workspace("demo", nasty, tmp_path)
     files = sorted(tmp_path.rglob("*.py"))
-    assert len(files) == len(nasty) + 3
+    assert len(files) == len(nasty) + 2
     for path in files:
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
 
@@ -434,180 +505,3 @@ def test_empty_tool_list_still_imports(
     generate_workspace("demo", [], tmp_path)
     mod = _import(monkeypatch, tmp_path, "servers.demo")
     assert mod.__all__ == []
-
-
-# --- the workspace-side RPC client, exercised against a real TCP server ---------
-
-
-@pytest.fixture
-def rpc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ModuleType:
-    """The generated ``_mcpx_rpc`` module, with the RPC env vars cleared."""
-    generate_workspace("demo", [], tmp_path)
-    for name in ENV_VARS:
-        monkeypatch.delenv(name, raising=False)
-    return _import(monkeypatch, tmp_path, "_mcpx_rpc")
-
-
-Handler = Callable[[], bytes | None]
-Serve = Callable[[Handler], list[dict[str, Any]]]
-
-
-@pytest.fixture
-def serve(monkeypatch: pytest.MonkeyPatch) -> Iterator[Serve]:
-    """Start a one-shot TCP server and point the RPC env vars at it.
-
-    The handler returns the bytes to send back, or ``None`` to close the
-    connection without replying. The requests the server received (parsed
-    JSON) are appended to the returned list.
-    """
-    cleanup: list[Callable[[], None]] = []
-
-    def start(handler: Handler) -> list[dict[str, Any]]:
-        listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        listener.settimeout(10)
-        received: list[dict[str, Any]] = []
-
-        def run() -> None:
-            try:
-                conn, _ = listener.accept()
-            except OSError:
-                return
-            with conn, conn.makefile("rb") as reader:
-                received.append(json.loads(reader.readline()))
-                reply = handler()
-                if reply is not None:
-                    conn.sendall(reply)
-
-        thread = threading.Thread(target=run, daemon=True)
-        thread.start()
-        monkeypatch.setenv("MCPX_RPC_HOST", "127.0.0.1")
-        monkeypatch.setenv("MCPX_RPC_PORT", str(listener.getsockname()[1]))
-        monkeypatch.setenv("MCPX_RPC_TOKEN", "secret-token")
-
-        def stop() -> None:
-            listener.close()
-            thread.join(timeout=5)
-
-        cleanup.append(stop)
-        return received
-
-    yield start
-    for stop in cleanup:
-        stop()
-
-
-def test_call_sends_request_and_returns_result(
-    rpc: ModuleType, serve: Serve, capsys: pytest.CaptureFixture[str]
-) -> None:
-    reply = json.dumps({"ok": True, "result": {"rows": [1, "é"]}}) + "\n"
-    received = serve(lambda: reply.encode())
-    result = rpc.call("demo", "list_items", {"q": "x\ny", "n": 2})
-    assert result == {"rows": [1, "é"]}
-    assert received == [
-        {
-            "token": "secret-token",
-            "server": "demo",
-            "tool": "list_items",
-            "args": {"q": "x\ny", "n": 2},
-        }
-    ]
-    assert capsys.readouterr().out == ""
-
-
-def test_call_returns_none_result(rpc: ModuleType, serve: Serve) -> None:
-    serve(lambda: b'{"ok": true, "result": null}\n')
-    assert rpc.call("demo", "t", {}) is None
-
-
-def test_call_raises_tool_error_with_message(rpc: ModuleType, serve: Serve) -> None:
-    serve(lambda: b'{"ok": false, "error": "no such ticket"}\n')
-    with pytest.raises(rpc.ToolError, match="no such ticket"):
-        rpc.call("demo", "get_ticket", {"id": 1})
-
-
-def test_tool_error_is_not_a_runtime_error(rpc: ModuleType) -> None:
-    assert issubclass(rpc.ToolError, Exception)
-    assert not issubclass(rpc.ToolError, RuntimeError)
-
-
-@pytest.mark.parametrize("missing", ENV_VARS)
-def test_call_without_env_var_raises_runtime_error(
-    rpc: ModuleType, monkeypatch: pytest.MonkeyPatch, missing: str
-) -> None:
-    for name in ENV_VARS:
-        monkeypatch.setenv(name, "1")
-    monkeypatch.delenv(missing)
-    with pytest.raises(RuntimeError, match=missing):
-        rpc.call("demo", "t", {})
-
-
-def test_call_with_no_env_names_every_missing_variable(rpc: ModuleType) -> None:
-    with pytest.raises(RuntimeError) as info:
-        rpc.call("demo", "t", {})
-    for name in ENV_VARS:
-        assert name in str(info.value)
-
-
-@pytest.mark.parametrize("port", ["abc", "0", "70000", "-1"])
-def test_call_with_bad_port_raises_runtime_error(
-    rpc: ModuleType, monkeypatch: pytest.MonkeyPatch, port: str
-) -> None:
-    monkeypatch.setenv("MCPX_RPC_HOST", "127.0.0.1")
-    monkeypatch.setenv("MCPX_RPC_TOKEN", "t")
-    monkeypatch.setenv("MCPX_RPC_PORT", port)
-    with pytest.raises(RuntimeError, match="MCPX_RPC_PORT"):
-        rpc.call("demo", "t", {})
-
-
-def test_call_when_server_closes_without_reply(rpc: ModuleType, serve: Serve) -> None:
-    serve(lambda: None)
-    with pytest.raises(RuntimeError, match="closed"):
-        rpc.call("demo", "t", {})
-
-
-@pytest.mark.parametrize(
-    "reply",
-    [b"not json\n", b"[1, 2]\n", b'{"result": 1}\n', b'{"ok": tru'],
-)
-def test_call_with_malformed_reply_raises_runtime_error(
-    rpc: ModuleType, serve: Serve, reply: bytes
-) -> None:
-    serve(lambda: reply)
-    with pytest.raises(RuntimeError, match="reply"):
-        rpc.call("demo", "t", {})
-
-
-def test_call_when_nothing_is_listening(
-    rpc: ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    monkeypatch.setenv("MCPX_RPC_HOST", "127.0.0.1")
-    monkeypatch.setenv("MCPX_RPC_PORT", str(port))
-    monkeypatch.setenv("MCPX_RPC_TOKEN", "t")
-    with pytest.raises(RuntimeError, match="connect"):
-        rpc.call("demo", "t", {})
-
-
-def test_call_times_out_instead_of_hanging(
-    rpc: ModuleType, serve: Serve, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    release = threading.Event()
-
-    def hang() -> None:
-        release.wait(5)
-
-    serve(hang)
-    monkeypatch.setattr(rpc, "TIMEOUT_SECONDS", 0.2)
-    try:
-        with pytest.raises(RuntimeError, match="timed out"):
-            rpc.call("demo", "t", {})
-    finally:
-        release.set()
-
-
-def test_timeout_is_generous_by_default(rpc: ModuleType) -> None:
-    assert rpc.TIMEOUT_SECONDS >= 60

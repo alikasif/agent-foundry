@@ -17,6 +17,7 @@ REQUEST_TIMEOUT_S = 120.0
 KEY_VAR = "OPENROUTER_API_KEY"
 MODEL_VAR = "MODEL"
 DEFAULT_RUNS = 3
+ARMS = ("direct", "code", "fastmcp")
 RUNS_DIR = Path("runs")
 
 
@@ -47,7 +48,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--target", required=True, help="benchmark target, e.g. ticketdesk"
     )
-    run.add_argument("--arm", choices=["direct", "code", "both"], required=True)
+    run.add_argument(
+        "--arm",
+        choices=[*ARMS, "both", "all"],
+        required=True,
+        help="arm to run: direct, code or fastmcp; 'both' is direct and code, "
+        "'all' is direct, code and fastmcp",
+    )
     run.add_argument("--task", required=True, help="task id (A, B, C, D) or 'all'")
     run.add_argument(
         "--model",
@@ -103,6 +110,15 @@ def _fail(message: str) -> SystemExit:
     return SystemExit(1)
 
 
+def _arms(choice: str) -> list[str]:
+    """The arms an ``--arm`` choice stands for, in run order."""
+    if choice == "both":
+        return ["direct", "code"]
+    if choice == "all":
+        return list(ARMS)
+    return [choice]
+
+
 def _run(args: argparse.Namespace) -> None:
     from mcpx.agents.batch import run_batch  # slow import (ADK): only when needed
     from mcpx.llm.models import ModelConfig
@@ -131,7 +147,7 @@ def _run(args: argparse.Namespace) -> None:
         )
     except ValueError as exc:
         raise _fail(str(exc)) from None
-    arms = ["direct", "code"] if args.arm == "both" else [args.arm]
+    arms = _arms(args.arm)
     out_path = args.out or default_out_path(args.target)
     print(f"writing results to {out_path}", flush=True)
     batch = functools.partial(

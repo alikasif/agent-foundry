@@ -280,6 +280,53 @@ def test_old_committed_results_still_report(
     assert "settings: (not recorded)" in out
 
 
+def _arms_for(monkeypatch: pytest.MonkeyPatch, arm: str) -> list[str]:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    seen = _capture_model(monkeypatch)
+    args = [*RUN_ARGS]
+    args[args.index("direct")] = arm
+    main(args, env_file=None)
+    return list(seen["args"][1])
+
+
+def test_arm_all_runs_the_three_arms_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _arms_for(monkeypatch, "all") == ["direct", "code", "fastmcp"]
+
+
+def test_arm_both_still_means_direct_and_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _arms_for(monkeypatch, "both") == ["direct", "code"]
+
+
+@pytest.mark.parametrize("arm", ["direct", "code", "fastmcp"])
+def test_a_single_arm_name_means_just_that_arm(
+    monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    assert _arms_for(monkeypatch, arm) == [arm]
+
+
+def test_an_unknown_arm_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-key")
+    args = [*RUN_ARGS]
+    args[args.index("direct")] = "magic"
+    with pytest.raises(SystemExit) as info:
+        main(args, env_file=None)
+    assert info.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_arm_help_lists_every_choice(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["run", "--help"], env_file=None)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--arm {direct,code,fastmcp,both,all}" in out
+
+
 def test_runs_and_out_have_defaults(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

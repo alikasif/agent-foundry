@@ -1,16 +1,28 @@
 # mcpx
 
-Benchmark harness that compares two ways for an LLM agent to use MCP servers:
-direct MCP tool-calling versus writing and running code against generated
-client wrappers ("code execution with MCP").
+Benchmark harness that compares three ways for an LLM agent to use MCP servers:
 
-Built on Google ADK, LiteLLM (OpenRouter) and the MCP Python SDK.
+- `direct`: MCP tool-calling, every tool schema loaded into the model's context.
+- `code`: the model writes Python that runs in Monty (a Rust Python interpreter,
+  in separate worker processes) against generated client wrappers it discovers by
+  reading files over a read-only mount ("code execution with MCP"). The wrappers
+  reach the server only through a host gateway (allowlist of the target's tools,
+  200 calls per script).
+- `fastmcp`: FastMCP's experimental Code Mode, applied to a stdio proxy of the
+  server: the model sees three meta-tools (`search`, `get_schema`, `execute`) and
+  writes code that calls `call_tool(...)` in FastMCP's Monty sandbox. Its
+  instructions carry an addendum, written to match what the code arm's
+  instructions say about the interpreter and about discovering tools.
 
-> **Warning: this is not a security sandbox.** The code-execution path runs
-> model-generated Python in a local subprocess with your user's permissions.
-> It enforces timeouts and output limits for benchmarking, not isolation. Run
-> it only on a machine and with credentials you are willing to expose to
-> model-written code.
+Built on Google ADK, LiteLLM (OpenRouter), the MCP Python SDK, FastMCP and
+pydantic-monty.
+
+> **Warning: the sandbox is probed, not proven.** The code arm runs
+> model-written Python in Monty, not in your interpreter, and tests check that it
+> has no network, process or environment access. Monty's isolation is not proven,
+> and the fastmcp arm's sandbox (FastMCP's own Monty, in its proxy process) is not
+> evaluated at all. See [Safety](#safety) before pointing the harness at a server
+> or credentials you care about.
 
 ## Setup
 
@@ -41,9 +53,10 @@ The shortest form uses the defaults (`--runs 3`, model from `MODEL`, results in
 uv run mcpx run --target ticketdesk --task B --arm direct
 ```
 
-- `--arm` is `direct`, `code` or `both`; `--task` is `A`, `B`, `C`, `D` or
-  `all`. Runs are sequential, taking turns between the arms for each task and
-  run index, so provider latency drift hits both arms alike.
+- `--arm` is `direct`, `code`, `fastmcp`, `both` (direct and code) or `all` (all
+  three); `--task` is `A`, `B`, `C`, `D` or `all`. Runs are sequential, taking
+  turns between the arms for each task and run index, so provider latency drift
+  hits every arm alike.
 - `--model` is optional: when omitted, the `MODEL` environment variable (for
   example from `.env`) is used; with neither the command exits with a message.
 - `--runs` defaults to 3 and `--out` to `runs/<target>-<UTC timestamp>.jsonl`
@@ -58,14 +71,22 @@ uv run mcpx run --target ticketdesk --task B --arm direct
   batch to different providers, whose speed, caching and token accounting
   differ.
 - Every record stores its settings (`reasoning=...;provider=...;
-  max_llm_calls=...;run_timeout_s=...;temperature=...`). The report never merges
+  max_llm_calls=...;run_timeout_s=...;temperature=...`). A batch that includes the
+  `code` arm appends `runtime=monty;monty=<pydantic-monty version>;
+  max_script_calls=200`, and one that includes `fastmcp` appends
+  `fastmcp=<version>;max_tool_calls=<cap>;fastmcp_addendum=1`, on every record of
+  the batch (all arms). The report never merges
   runs with different settings: it prints one table per (model, settings) pair,
   and records written before settings were stored appear under
   `settings: (not recorded)`.
 - Every record also stores a `trace` of what the run did (each function call
   with its arguments for the direct arm; each `run_python` script and each MCP
-  call it made for the code arm; texts cut to 4000 characters, at most 200
-  items) and `mcp_calls`, the number of MCP tool calls actually executed.
+  call it made for the code arm; each `execute` script, the other meta-tool
+  calls and the backend calls the proxy logged for the fastmcp arm; texts cut to
+  4000 characters; at most 200 script and function-call items and, counted
+  apart, 600 MCP-call items, with a final `trace_truncated` item giving the
+  number dropped if any were) and `mcp_calls`, the number of MCP tool calls
+  actually executed against the backend (exact whatever the trace dropped).
 - Models need an entry in `src/mcpx/llm/prices.toml` for cost figures; without
   one, costs show `n/a`.
 
@@ -79,8 +100,11 @@ uv run mcpx report runs/*.jsonl --md report.md
 Reading the report:
 
 - `tool calls` are model-level function calls (in the code arm, one per
-  `run_python` call); `MCP calls` are the MCP tool calls actually executed (in
-  the code arm, every call a script made through the Bridge).
+  `run_python` call; in the fastmcp arm, one per `search`, `get_schema` or
+  `execute`); `MCP calls` are the MCP tool calls actually executed (in the code
+  arm, every call a script made through the gateway; in the fastmcp arm, every
+  backend call the proxy logged, so a call FastMCP rejects before dispatch, such
+  as the 51st in one `execute`, is not counted).
 - Usage counts are what ADK reports, and ADK fills in what the provider left
   out: a missing prompt, output or cached-token count becomes 0 (so a cached
   count of 0 may mean the provider did not report it), and a reasoning count of
@@ -108,9 +132,13 @@ uv run pyrefly check
 
 - `src/mcpx/targets/` MCP servers under test (`ticketdesk`) and their tasks.
 - `src/mcpx/client/`, `codegen/`, `sandbox/` MCP connection, generated Python
-  wrappers for the tools, and the subprocess that runs model-written code.
-- `src/mcpx/agents/` the `direct` and `code` arms on Google ADK, `run_once`
-  (one run, never raises) and `run_batch` (the sequential loop).
+  wrappers for the tools, and the Monty runtime plus the host gateway that run
+  model-written code and forward its tool calls.
+- `src/mcpx/agents/` the `direct`, `code` and `fastmcp` arms on Google ADK,
+  `run_once` (one run, never raises) and `run_batch` (the sequential loop).
+- `src/mcpx/codemode/` the FastMCP Code Mode proxy (`python -m
+  mcpx.codemode.proxy <target>`) and the call-log protocol it shares with the
+  harness.
 - `src/mcpx/bench/` task model, usage records and the report.
 - `src/mcpx/llm/` model configuration and the price table.
 - `src/mcpx/demo.py` the hand-written task-B code demo (`mcpx demo`).
@@ -118,17 +146,52 @@ uv run pyrefly check
 
 ## Safety
 
-The code arm executes model-generated Python on your machine, as your user, in
-a subprocess that has timeouts and output limits but no isolation: it can read
-your files, use your network and see your environment. Only run it where that
-is acceptable. The child starts with `python -S`, so by default model code
-cannot import the harness (including the tasks' ground truth) or the
-virtualenv's packages. That stops accidental use, not deliberate use: a script
-could re-enable `site` and import them, which is why every `run_python` script
-is stored in the run's trace and can be audited afterwards. It is not
-isolation. The progress output never prints
-keys or environment values, and API key values are replaced with `[redacted]`
-in the error text, answer and trace stored in the JSONL records.
+The `code` arm runs model-written Python in Monty, in worker processes separate
+from the harness; each script gets a fresh worker. What the arm enforces, each
+point probed by a test in `tests/sandbox/test_monty_runtime.py` or
+`test_gateway.py`:
+
+- No network, process or environment access: `import socket` and `import
+  subprocess` fail, `os.system` and `os.popen` do not exist, `os.getenv` and
+  `os.environ` raise, and `__import__` is undefined. A secret set in the
+  harness's environment never reaches a script's output.
+- The only file system is a read-only mount of the generated wrappers at `/work`.
+  Reads of host paths (`/etc/passwd`, `C:/Windows/win.ini`) and of the root `/`
+  are refused, writes and removals raise `PermissionError`, and the harness
+  package (`mcpx`, including the tasks' ground truth) cannot be imported.
+- The only door out is `_mcpx_rpc.call`, the gateway's host function. It refuses
+  servers and tools outside the target's allowlist and stops after 200 calls per
+  script, and the script cannot reach the connection behind it.
+- Limits per script: 60 s wall clock (time spent in tool calls included: calls
+  are refused from the deadline, and a script still running 1 s later has its
+  worker killed), 20,000 characters of printed output and, separately, 20,000
+  characters of error text (the rest is dropped, the end of an error text is
+  kept, and the result says so) and 256 MiB of memory.
+
+What this does not give you:
+
+- Monty's isolation is probed by our tests, not proven. A bug in Monty could
+  break it, and the tests cover only the escapes listed above
+  (`docs/notes/2026-11-26-monty-spike.md` records what was checked by hand).
+- The gateway's host function calls the target's tools with the harness's own
+  connection and credentials, so a script can do whatever the allowed tools do.
+  The example `ticketdesk` server is a local stand-in; a real server would be
+  reached the same way.
+- The model sees whatever the tools return, and that text goes to the model
+  provider like any other message.
+
+The fastmcp arm runs model-written Python in FastMCP's own Monty sandbox, inside
+the proxy process (`python -m mcpx.codemode.proxy`) that the harness launches, not
+in the harness process. That proxy and the backend calls it makes run with your
+user's permissions. Both the code arm and the fastmcp arm therefore execute model
+code in Monty; they differ in who runs it (our runtime vs FastMCP) and in the
+gateway and limits around it. FastMCP's documentation says the code is untrusted;
+we have not evaluated that sandbox's isolation. The progress output never prints
+keys or environment values, and API key values are replaced with `[redacted]` in
+the error text, answer and trace stored in the JSONL records. Every `run_python`
+and `execute` script is stored in the run's trace (up to 200 script and
+function-call items per run; a final `trace_truncated` item says how many were
+dropped, if any) and can be audited afterwards.
 
 ## Results
 
@@ -138,20 +201,28 @@ and say nothing about other MCP servers.
 
 ## Resolved versions (from `uv.lock`)
 
-| Package       | Version        |
-| ------------- | -------------- |
-| google-adk    | 2.15.0         |
-| litellm       | 1.110.2        |
-| mcp           | 2.3.0          |
-| psutil        | 7.2.2          |
-| python-dotenv | 1.2.4          |
-| anyio         | 4.16.0         |
-| pytest        | 9.2.0          |
-| ruff          | 0.17.6         |
-| pyrefly       | 1.5.0          |
-| types-psutil  | 7.2.2.20261122 |
+| Package            | Version        |
+| ------------------ | -------------- |
+| google-adk         | 2.15.0         |
+| litellm            | 1.110.2        |
+| mcp                | 2.3.0          |
+| fastmcp            | 4.2.6          |
+| pydantic-monty     | 1.7.0          |
+| python-dotenv      | 1.2.4          |
+| anyio              | 4.16.0         |
+| pytest (dev)       | 9.2.0          |
+| ruff (dev)         | 0.17.6         |
+| pyrefly (dev)      | 1.5.0          |
+| psutil (dev)       | 7.2.2          |
+| types-psutil (dev) | 7.2.2.20261122 |
 
 ## Docs
 
 - Design: `docs/specs/2026-11-23-mcp-code-execution-design.md`
 - Plan: `docs/plans/2026-11-23-mcp-code-execution.md`
+- FastMCP arm: spec `docs/specs/2026-11-25-fastmcp-code-mode-arm-design.md`, plan
+  `docs/plans/2026-11-25-fastmcp-code-mode-arm.md`, spike notes
+  `docs/notes/2026-11-25-fastmcp-spike.md`
+- Monty code runtime: spec `docs/specs/2026-11-26-monty-code-runtime-design.md`,
+  plan `docs/plans/2026-11-26-monty-code-runtime.md`, spike notes
+  `docs/notes/2026-11-26-monty-spike.md`

@@ -299,3 +299,122 @@ def test_old_records_group_under_not_recorded() -> None:
     assert rows[0]["runs"] == 2 and rows[1]["runs"] == 1
     md = render_markdown(rows)
     assert "settings: (not recorded)" in md
+
+
+TWO_ARM_REPORT = """\
+### deepseek/deepseek-v4.1-flash
+
+settings: (not recorded)
+
+| task | arm | correct | prompt tokens | output tokens | cached tokens | reasoning tokens | model calls | tool calls | MCP calls | wall s | cost (list) | cost (with reported cache reads) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | direct | 3/3 correct | 200 [100-300] | 7 [7-7] | n/a | n/a | 1 [1-1] | 1 [1-1] | n/a | 1.0 [1.0-1.0] | $0.000031 [$0.000017-$0.000045] | $0.000031 [$0.000017-$0.000045] |
+| A | code | 3/3 correct | 20 [10-30] | 7 [7-7] | n/a | n/a | 1 [1-1] | 1 [1-1] | n/a | 1.0 [1.0-1.0] | $0.000006 [$0.000004-$0.000007] | $0.000006 [$0.000004-$0.000007] |
+
+**Code arm vs direct arm** (median total prompt tokens)
+
+- A: code uses 10% of direct's prompt tokens
+
+Tokens are those reported by the provider; costs use `prices.toml` (USD per million tokens). `cost (with reported cache reads)` equals `cost (list)` for any run where a call lacked cached-token counts. `tool calls` are model-level function calls (one per `run_python` call in the code arm); `MCP calls` are the MCP tool calls actually executed (n/a for records written before they were counted).
+
+ADK fills in usage counts the provider omitted: a missing prompt, output or cached-token count becomes 0, and a reasoning count of 0 is dropped. So a 0 in the `cached tokens` column may mean the provider did not report it, and `reasoning tokens` sums only the calls that reported a count (n/a when none did).
+"""
+
+
+def test_a_two_arm_report_is_byte_identical_to_before() -> None:
+    records = prompts("A", "direct", [100, 300, 200]) + prompts(
+        "A", "code", [10, 30, 20]
+    )
+    assert render_markdown(summarize(records)) == TWO_ARM_REPORT
+    assert "Code arm vs direct arm" in TWO_ARM_REPORT
+    assert "fastmcp" not in TWO_ARM_REPORT
+
+
+def three_arms(fastmcp_ok: bool = True, code_ok: bool = True) -> list[RunRecord]:
+    """Two direct runs at 100, two code at 10, two fastmcp at 50 prompt tokens."""
+    records = prompts("A", "direct", [100, 100])
+    for arm, ok in (("code", code_ok), ("fastmcp", fastmcp_ok)):
+        value = 10 if arm == "code" else 50
+        records.append(rec(task="A", arm=arm, run_index=0, calls=[(value, 7, None)]))
+        records.append(
+            rec(task="A", arm=arm, run_index=1, calls=[(value, 7, None)], correct=ok)
+        )
+    return records
+
+
+def test_three_arms_render_in_order_direct_code_fastmcp() -> None:
+    rows = summarize(three_arms()[::-1])
+    assert [r["arm"] for r in rows] == ["direct", "code", "fastmcp"]
+    md = render_markdown(rows)
+    at = [md.index(f"| A | {arm} |") for arm in ("direct", "code", "fastmcp")]
+    assert at == sorted(at)
+
+
+def test_three_arms_give_a_ratio_line_each() -> None:
+    md = render_markdown(summarize(three_arms()))
+    assert "**Code arms vs direct arm** (median total prompt tokens)" in md
+    assert "**Code arm vs direct arm**" not in md
+    code_at = md.index("- A: code uses 10% of direct's prompt tokens")
+    fast_at = md.index("- A: fastmcp uses 50% of direct's prompt tokens")
+    assert code_at < fast_at
+
+
+def test_ratio_withheld_when_fastmcp_has_an_incorrect_run() -> None:
+    md = render_markdown(summarize(three_arms(fastmcp_ok=False)))
+    assert "A: not comparable: a run was incorrect" in md
+    assert "fastmcp uses" not in md
+    # The other pair is judged on its own.
+    assert "A: code uses 10% of direct's prompt tokens" in md
+
+
+def test_ratio_withheld_for_code_does_not_suppress_fastmcp() -> None:
+    md = render_markdown(summarize(three_arms(code_ok=False)))
+    assert "code uses" not in md
+    assert "A: fastmcp uses 50% of direct's prompt tokens" in md
+    assert md.count("not comparable: a run was incorrect") == 1
+
+
+def test_fastmcp_with_direct_but_no_code_names_only_fastmcp() -> None:
+    records = prompts("A", "direct", [100]) + prompts("A", "fastmcp", [25])
+    md = render_markdown(summarize(records))
+    assert "**Code arms vs direct arm**" in md
+    assert "A: fastmcp uses 25% of direct's prompt tokens" in md
+    assert "code uses" not in md and "not comparable" not in md
+
+
+def test_fastmcp_without_direct_is_not_comparable() -> None:
+    md = render_markdown(summarize(prompts("A", "fastmcp", [25])))
+    assert "A: not comparable: only the fastmcp arm was run" in md
+    both = render_markdown(
+        summarize(prompts("A", "fastmcp", [25]) + prompts("A", "code", [5]))
+    )
+    assert "% of direct's prompt tokens" not in both
+    assert "A: not comparable: the direct arm was not run" in both
+
+
+def test_only_code_or_only_direct_keep_their_old_lines() -> None:
+    only_code = render_markdown(summarize(prompts("A", "code", [5])))
+    assert "- A: not comparable: only the code arm was run" in only_code
+    assert "**Code arm vs direct arm**" in only_code
+    only_direct = render_markdown(summarize(prompts("A", "direct", [5])))
+    assert "- A: not comparable: only the direct arm was run" in only_direct
+
+
+def test_each_task_is_compared_on_the_arms_it_has() -> None:
+    records = (
+        prompts("A", "direct", [100])
+        + prompts("A", "code", [10])
+        + prompts("A", "fastmcp", [20])
+        + prompts("B", "direct", [200])
+        + prompts("B", "code", [40])
+    )
+    md = render_markdown(summarize(records))
+    assert "- A: fastmcp uses 20% of direct's prompt tokens" in md
+    assert "B: fastmcp" not in md
+    assert "- B: code uses 20% of direct's prompt tokens" in md
+
+
+def test_footnote_explains_fastmcp_columns_only_when_the_arm_ran() -> None:
+    with_fast = render_markdown(summarize(three_arms()))
+    assert "fastmcp arm" in with_fast and "search, get_schema, execute" in with_fast
+    assert "`MCP calls` are the MCP tool calls actually executed" in with_fast

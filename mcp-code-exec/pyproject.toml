@@ -6,10 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anyio",
+    "fastmcp[code-mode]==4.2.6",
     "google-adk",
     "litellm",
     "mcp",
-    "psutil",
+    "pydantic-monty==1.7.0",
     "python-dotenv",
 ]
 
@@ -23,6 +24,7 @@ dev = [
     "ruff",
     "pyrefly",
     "types-psutil",
+    "psutil",
 ]
 
 [build-system]

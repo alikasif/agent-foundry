@@ -1,4 +1,4 @@
-"""Tests for the first-look demo: hand-written task-B code through the Runtime."""
+"""Tests for the first-look demo: hand-written task-B code through MontyRuntime."""
 
 import re
 
