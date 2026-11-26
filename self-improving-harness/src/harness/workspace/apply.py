@@ -4,12 +4,15 @@ A path never leaves the folder, never reaches ``.git`` or a ``.env`` file, and
 never overwrites something the user changed since the copy was made.
 """
 
+import hashlib
 import ntpath
 import os
 import shutil
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 from harness.workspace.changes import (
     Change,
@@ -17,6 +20,7 @@ from harness.workspace.changes import (
     digest,
     keeps_crlf,
     look,
+    measure,
     under_link,
     walk,
 )
@@ -43,6 +47,7 @@ class _Plan:
     change: Change
     crlf: bool = False
     new: bytes | None = None  # digest of the new content; None for a deletion
+    size: int = 0  # of the new content
 
 
 def apply_changes(copy: SessionCopy, changes: list[Change]) -> ApplyResult:
@@ -78,15 +83,15 @@ def apply_changes(copy: SessionCopy, changes: list[Change]) -> ApplyResult:
         try:
             if plan.change.kind == "deleted":
                 _delete(source, path)
-                _delete(base, path)
             else:
                 _write(plan, work / path, source / path)
-                (base / path).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source / path, base / path)
         except OSError:
             blocked.add(path)
-        else:
-            written.append(path)
+            continue
+        written.append(path)
+        # If this fails, ``base`` lags behind and the change simply shows again.
+        with suppress(OSError):
+            _update_base(plan, source, base)
     return ApplyResult(sorted(written), [], sorted(blocked))
 
 
@@ -130,7 +135,7 @@ def _plan(
     if path not in files:  # also: a link, or reached through one
         return None
     crlf = keeps_crlf(base / path, work / path)
-    return _Plan(change, crlf, digest(work / path, crlf=crlf))
+    return _Plan(change, crlf, *measure(work / path, crlf=crlf))
 
 
 def _state(root: Path, path: str) -> bytes | str | None:
@@ -166,12 +171,37 @@ def _write(plan: _Plan, new: Path, destination: Path) -> None:
     handle, name = tempfile.mkstemp(dir=destination.parent, prefix=".sih-")
     try:
         with open(handle, "wb") as file:
-            file.writelines(content(new, crlf=plan.crlf))
+            _write_checked(plan, new, file)
         if exists:
             shutil.copymode(destination, name)
         os.replace(name, destination)
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+def _write_checked(plan: _Plan, new: Path, file: BinaryIO) -> None:
+    """Write ``new``, if it is still what the conflicts were checked against.
+
+    Code left running in the container can change it, or never stop adding to it.
+    """
+    hasher, size = hashlib.sha256(), 0
+    for chunk in content(new, crlf=plan.crlf):
+        size += len(chunk)
+        if size > plan.size:
+            break
+        hasher.update(chunk)
+        file.write(chunk)
+    if size != plan.size or hasher.digest() != plan.new:
+        raise OSError(f"{new} changed while it was being applied")
+
+
+def _update_base(plan: _Plan, source: Path, base: Path) -> None:
+    path = plan.change.path
+    if plan.change.kind == "deleted":
+        _delete(base, path)
+    else:
+        (base / path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / path, base / path)
 
 
 def _delete(root: Path, path: str) -> None:

@@ -2,14 +2,17 @@
 
 import ctypes
 import os
+import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from harness.workspace import apply as module
 from harness.workspace.apply import ApplyResult, apply_changes
 from harness.workspace.changes import Change, find_changes
 from harness.workspace.snapshot import SessionCopy, remove_copy
@@ -393,6 +396,8 @@ def test_what_a_container_makes_stays_out_of_the_source(
     assert {"a.py", "lib", "up", "loop", "dangling", "pipe"} <= set(result.blocked)
     assert {"dot./g", "x."} <= set(result.blocked)
     assert {"lib2/m.py", "real.txt"} <= set(result.written)
+    # Docker gives \ and : to Windows as private-use characters: ordinary names.
+    assert {"bs", "cd"} <= set(result.written)
     assert (project / "a.py").read_bytes() == b"x\n"
     assert (project / "lib" / "m.py").read_bytes() == b"x\n"
     names = {path.name for path in project.rglob("*")}
@@ -431,3 +436,96 @@ def test_a_deletion_the_copy_does_not_show_is_blocked(
 
     assert result == ApplyResult([], [], ["node_modules/m.js"])
     assert tree(project) == {"node_modules/m.js": b"x\n"}
+
+
+@pytest.mark.parametrize("later", [b"other\n", b"checked\nand more\n", b""])
+def test_only_what_was_checked_is_written(
+    project: Path,
+    make_copy: MakeCopy,
+    monkeypatch: pytest.MonkeyPatch,
+    later: bytes,
+) -> None:
+    """Code left running in the container can change a file during apply."""
+    put(project / "a.py", b"user\n")
+    copy = make_copy()
+    put(copy.work / "a.py", b"checked\n")
+    conflicts = module._conflicts
+
+    def rewrite_after(*args: Any) -> bool:
+        found = conflicts(*args)
+        put(copy.work / "a.py", later)
+        return found
+
+    monkeypatch.setattr(module, "_conflicts", rewrite_after)
+
+    result = apply(copy)
+
+    assert result == ApplyResult([], [], ["a.py"])
+    assert tree(project) == {"a.py": b"user\n"}
+
+
+def test_a_file_that_keeps_growing_is_not_written_without_end(
+    project: Path, make_copy: MakeCopy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = make_copy()
+    put(copy.work / "a.py", b"checked\n")
+    content = module.content
+    pieces = []
+
+    def endless(path: Path, *, crlf: bool = False) -> Iterator[bytes]:
+        yield from content(path, crlf=crlf)
+        while len(pieces) < 100:
+            pieces.append(b"more\n")
+            yield b"more\n"
+
+    monkeypatch.setattr(module, "content", endless)
+
+    assert apply(copy) == ApplyResult([], [], ["a.py"])
+    assert len(pieces) == 1  # stopped as soon as it was longer than checked
+    assert list(project.iterdir()) == []  # no temporary file is left
+
+
+@pytest.mark.parametrize("kind", ["modified", "deleted"])
+def test_a_change_that_reached_the_folder_is_reported_as_written(
+    project: Path, make_copy: MakeCopy, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Even if ``base`` cannot be brought up to date afterwards."""
+    put(project / "a.py", b"user\n")
+    copy = make_copy()
+    if kind == "deleted":
+        (copy.work / "a.py").unlink()
+    else:
+        put(copy.work / "a.py", b"agent\n")
+
+    def refuse(*_: object) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    unlink = Path.unlink
+
+    def keep_base(path: Path, missing_ok: bool = False) -> None:
+        if path.parent.name == "base":
+            raise PermissionError(13, "Access is denied")
+        unlink(path, missing_ok=missing_ok)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(shutil, "copyfile", refuse)
+        patched.setattr(Path, "unlink", keep_base)
+        result = apply(copy)
+
+    assert result == ApplyResult(["a.py"], [], [])
+    assert tree(project) == ({} if kind == "deleted" else {"a.py": b"agent\n"})
+    assert find_changes(copy) == [Change("a.py", kind)]  # base is behind
+
+
+@pytest.mark.parametrize("base", [b"a\nb\r\n", b"a\r\nb\n"])
+def test_a_file_with_mixed_line_endings_is_written_as_the_agent_left_it(
+    project: Path, make_copy: MakeCopy, base: bytes
+) -> None:
+    """Turning every end into CRLF would change lines the agent did not touch."""
+    put(project / "a.txt", base)
+    copy = make_copy()
+    put(copy.work / "a.txt", b"a\nc\n")
+
+    apply(copy)
+
+    assert (project / "a.txt").read_bytes() == b"a\nc\n"

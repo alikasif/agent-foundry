@@ -109,27 +109,43 @@ def content(path: Path, *, crlf: bool = False) -> Iterator[bytes]:
             yield chunk.replace(b"\n", b"\r\n") if crlf else chunk
 
 
-def digest(path: Path, *, crlf: bool = False) -> bytes:
-    hasher = hashlib.sha256()
+def measure(path: Path, *, crlf: bool = False) -> tuple[bytes, int]:
+    """The digest and length of ``content``."""
+    hasher, size = hashlib.sha256(), 0
     for chunk in content(path, crlf=crlf):
         hasher.update(chunk)
-    return hasher.digest()
+        size += len(chunk)
+    return hasher.digest(), size
 
 
-def _holds(path: Path, wanted: bytes) -> bool:
-    tail = b""
+def digest(path: Path, *, crlf: bool = False) -> bytes:
+    return measure(path, crlf=crlf)[0]
+
+
+def _only_crlf(path: Path) -> bool:
+    """Whether the file has line ends, and every one of them is CRLF."""
+    found, last = False, b""
     for chunk in content(path):
-        if wanted in tail + chunk:
-            return True
-        tail = chunk[-(len(wanted) - 1) :] if len(wanted) > 1 else b""
-    return False
+        pairs = (last + chunk).count(b"\r\n")  # one may straddle two pieces
+        if chunk.count(b"\n") != pairs:
+            return False
+        found = found or pairs > 0
+        last = chunk[-1:]
+    return found
+
+
+def _holds(path: Path, byte: bytes) -> bool:
+    return any(byte in chunk for chunk in content(path))
 
 
 def keeps_crlf(base: Path, new: Path) -> bool:
-    """Whether ``new`` is to be written with CRLF: text, as ``base`` had it."""
+    """Whether ``new`` is to be written with CRLF: text, as ``base`` had it.
+
+    A ``base`` with mixed line ends did not "use CRLF": it is left to the agent.
+    """
     return (
         base.is_file()
-        and _holds(base, b"\r\n")
+        and _only_crlf(base)
         and not _holds(base, b"\0")
         and not _holds(new, b"\r")  # no CR, so adding them cannot double one
         and not _holds(new, b"\0")
