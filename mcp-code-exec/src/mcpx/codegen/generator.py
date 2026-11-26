@@ -4,7 +4,8 @@
 
     _mcpx_rpc.py                 workspace-side RPC client (copy of rpc_client.py)
     servers/__init__.py
-    servers/<target>/__init__.py re-exports every wrapper and defines __all__
+    servers/<target>/__init__.py re-exports every wrapper and defines __all__,
+                                 using absolute imports so Monty can run it
     servers/<target>/<tool>.py   one typed wrapper function per tool
 
 An agent explores that tree and writes ordinary Python that imports the
@@ -207,7 +208,8 @@ def {func}{_signature(params)} -> Any:
 
 def _render_package(target: str, names: list[str]) -> str:
     """Render ``servers/<target>/__init__.py``, re-exporting every wrapper."""
-    imports = "".join(f"from .{name} import {name}\n" for name in names)
+    # Absolute, not relative: Monty has no parent package for ``__init__``.
+    imports = "".join(f"from servers.{target}.{name} import {name}\n" for name in names)
     exports = "".join(f'{_INDENT}"{name}",\n' for name in names)
     all_literal = f"[\n{exports}]" if names else "[]"
     return (

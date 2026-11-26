@@ -1502,6 +1502,7 @@ dependencies = [
     { name = "litellm" },
     { name = "mcp" },
     { name = "psutil" },
+    { name = "pydantic-monty" },
     { name = "python-dotenv" },
 ]
 
@@ -1522,6 +1523,7 @@ requires-dist = [
     { name = "litellm" },
     { name = "mcp" },
     { name = "psutil" },
+    { name = "pydantic-monty", specifier = "==1.7.0" },
     { name = "python-dotenv" },
 ]
 

@@ -13,6 +13,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from pydantic_monty import ExternalModule, Monty, MountDir
 
 from mcpx.client.connection import ToolSpec
 from mcpx.codegen import generator
@@ -122,6 +123,85 @@ def test_package_reexports_every_wrapper_in_all(
     mod = _import(monkeypatch, tmp_path, "servers.demo")
     assert sorted(mod.__all__) == ["get_item", "list_items"]
     assert callable(mod.get_item) and callable(mod.list_items)
+
+
+def test_package_init_uses_absolute_imports_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    other = ToolSpec("get_item", "Get one.", NO_PARAMS)
+    generate_workspace("demo", [LIST_ITEMS, other], tmp_path)
+    lines = (tmp_path / "servers" / "demo" / "__init__.py").read_text().splitlines()
+    assert not [line for line in lines if line.startswith("from .")]
+    assert "from servers.demo.list_items import list_items" in lines
+    assert "from servers.demo.get_item import get_item" in lines
+    mod = _import(monkeypatch, tmp_path, "servers.demo")
+    assert callable(mod.list_items) and callable(mod.get_item)
+
+
+MONTY_SPECS = [
+    LIST_ITEMS,
+    ToolSpec("ping", "Ping.", NO_PARAMS),
+    ToolSpec(
+        "search",
+        "Search.",
+        {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string"},
+                "payload": {},
+                "limit": {"type": "integer"},
+            },
+            "required": ["from"],
+        },
+    ),
+]
+MONTY_SCRIPT = """from servers.demo import *
+list_items("x")
+list_items(q="y", page=2)
+ping()
+search("a")
+search(from_="b", payload={"k": [1, None]}, limit=0)
+"done"
+"""
+MONTY_EXPECTED = [
+    ("demo", "list_items", {"q": "x"}),
+    ("demo", "list_items", {"q": "y", "page": 2}),
+    ("demo", "ping", {}),
+    ("demo", "search", {"from": "a"}),
+    ("demo", "search", {"from": "b", "payload": {"k": [1, None]}, "limit": 0}),
+]
+
+
+def test_every_wrapper_runs_in_monty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    generate_workspace("demo", MONTY_SPECS, tmp_path)
+    # The CPython side is the reference for what each call must send.
+    mod = _import(monkeypatch, tmp_path, "servers.demo")
+    cpython_calls = _record_calls(monkeypatch)
+    mod.list_items("x")
+    mod.list_items(q="y", page=2)
+    mod.ping()
+    mod.search("a")
+    mod.search(from_="b", payload={"k": [1, None]}, limit=0)
+    assert cpython_calls == MONTY_EXPECTED
+
+    recorded: list[tuple[str, str, dict[str, Any]]] = []
+
+    def call(server: str, tool: str, args: dict[str, Any]) -> str:
+        recorded.append((server, tool, args))
+        return "ok"
+
+    with (
+        Monty() as pool,
+        MountDir(host_path=tmp_path, virtual_path="/work", mode="read-only") as mount,
+        pool.checkout(
+            external_modules={"_mcpx_rpc": ExternalModule({"call": call})}
+        ) as session,
+    ):
+        result = session.feed_run(MONTY_SCRIPT, mount=mount, cwd="/work")
+    assert result == "done"
+    assert recorded == MONTY_EXPECTED
 
 
 def test_rpc_module_is_copied_verbatim_with_lf_endings(tmp_path: Path) -> None:
