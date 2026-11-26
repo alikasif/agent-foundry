@@ -241,6 +241,12 @@ def _raw_session(call_log: Path) -> list[str]:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
+        # Killing the proxy ends the pump's read loop; only then is it safe to
+        # close the pipe objects (an unclosed one is a ResourceWarning at GC).
+        reader.join(timeout=SESSION_TIMEOUT)
+        for pipe in (proc.stdin, proc.stdout):
+            if pipe is not None:
+                pipe.close()
     while not lines.empty():
         seen.append(lines.get_nowait())
     return [raw.decode("utf-8", errors="replace") for raw in seen]
