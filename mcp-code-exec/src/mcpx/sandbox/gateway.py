@@ -51,7 +51,9 @@ class HostGateway:
 
     Several scripts may share one gateway on different threads (ADK can run
     several ``run_python`` calls of one model turn at once): the counters are
-    exact under concurrency.
+    exact under concurrency. ``on_call`` runs under the gateway's lock (so the
+    trace order matches the count): it must be quick and must not call back into
+    the gateway.
     """
 
     def __init__(

@@ -73,3 +73,47 @@ Setup used: `generate_workspace("ticketdesk", specs, tmp)`, then
 | `open('/work/x.txt','w')` on a read-only mount | `PermissionError: [Errno 30] Read-only file system` |
 
 These are probes, not a proof of isolation.
+
+## Wall deadline (Task 3, `MontyRuntime`)
+
+What `Monty(request_timeout=...)` covers, tested with `request_timeout=1.5` and a host
+function that `time.sleep`s (sync pool, `feed_run`):
+
+| Script | Result |
+|---|---|
+| 3 host calls of 1.0 s each (3.0 s total) | completed, 3.0 s |
+| 1 host call of 3.0 s | completed, 3.0 s |
+| 30 host calls of 0.1 s (3.0 s total) | completed, 3.0 s |
+| `while True: pass` | `MontyCrashedError(timed_out=True)` after 1.5 s |
+
+So `request_timeout` is per turn (a turn is one stretch of sandboxed execution between
+host round trips) and, like the duration limits, ignores time spent in host calls. It
+backstops a runaway sandbox but can never bound a script that spends its time in host
+calls. Chosen mechanism, all ours:
+
+1. The gateway refuses a call that starts after the deadline (`TimeoutError` inside the
+   sandbox; `RunResult.timed_out` is set from the `TimeoutError`).
+2. A watchdog task kills the session's worker process (`session.worker_pid`, read right
+   after checkout, before the feed; `os.kill`) 1 s after the deadline and cancels the
+   scope the script's thread runs under, which cancels the host call in flight
+   (anyio cancels `from_thread.run` coroutines with the scope outside the shielded
+   thread wait). Killing the worker alone is not enough: `feed_run` stays blocked until
+   the running host function returns (observed: worker killed at 0.5 s during a 2.0 s
+   host call, `feed_run` raised `MontyCrashedError` (exit code 15, `timed_out=False`)
+   only at 2.0 s).
+3. Monty's `max_feed_duration_secs=timeout_s` still covers CPU-bound scripts
+   (`TimeoutError: feed time limit exceeded`).
+The same watchdog kills the worker when `run()` is cancelled by the caller.
+
+Other facts observed while building the runtime:
+
+- `Monty` (sync) is safe to use from several threads at once: two overlapping
+  `checkout()` / `feed_run` calls on one pool each get their own worker; no global lock.
+- `dir()`, `vars()` and `callable()` are not defined in the sandbox, and a module has no
+  `__dict__`, `__name__` or `__file__`; a host module's names can only be probed with
+  `hasattr`. Underscore-prefixed `ExternalModule` attributes are not exposed.
+- Mount file operations count toward `max_suspensions` (default 1000): about two per
+  `open(...).read()`, so a script that reads more than roughly 500 files dies with the
+  uncatchable `RuntimeError: suspension limit 1000 exceeded`.
+- `MontyError.exception()` returns the original exception object (`TimeoutError`,
+  `MemoryError`, ...), which is how the runtime tells a timeout from other failures.

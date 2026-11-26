@@ -180,10 +180,17 @@ async def test_concurrent_scripts_count_exactly() -> None:
             assert "budget" in str(exc)
             outcomes.append("refused")
 
-    async with anyio.create_task_group() as tg:
-        for _ in range(attempts):
-            tg.start_soon(attempt, first)
-            tg.start_soon(attempt, second)
+    # A tiny switch interval makes thread interleaving between the budget check
+    # and the increment likely, so a missing lock shows up as a wrong count.
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        async with anyio.create_task_group() as tg:
+            for _ in range(attempts):
+                tg.start_soon(attempt, first)
+                tg.start_soon(attempt, second)
+    finally:
+        sys.setswitchinterval(interval)
     # Every script gets exactly its budget, however the threads interleave.
     assert outcomes.count("ok") == 2 * budget
     assert outcomes.count("refused") == 2 * (attempts - budget)
