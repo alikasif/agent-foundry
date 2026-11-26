@@ -119,6 +119,79 @@ async def test_tool_failure_becomes_runtime_error_with_message() -> None:
         await in_thread(gateway.for_script(), "desk", "search", {})
 
 
+async def test_observer_is_not_called_for_refused_or_over_budget_calls() -> None:
+    seen: list[tuple[str, str]] = []
+    gateway, _ = make(
+        on_call=lambda server, tool, args: seen.append((server, tool)),
+        max_calls_per_script=1,
+    )
+    call = gateway.for_script()
+    with pytest.raises(ValueError, match="unknown server"):
+        await in_thread(call, "other", "search", {})
+    with pytest.raises(ValueError, match="unknown tool"):
+        await in_thread(call, "desk", "delete", {})
+    with pytest.raises(TypeError, match="args"):
+        await in_thread(call, "desk", "search", "q")
+    assert seen == []
+    await in_thread(call, "desk", "search", {})
+    with pytest.raises(RuntimeError, match="budget"):
+        await in_thread(call, "desk", "search", {})
+    expired = gateway.for_script(deadline=0.0)
+    with pytest.raises(TimeoutError):
+        await in_thread(expired, "desk", "search", {})
+    assert seen == [("desk", "search")]
+    assert gateway.mcp_calls == 1
+
+
+async def test_raising_observer_is_not_counted_and_reaches_the_script() -> None:
+    broken = True
+
+    def observe(server: str, tool: str, args: dict[str, Any]) -> None:
+        if broken:
+            raise OSError("trace sink is gone")
+
+    gateway, caller = make(on_call=observe, max_calls_per_script=1)
+    call = gateway.for_script()
+    with pytest.raises(OSError, match="trace sink"):
+        await in_thread(call, "desk", "search", {})
+    assert gateway.mcp_calls == 0
+    assert caller.calls == []
+    broken = False
+    # The failed attempt did not consume the script's budget of one call.
+    await in_thread(call, "desk", "search", {})
+    assert gateway.mcp_calls == 1
+
+
+async def test_concurrent_scripts_count_exactly() -> None:
+    budget, attempts = 50, 80
+    observed: list[str] = []
+    gateway, caller = make(
+        on_call=lambda server, tool, args: observed.append(tool),
+        max_calls_per_script=budget,
+    )
+    first, second = gateway.for_script(), gateway.for_script()
+    outcomes: list[str] = []
+
+    async def attempt(call: HostCall) -> None:
+        try:
+            await in_thread(call, "desk", "search", {})
+            outcomes.append("ok")
+        except RuntimeError as exc:
+            assert "budget" in str(exc)
+            outcomes.append("refused")
+
+    async with anyio.create_task_group() as tg:
+        for _ in range(attempts):
+            tg.start_soon(attempt, first)
+            tg.start_soon(attempt, second)
+    # Every script gets exactly its budget, however the threads interleave.
+    assert outcomes.count("ok") == 2 * budget
+    assert outcomes.count("refused") == 2 * (attempts - budget)
+    assert gateway.mcp_calls == 2 * budget
+    assert len(caller.calls) == 2 * budget
+    assert len(observed) == 2 * budget
+
+
 def test_gateway_module_imports_no_monty_or_fastmcp() -> None:
     code = (
         "import sys, mcpx.sandbox.gateway;"

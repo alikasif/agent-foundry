@@ -13,6 +13,7 @@ This module imports only the standard library and anyio, so it works with any
 sandbox backend.
 """
 
+import threading
 import time
 from collections.abc import Callable, Collection
 from typing import Any, Protocol
@@ -42,9 +43,15 @@ class HostGateway:
     ``tools`` is the allowlist (the target's names from ``tools/list``). The
     gateway never enters or exits the connection: the caller owns it. ``on_call``,
     if given, is told about every call that passed validation, before the call is
-    made; it must not raise. ``mcp_calls`` counts those forwarded calls (a tool
-    that then fails was still executed by the server; a refused call is not
-    counted).
+    made. If it raises, the call is neither counted, charged to the script's
+    budget nor forwarded, and the exception reaches the script: a broken trace
+    fails loudly instead of silently losing calls. ``mcp_calls`` counts the
+    forwarded calls (a tool that then fails was still executed by the server; a
+    refused call is not counted).
+
+    Several scripts may share one gateway on different threads (ADK can run
+    several ``run_python`` calls of one model turn at once): the counters are
+    exact under concurrency.
     """
 
     def __init__(
@@ -62,6 +69,8 @@ class HostGateway:
         self._on_call = on_call
         self._max_calls = max_calls_per_script
         self._mcp_calls = 0
+        # Guards the check-and-increment of the global and per-script counters.
+        self._lock = threading.Lock()
 
     @property
     def mcp_calls(self) -> int:
@@ -74,8 +83,10 @@ class HostGateway:
         """Return the host function for ONE script, with its own call budget.
 
         ``deadline`` is a ``time.monotonic()`` value after which calls raise
-        ``TimeoutError``. The function must be called from a worker thread
-        started by ``anyio.to_thread.run_sync``.
+        ``TimeoutError``. It is only checked before a call starts: a call already
+        in flight is bounded by the runtime's wall timeout, not by this deadline.
+        The function must be called from a worker thread started by
+        ``anyio.to_thread.run_sync``.
         """
         forwarded = 0
 
@@ -91,15 +102,17 @@ class HostGateway:
                 raise TypeError(f"args must be a dict, not {type(args).__name__}")
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("script deadline exceeded")
-            if forwarded >= self._max_calls:
-                raise RuntimeError(
-                    f"tool call budget exceeded: at most {self._max_calls} "
-                    "calls per script"
-                )
-            forwarded += 1
-            self._mcp_calls += 1
-            if self._on_call is not None:
-                self._on_call(server, tool, args)
+            with self._lock:
+                if forwarded >= self._max_calls:
+                    raise RuntimeError(
+                        f"tool call budget exceeded: at most {self._max_calls} "
+                        "calls per script"
+                    )
+                # Observe before counting, so a raising observer leaves no trace.
+                if self._on_call is not None:
+                    self._on_call(server, tool, args)
+                forwarded += 1
+                self._mcp_calls += 1
             try:
                 return anyio.from_thread.run(self._caller.call_tool, tool, args)
             except Exception as exc:  # noqa: BLE001 - every tool failure goes to the script
