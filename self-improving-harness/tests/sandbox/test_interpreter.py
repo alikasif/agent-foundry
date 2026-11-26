@@ -13,6 +13,10 @@ pytestmark = pytest.mark.docker
 
 Pgrep = Callable[[str], list[str]]
 
+CANCELLED = (
+    "The previous call was cancelled: variables, imports and functions are lost."
+)
+
 # Writes to every descriptor that could be the runner's reply channel.
 WRITE_TO_REPLIES = """
 import contextlib, os
@@ -51,6 +55,16 @@ async def until(condition: Callable[[], object]) -> None:
     async with asyncio.timeout(20):
         while not await asyncio.to_thread(condition):
             await asyncio.sleep(0.1)
+
+
+async def cancel_a_call(interpreter: Interpreter) -> None:
+    """Start the interpreter, then cancel a call that it is running."""
+    await interpreter.run("x = 1")
+    running = asyncio.create_task(interpreter.run("import time; time.sleep(30)"))
+    await asyncio.sleep(0.5)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
 
 
 def assert_restarted(result: ExecResult) -> None:
@@ -190,7 +204,95 @@ def test_cancel_kills_the_interpreter_and_its_children(
         await until(lambda: not pgrep("sleep 30"))
         await until(lambda: old not in pgrep("runner.py serve"))
         after = await interpreter.run("x")
-        assert after.error is not None and "NameError" in after.error
+        assert after.restarted and not after.timed_out
+        assert after.error is not None and after.error.startswith(CANCELLED + "\n")
+        assert "NameError" in after.error
+        assert await interpreter.run("2") == ExecResult("2\n")  # said once
+
+    session(sandbox, scenario)
+
+
+def test_the_call_after_a_cancel_says_what_was_lost(sandbox: Container) -> None:
+    async def scenario(interpreter: Interpreter) -> None:
+        await cancel_a_call(interpreter)
+        after = await interpreter.run("print(1)")
+        assert after == ExecResult("1\n", error=CANCELLED, restarted=True)
+        assert await interpreter.run("print(2)") == ExecResult("2\n")
+
+    session(sandbox, scenario)
+
+
+def test_the_notice_waits_for_a_call_that_returns(sandbox: Container) -> None:
+    async def scenario(interpreter: Interpreter) -> None:
+        await cancel_a_call(interpreter)
+        starting = asyncio.create_task(interpreter.run("1"))
+        await asyncio.sleep(0)
+        starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        assert (await interpreter.run("1")).error == CANCELLED
+
+    session(sandbox, scenario)
+
+
+def test_the_notice_comes_before_a_timeout(sandbox: Container) -> None:
+    async def scenario(interpreter: Interpreter) -> None:
+        await cancel_a_call(interpreter)
+        stuck = await interpreter.run("while True: pass")
+        assert stuck.timed_out and stuck.restarted
+        assert stuck.error is not None
+        assert stuck.error.startswith(CANCELLED + "\nTimed out after 2 s.")
+        assert await interpreter.run("2") == ExecResult("2\n")
+
+    session(sandbox, scenario, timeout_s=2)
+
+
+def test_the_notice_counts_toward_the_limit(sandbox: Container) -> None:
+    async def scenario(interpreter: Interpreter) -> None:
+        await cancel_a_call(interpreter)
+        code = 'print("a" * 10**6)\nraise ValueError("b" * 10**6)'
+        result = await interpreter.run(code)
+        assert result.error is not None and result.error.startswith(CANCELLED)
+        assert result.error.endswith("b\n")
+        assert len(result.output) + len(result.error) <= 20_200
+
+    session(sandbox, scenario)
+
+
+def test_a_cancel_while_a_timed_out_call_is_killed_is_reported(
+    sandbox: Container, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kill_group = sandbox.kill_group
+
+    async def scenario(interpreter: Interpreter) -> None:
+        killing = asyncio.Event()
+
+        async def slow(pgid: int) -> None:
+            killing.set()
+            await asyncio.sleep(0.5)
+            await kill_group(pgid)
+
+        monkeypatch.setattr(sandbox, "kill_group", slow)
+        running = asyncio.create_task(interpreter.run("while True: pass"))
+        await killing.wait()
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert (await interpreter.run("1")).error == CANCELLED
+
+    session(sandbox, scenario, timeout_s=2)
+
+
+def test_a_cancel_before_the_interpreter_started_is_not_reported(
+    sandbox: Container,
+) -> None:
+    async def scenario(interpreter: Interpreter) -> None:
+        running = asyncio.create_task(interpreter.run("x = 1"))
+        await asyncio.sleep(0)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert await interpreter.run("print(1)") == ExecResult("1\n")
 
     session(sandbox, scenario)
 
@@ -223,7 +325,7 @@ def test_cancelling_a_waiting_call_leaves_the_running_one(
         with pytest.raises(asyncio.CancelledError):
             await second
         assert await first == ExecResult("")
-        assert (await interpreter.run("x")).output == "5\n"
+        assert await interpreter.run("x") == ExecResult("5\n")  # nothing was lost
 
     session(sandbox, scenario)
 

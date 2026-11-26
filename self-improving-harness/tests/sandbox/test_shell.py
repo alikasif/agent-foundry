@@ -1,12 +1,14 @@
 """Bash commands in a real container."""
 
 import asyncio
+import itertools
 import time
 from collections.abc import Callable
 
 import pytest
 
 from harness.sandbox.container import Container, ExecResult, SandboxError
+from harness.sandbox.interpreter import Interpreter
 from harness.sandbox.shell import run_bash
 
 pytestmark = pytest.mark.docker
@@ -166,3 +168,91 @@ def test_a_stopped_container_is_a_sandbox_error(sandbox: Container) -> None:
 
     with pytest.raises(SandboxError, match="did not start"):
         bash(sandbox, "echo hi")
+
+
+# Each prints when it started and when it ended, by the container's clock.
+BASH_SPAN = "a=$(date +%s.%N); sleep 0.5; echo $a $(date +%s.%N)"
+PYTHON_SPAN = "import time\na = time.time(); time.sleep(0.5); print(a, time.time())"
+
+
+def assert_no_overlap(results: list[ExecResult]) -> None:
+    spans = sorted([float(at) for at in result.output.split()] for result in results)
+    for earlier, later in itertools.pairwise(spans):
+        assert earlier[1] <= later[0], spans
+
+
+def test_bash_calls_take_turns(sandbox: Container) -> None:
+    async def scenario() -> list[ExecResult]:
+        return await asyncio.gather(*(run_bash(sandbox, BASH_SPAN) for _ in range(3)))
+
+    assert_no_overlap(asyncio.run(scenario()))
+
+
+def test_bash_and_python_calls_take_turns(sandbox: Container) -> None:
+    async def scenario() -> list[ExecResult]:
+        interpreter = Interpreter(sandbox)
+        try:
+            await interpreter.run("1")  # started, so that the calls race
+            results = await asyncio.gather(
+                run_bash(sandbox, BASH_SPAN),
+                interpreter.run(PYTHON_SPAN),
+                run_bash(sandbox, BASH_SPAN),
+                interpreter.run(PYTHON_SPAN),
+            )
+            return list(results)
+        finally:
+            await interpreter.close()
+
+    assert_no_overlap(asyncio.run(scenario()))
+
+
+def test_a_later_call_sees_what_an_earlier_one_wrote(sandbox: Container) -> None:
+    async def scenario() -> ExecResult:
+        interpreter = Interpreter(sandbox)
+        try:
+            await interpreter.run("1")
+            _, read = await asyncio.gather(
+                run_bash(sandbox, "sleep 0.5; echo done > made.txt"),
+                interpreter.run("print(open('made.txt').read(), end='')"),
+            )
+            return read
+        finally:
+            await interpreter.close()
+
+    assert asyncio.run(scenario()) == ExecResult("done\n")
+
+
+def test_a_cancelled_waiter_never_runs_and_holds_nothing(sandbox: Container) -> None:
+    async def scenario() -> None:
+        first = asyncio.create_task(run_bash(sandbox, "sleep 1"))
+        waiting = asyncio.create_task(run_bash(sandbox, "touch ran"))
+        await asyncio.sleep(0.3)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert not first.done()  # its turn goes on
+        async with asyncio.timeout(20):
+            listed = await run_bash(sandbox, "ls")
+        assert first.done()
+        assert listed.output == ""
+
+    asyncio.run(scenario())
+
+
+def test_the_next_call_starts_after_a_cancelled_one_is_killed(
+    sandbox: Container, pgrep: Pgrep
+) -> None:
+    async def scenario() -> None:
+        first = asyncio.create_task(run_bash(sandbox, "sleep 38"))
+        await until(lambda: pgrep("sleep 38"))
+        check = "pgrep -r R,S -f 'sleep 3[8]' || echo gone"
+        second = asyncio.create_task(run_bash(sandbox, check))
+        await asyncio.sleep(2)  # time enough to run, if it did not wait
+        assert not second.done()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        async with asyncio.timeout(20):
+            assert (await second).output == "gone\n"
+
+    asyncio.run(scenario())

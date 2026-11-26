@@ -144,6 +144,22 @@ def test_kill_group_refuses_to_signal_everything(workspace: Path, pgid: int) -> 
         asyncio.run(sandbox.kill_group(pgid))
 
 
+def test_code_lock_is_shared_within_an_event_loop(workspace: Path) -> None:
+    sandbox = Container(ContainerSpec("img:1", workspace))
+
+    async def take() -> None:
+        async with sandbox.code_lock():
+            await asyncio.sleep(0.01)
+
+    async def contend() -> asyncio.Lock:
+        lock = sandbox.code_lock()
+        await asyncio.gather(take(), take())  # waiting ties a lock to its loop
+        assert sandbox.code_lock() is lock
+        return lock
+
+    assert asyncio.run(contend()) is not asyncio.run(contend())
+
+
 def test_exec_result_is_frozen_with_defaults() -> None:
     result = ExecResult("out")
 

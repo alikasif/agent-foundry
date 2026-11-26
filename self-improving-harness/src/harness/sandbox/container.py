@@ -153,6 +153,19 @@ class Container:
     def __init__(self, spec: ContainerSpec) -> None:
         self.spec = spec
         self._name = f"sih-{uuid.uuid4().hex[:12]}"
+        self._lock = asyncio.Lock()
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+
+    def code_lock(self) -> asyncio.Lock:
+        """Held while model-written code runs here, so that calls take turns.
+
+        There is one per event loop: an asyncio lock stays tied to the loop in
+        which a caller first waited for it.
+        """
+        loop = asyncio.get_running_loop()
+        if loop is not self._lock_loop:
+            self._lock, self._lock_loop = asyncio.Lock(), loop
+        return self._lock
 
     async def start(self) -> None:
         if not self.spec.workspace.is_dir():  # Docker would create it, empty

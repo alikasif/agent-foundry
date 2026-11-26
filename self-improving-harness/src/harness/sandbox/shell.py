@@ -24,6 +24,13 @@ async def run_bash(
     container: Container, command: str, *, timeout_s: float = 120, limit: int = 20_000
 ) -> ExecResult:
     """Run ``command`` in a fresh shell. Cancelling kills what it started."""
+    async with container.code_lock():  # tool calls can arrive in parallel
+        return await _run(container, command, timeout_s, limit)
+
+
+async def _run(
+    container: Container, command: str, timeout_s: float, limit: int
+) -> ExecResult:
     # On stdin, since Windows limits a command line to 32,767 characters.
     channel = await Channel.open(
         container,
