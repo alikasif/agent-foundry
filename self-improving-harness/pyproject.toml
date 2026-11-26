@@ -1,0 +1,40 @@
+[project]
+name = "sih"
+version = "0.1.0"
+description = "Terminal coding agent that runs bash and Python inside a Docker container"
+requires-python = ">=3.13"
+dependencies = [
+    "google-adk==2.15.0",
+    "litellm==1.110.2",
+    "python-dotenv",
+    "rich",
+]
+
+[project.scripts]
+sih = "harness.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff", "pyrefly"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+    "docker: needs the Docker engine",
+    "live: makes a paid OpenRouter call",
+]
+
+[tool.ruff]
+line-length = 88
+extend-exclude = ["docs"]
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+search-path = ["src", "."]
