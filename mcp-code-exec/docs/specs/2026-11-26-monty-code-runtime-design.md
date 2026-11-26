@@ -83,9 +83,11 @@ if nothing else uses them. `pydantic-monty` becomes a declared dependency, pinne
   20,000-character output cap with the `[output truncated at N chars]` and
   `[timed out after N s]` notice lines unchanged, plus Monty memory limits.
 - A script that raises: the model sees the Monty traceback text after any output.
-- The host function runs on the calling thread while `feed_run` blocks, and the
-  Connection is async: the builder picks `AsyncMonty` or a worker thread plus
-  `anyio.from_thread`. No sockets, no token.
+- The wrappers stay synchronous (the model writes the same code as in v4), so the host
+  function is synchronous: the sync `Monty` pool's `feed_run` runs in a worker thread
+  and the host function reaches the async Connection with `anyio.from_thread.run`.
+  (`AsyncMonty` host functions are coroutines the sandbox must `await`; see
+  `docs/notes/2026-11-26-monty-spike.md`.) No sockets, no token.
 
 ### HostGateway (replaces the Bridge's role)
 
@@ -161,6 +163,7 @@ host files outside the mount, writing to the mount.
 
 ## Left to the builder
 
-`AsyncMonty` vs thread bridging; exact Monty `ResourceLimits` field names and
-values; pool size and pre-warm; the exact wording of the two addendum sentences
-within the rules above; trace/observer wiring in `run.py`.
+How the 60 s wall deadline is enforced when the time goes into host calls (Monty's
+duration limits do not count host time); Monty memory-limit value; pool size and
+pre-warm; the exact wording of the two addendum sentences within the rules above;
+trace/observer wiring in `run.py`.
