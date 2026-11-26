@@ -23,7 +23,9 @@ for.
 CODE_ADDENDUM = """
 Your tools are Python modules. You call them by writing code for the \
 `run_python` tool, which runs a fresh Python script in a working directory and \
-returns what the script printed. In that directory, `servers/{target}/` holds one \
+returns what the script printed. The script runs in a restricted Python \
+interpreter: only part of the standard library is available, and there is no \
+network or process access. In that directory, `servers/{target}/` holds one \
 file per tool. List the directory and read only the files you need, then import \
 the tools (`from servers.{target} import <tool>`) and call them as ordinary \
 functions. Process results in code and print only what you need. Variables do \

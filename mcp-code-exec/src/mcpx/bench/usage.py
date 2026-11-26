@@ -41,9 +41,9 @@ class RunRecord:
     ``tool_calls`` counts model-level function calls (for the code arm, each
     ``run_python`` call is one). ``mcp_calls`` counts the MCP tool calls actually
     executed (direct arm: one per function call; code arm: one per call the
-    script made through the Bridge); ``None`` in records written before it was
+    script made through the gateway); ``None`` in records written before it was
     recorded. ``trace`` is what the run did, in order: one item per function
-    call (direct arm), per ``run_python`` script and per Bridge MCP call (code
+    call (direct arm), per ``run_python`` script and per gateway MCP call (code
     arm); empty in older records. ``settings`` describes how the run was
     configured (``key=value;...``, see ``mcpx.agents.batch.run_settings``);
     empty in older records, which the report groups as "not recorded".

@@ -1,11 +1,13 @@
 """What a run did: ``RunRecord.trace`` and ``RunRecord.mcp_calls``, no model.
 
 Trace building is tested as a pure function on hand-built ADK events; the
-Bridge's MCP-call counting and tracing run against the real ticketdesk server
-through ``Runtime``. A live test (``test_arms_live.py``) checks a real run.
+gateway's MCP-call counting and tracing run against the real ticketdesk server
+through ``MontyRuntime``. A live test (``test_arms_live.py``) checks a real run.
 """
 
 import json
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anyio
@@ -19,9 +21,10 @@ from mcpx.bench.usage import CallUsage, RunRecord
 from mcpx.client.connection import Connection
 from mcpx.codegen.generator import generate_workspace
 from mcpx.codemode.protocol import EXECUTE_CODE_PARAM, EXECUTE_TOOL
-from mcpx.sandbox.bridge import Bridge
-from mcpx.sandbox.runtime import Runtime
+from mcpx.sandbox.gateway import HostGateway
+from mcpx.sandbox.monty_runtime import MontyRuntime
 from mcpx.targets import get_target
+from tests.sandbox.monty_helpers import monty_workers
 
 pytestmark = pytest.mark.anyio
 
@@ -105,23 +108,39 @@ def test_trace_items_are_clipped_and_capped() -> None:
     assert len(json.dumps(progress.trace[0])) < TRACE_ITEM_CHARS + 100
 
 
-async def test_bridge_counts_and_traces_the_scripts_mcp_calls(
+@asynccontextmanager
+async def _traced_monty(
+    tmp_path: Path, progress: _Progress, *, max_calls_per_script: int
+) -> AsyncGenerator[tuple[MontyRuntime, HostGateway]]:
+    """Like ``ticketdesk_monty``, but traced into ``progress`` with a set budget."""
+    workspace = tmp_path / "workspace"
+    async with Connection(get_target("ticketdesk")) as conn:
+        specs = await conn.list_tools()
+        generate_workspace("ticketdesk", specs, workspace)
+        gateway = HostGateway(
+            "ticketdesk",
+            conn,
+            [spec.name for spec in specs],
+            on_call=progress.trace_mcp_call,
+            max_calls_per_script=max_calls_per_script,
+        )
+        async with MontyRuntime(workspace, gateway) as runtime:
+            yield runtime, gateway
+
+
+async def test_gateway_counts_and_traces_the_scripts_mcp_calls(
     tmp_path: Path,
 ) -> None:
     progress = _Progress(code_tool=RUN_PYTHON)
-    workspace = tmp_path / "workspace"
     with anyio.fail_after(120):
-        async with Connection(get_target("ticketdesk")) as conn:
-            generate_workspace("ticketdesk", await conn.list_tools(), workspace)
-            bridge = Bridge({"ticketdesk": conn}, on_call=progress.trace_mcp_call)
-            addr = await bridge.start()
-            try:
-                result = await Runtime(workspace, addr).run(SCRIPT)
-            finally:
-                await bridge.stop()
-    assert result.exit_code == 0, result.stderr
+        async with _traced_monty(tmp_path, progress, max_calls_per_script=200) as (
+            runtime,
+            gateway,
+        ):
+            result = await runtime.run(SCRIPT)
+    assert result.ok, result.error
     assert result.stdout.split() == ["3000", "v1.2.0"]
-    assert bridge.mcp_calls == 2
+    assert gateway.mcp_calls == 2
     assert progress.trace == [
         {"kind": "mcp_call", "name": "ticketdesk.count_tickets", "args": "{}"},
         {
@@ -130,6 +149,54 @@ async def test_bridge_counts_and_traces_the_scripts_mcp_calls(
             "args": '{"project":"atlas"}',
         },
     ]
+    assert monty_workers() == []
+
+
+REFUSED_SCRIPT = (
+    "import _mcpx_rpc\n"
+    "try:\n"
+    "    _mcpx_rpc.call('ticketdesk', 'no_such_tool', {})\n"
+    "except Exception as exc:\n"
+    "    print('refused')\n"
+    "_mcpx_rpc.call('ticketdesk', 'count_tickets', {})\n"
+    "print('done')\n"
+)
+
+BUDGET_SCRIPT = (
+    "import _mcpx_rpc\n"
+    "refused = 0\n"
+    "for _ in range(5):\n"
+    "    try:\n"
+    "        _mcpx_rpc.call('ticketdesk', 'count_tickets', {})\n"
+    "    except Exception:\n"
+    "        refused += 1\n"
+    "print('refused', refused)\n"
+)
+
+
+async def test_refused_and_over_budget_calls_are_not_counted_or_traced(
+    tmp_path: Path,
+) -> None:
+    progress = _Progress(code_tool=RUN_PYTHON)
+    with anyio.fail_after(120):
+        async with _traced_monty(tmp_path, progress, max_calls_per_script=3) as (
+            runtime,
+            gateway,
+        ):
+            refused = await runtime.run(REFUSED_SCRIPT)
+            assert refused.ok, refused.error
+            assert refused.stdout.split() == ["refused", "done"]
+            assert gateway.mcp_calls == 1
+            assert len(progress.trace) == 1
+
+            over_budget = await runtime.run(BUDGET_SCRIPT)
+            assert over_budget.ok, over_budget.error
+            assert over_budget.stdout.split() == ["refused", "2"]
+            # The budget is per script: 3 more forwarded calls, 2 refused.
+            assert gateway.mcp_calls == 4
+    traced = [item for item in progress.trace if item["kind"] == "mcp_call"]
+    assert len(traced) == gateway.mcp_calls == 4
+    assert {item["name"] for item in traced} == {"ticketdesk.count_tickets"}
 
 
 def test_a_traced_record_round_trips_through_json() -> None:

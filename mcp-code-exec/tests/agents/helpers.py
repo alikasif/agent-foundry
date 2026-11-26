@@ -8,6 +8,7 @@ import psutil
 from google.adk.models.lite_llm import LiteLlm
 
 from mcpx.llm.models import ModelConfig
+from tests.sandbox.monty_helpers import monty_workers
 
 
 def closed_port() -> int:
@@ -34,7 +35,7 @@ class UnreachableModel(ModelConfig):
 
 
 def python_children() -> list[psutil.Process]:
-    """Live python child processes of this test process."""
+    """Live python and ``monty`` worker child processes of this test process."""
     me = psutil.Process(os.getpid())
     found = []
     for proc in me.children(recursive=True):
@@ -43,4 +44,6 @@ def python_children() -> list[psutil.Process]:
                 found.append(proc)
         except psutil.NoSuchProcess:
             continue
+    known = {proc.pid for proc in found}
+    found.extend(w for w in monty_workers() if w.pid not in known and w.is_running())
     return found

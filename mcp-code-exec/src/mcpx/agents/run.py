@@ -11,13 +11,13 @@ Timing fairness: ``wall_s`` runs from just before the first ``runner.run_async``
 call to the last event received (or to the failure), for all three arms. MCP
 server start-up, tool discovery and workspace generation happen before the clock
 starts in every arm: the code arm opens its ``Connection``, generates the
-workspace and starts the ``Bridge`` first; the direct and fastmcp arms warm
+workspace and opens the ``MontyRuntime`` first; the direct and fastmcp arms warm
 their toolset by listing its tools once (the list is then cached for the run).
 LiteLLM, which ADK imports lazily on the first model call, is imported with this
 module so that its multi-second import never lands inside the first run's clock.
 
 What a run did is kept in ``RunRecord.trace`` (function calls, ``run_python``
-scripts and the MCP calls those scripts made through the Bridge, each text cut
+scripts and the MCP calls those scripts made through the gateway, each text cut
 to ``TRACE_ITEM_CHARS``, at most ``TRACE_MAX_ITEMS`` items) and the number of MCP
 tool calls actually executed in ``RunRecord.mcp_calls``. On the fastmcp arm the
 model's ``execute`` scripts are traced like ``run_python`` scripts, and the
@@ -59,8 +59,8 @@ from mcpx.client.connection import Connection
 from mcpx.codegen.generator import generate_workspace
 from mcpx.codemode.protocol import EXECUTE_CODE_PARAM, EXECUTE_TOOL, read_call_log
 from mcpx.llm.models import ModelConfig
-from mcpx.sandbox.bridge import Bridge
-from mcpx.sandbox.runtime import Runtime
+from mcpx.sandbox.gateway import HostGateway
+from mcpx.sandbox.monty_runtime import MontyRuntime
 from mcpx.targets import get_target
 
 Arm = Literal["direct", "code", "fastmcp"]
@@ -127,7 +127,7 @@ class _Progress:
             self.trace.append({k: _clip(v) for k, v in item.items()})
 
     def trace_mcp_call(self, server: str, tool: str, args: dict[str, Any]) -> None:
-        """Trace one MCP call the code arm's script made through the Bridge."""
+        """Trace one MCP call the code arm's script made through the gateway."""
         self.add_trace(
             {"kind": "mcp_call", "name": f"{server}.{tool}", "args": _args_text(args)}
         )
@@ -264,32 +264,35 @@ async def _run_code(
     max_llm_calls: int,
     progress: _Progress,
 ) -> None:
-    """Code arm: connection, workspace, bridge and runtime, torn down in reverse."""
+    """Code arm: connection, workspace, gateway and Monty runtime, torn down."""
     with tempfile.TemporaryDirectory(
         prefix="mcpx-ws-", ignore_cleanup_errors=True
     ) as tmp:
         workspace = Path(tmp)
         async with Connection(get_target(target_name)) as conn:
-            generate_workspace(target_name, await conn.list_tools(), workspace)
-            bridge = Bridge({target_name: conn}, on_call=progress.trace_mcp_call)
+            tools = await conn.list_tools()
+            generate_workspace(target_name, tools, workspace)
+            gateway = HostGateway(
+                target_name,
+                conn,
+                [t.name for t in tools],
+                on_call=progress.trace_mcp_call,
+            )
             progress.code_tool = RUN_PYTHON
             try:
-                addr = await bridge.start()
-                runtime = Runtime(workspace, addr)
-                agent = build_code_agent(runtime, target_name, model, recorder)
-                await _drive(agent, task, max_llm_calls, progress)
+                # Closing the runtime is shielded and bounded by its __aexit__.
+                async with MontyRuntime(workspace, gateway) as runtime:
+                    agent = build_code_agent(runtime, target_name, model, recorder)
+                    await _drive(agent, task, max_llm_calls, progress)
             finally:
-                progress.mcp_calls = bridge.mcp_calls
-                with anyio.CancelScope(shield=True):
-                    with anyio.move_on_after(CLOSE_TIMEOUT_S):
-                        await bridge.stop()
+                progress.mcp_calls = gateway.mcp_calls
 
 
 def fold_call_log(progress: _Progress, target_name: str, call_log: Path) -> None:
     """Fold the proxy's call log into ``progress``: one backend call per line.
 
     Sets ``mcp_calls`` to the number of valid entries and traces each as the
-    Bridge's calls are traced. A missing, empty or half-written log gives the
+    the gateway's calls are traced. A missing, empty or half-written log gives the
     entries that are readable (possibly none), never an error.
     """
     entries = read_call_log(call_log)

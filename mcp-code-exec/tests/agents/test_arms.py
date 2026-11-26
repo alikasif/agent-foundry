@@ -2,6 +2,7 @@
 
 import os
 import socket
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -38,7 +39,7 @@ from mcpx.codemode.protocol import (
 from mcpx.llm.models import ModelConfig
 from mcpx.targets import get_target, get_tasks
 from tests.agents.helpers import UnreachableModel, closed_port, python_children
-from tests.sandbox.helpers import ticketdesk_runtime
+from tests.sandbox.monty_helpers import monty_workers, ticketdesk_monty
 
 pytestmark = pytest.mark.anyio
 
@@ -68,7 +69,7 @@ async def test_direct_agent_exposes_every_server_tool() -> None:
 
 async def test_code_agent_exposes_exactly_run_python(tmp_path: Path) -> None:
     with anyio.fail_after(60):
-        async with ticketdesk_runtime(tmp_path) as runtime:
+        async with ticketdesk_monty(tmp_path) as (runtime, _gateway):
             agent = build_code_agent(
                 runtime, "ticketdesk", ModelConfig("x/y"), UsageRecorder()
             )
@@ -93,11 +94,12 @@ async def test_instructions_are_shared_and_neutral(tmp_path: Path) -> None:
     addendum = CODE_ADDENDUM.format(target="ticketdesk")
     assert addendum not in BASE_INSTRUCTION
     with anyio.fail_after(60):
-        async with ticketdesk_runtime(tmp_path) as runtime:
+        async with ticketdesk_monty(tmp_path) as (runtime, _gateway):
             code = build_code_agent(runtime, "ticketdesk", ModelConfig("x/y"), recorder)
     assert isinstance(code.instruction, str)
     assert code.instruction == BASE_INSTRUCTION + addendum
     assert "servers/ticketdesk/" in addendum
+    assert "restricted Python interpreter" in addendum
     assert code.after_model_callback == recorder.after_model_callback
     assert "ANSWER: <json>" in BASE_INSTRUCTION
     assert "Be economical" in BASE_INSTRUCTION
@@ -167,6 +169,21 @@ async def test_run_once_records_error_instead_of_raising(arm: Arm) -> None:
         assert rec.mcp_calls == 0 and rec.trace == []
     assert elapsed < 60, f"unreachable model took {elapsed:.1f} s"
     assert python_children() == [], "run_once left python processes behind"
+
+
+async def test_code_arm_error_leaves_no_workers_and_a_deletable_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    model = UnreachableModel("x/unreachable", timeout_s=5.0, port=closed_port())
+    with anyio.fail_after(90):
+        rec = await run_once("code", "ticketdesk", TASK_A, model, 0)
+    assert rec.error and "APIConnectionError" in rec.error, rec
+    assert rec.correct is False
+    assert rec.tool_calls == 0 and rec.mcp_calls == 0 and rec.trace == []
+    assert monty_workers() == []
+    assert python_children() == []
+    assert list(tmp_path.iterdir()) == [], "the temp workspace was not deleted"
 
 
 async def test_run_once_rejects_an_unknown_arm_as_an_error() -> None:
@@ -244,7 +261,7 @@ def test_call_log_entries_become_mcp_calls_and_trace_items(tmp_path: Path) -> No
     progress = _Progress(code_tool=EXECUTE_TOOL, code_param=EXECUTE_CODE_PARAM)
     fold_call_log(progress, "ticketdesk", log)
     assert progress.mcp_calls == 2
-    # The same items, in the same naming, as the Bridge makes for the code arm.
+    # The same items, in the same naming, as the gateway makes for the code arm.
     assert progress.trace == [
         {"kind": "mcp_call", "name": "ticketdesk.count_tickets", "args": "{}"},
         {
