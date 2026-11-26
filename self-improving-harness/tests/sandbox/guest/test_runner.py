@@ -1,3 +1,4 @@
+import builtins
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,34 @@ def test_execute_error_is_encodable_with_lone_surrogate() -> None:
     assert error is not None
     assert "ValueError: ?" in error
     error.encode("utf-8")
+
+
+def test_execute_undoes_replaced_builtins(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    saved = dict(vars(builtins))
+    code = "import builtins\nbuiltins.print = builtins.repr = lambda *a, **k: ''\n42"
+    try:
+        error = execute(code, {})
+        restored = builtins.print is saved["print"] and builtins.repr is saved["repr"]
+    finally:
+        vars(builtins).update(saved)
+
+    assert error is None
+    assert restored
+    assert capsys.readouterr().out == "42\n"
+
+
+def test_execute_reports_errors_after_builtins_are_replaced() -> None:
+    saved = dict(vars(builtins))
+    code = "import builtins\nbuiltins.isinstance = builtins.len = None\nraise KeyError"
+    try:
+        error = execute(code, {})
+    finally:
+        vars(builtins).update(saved)
+
+    assert error is not None
+    assert "KeyError" in error
 
 
 def test_truncate_leaves_short_text_unchanged() -> None:

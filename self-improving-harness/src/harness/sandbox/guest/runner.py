@@ -6,16 +6,26 @@ Both reply to the host with one ASCII JSON object per line on stdout.
 """
 
 import argparse
-import ast
-import contextlib
-import json
+import builtins
 import os
 import signal
 import subprocess
 import sys
-import tempfile
-import traceback
-from typing import TextIO
+
+# User code shares this interpreter and may reassign module attributes, so the
+# names used after it has run are bound here.
+from ast import Expr, Expression, parse
+from contextlib import suppress
+from json import dumps, loads
+from os import O_CREAT, O_EXCL, O_RDWR, _exit, dup2, getpid, unlink, urandom
+from os import open as open_fd
+from tempfile import gettempdir
+from traceback import format_exc
+from typing import BinaryIO, TextIO
+
+_builtins = vars(builtins)
+_eval = eval
+_original_streams = sys.__stdout__, sys.__stderr__
 
 
 def _cut(head: str, tail: str, count: int) -> str:
@@ -36,9 +46,10 @@ def read_capped(path: str, limit: int) -> str:
 
     For a large file the cut count is estimated from its size in bytes.
     """
-    size = os.path.getsize(path)
     window = 4 * limit  # a UTF-8 character is at most 4 bytes
     with open(path, "rb") as file:
+        size = file.seek(0, 2)
+        file.seek(0)
         if size <= window:
             return truncate(file.read(size).decode(errors="replace"), limit)
         start = file.read(window).decode(errors="replace")
@@ -53,42 +64,65 @@ def execute(code: str, namespace: dict) -> str | None:
     """Run ``code``, printing the value of a final bare expression.
 
     Returns the traceback text if the code raised, including ``SystemExit``.
+    Builtins that the code replaced are put back; ones it added remain.
     """
     try:
-        tree = ast.parse(code, "<code>")
+        tree = parse(code, "<code>")
         last = None
-        if tree.body and isinstance(tree.body[-1], ast.Expr):
+        if tree.body and isinstance(tree.body[-1], Expr):
             last = tree.body.pop()
-        exec(compile(tree, "<code>", "exec"), namespace)  # noqa: S102
-        if isinstance(last, ast.Expr):
-            expression = ast.Expression(last.value)
-            value = eval(compile(expression, "<code>", "eval"), namespace)
-            if value is not None:
-                print(repr(value))
-    except BaseException:  # noqa: BLE001 - report SystemExit and friends too
+        body = compile(tree, "<code>", "exec")
+        tail = None
+        if isinstance(last, Expr):
+            tail = compile(Expression(last.value), "<code>", "eval")
+        saved = _builtins.copy()
+        try:
+            exec(body, namespace)  # noqa: S102
+            value = None if tail is None else _eval(tail, namespace)
+        finally:  # before anything else here or in the caller needs a builtin
+            _builtins.update(saved)
+        if value is not None:
+            print(repr(value))
+    except BaseException as error:  # noqa: BLE001 - SystemExit and friends too
+        try:
+            text = format_exc()
+        except BaseException:  # noqa: BLE001 - user code broke what it relies on
+            text = f"{type(error).__name__}: traceback unavailable\n"
         # A message may hold lone surrogates, which the host cannot encode.
-        return traceback.format_exc().encode("utf-8", "replace").decode("utf-8")
+        return text.encode("utf-8", "replace").decode("utf-8")
     return None
 
 
 def _send(stream: TextIO, message: dict) -> None:
-    print(json.dumps(message, ensure_ascii=True), file=stream, flush=True)
+    stream.write(dumps(message, ensure_ascii=True) + "\n")
+    stream.flush()
 
 
 def _text_stream(fd: int) -> TextIO:
     return open(fd, "w", buffering=1, encoding="utf-8", errors="replace", closefd=False)
 
 
+def _capture_file(directory: str) -> BinaryIO:
+    """Open a file with no name: it cannot be deleted and a kill leaves nothing.
+
+    ``tempfile`` is not used because it looks up ``os`` functions at call time.
+    """
+    path = f"{directory}/capture-{urandom(8).hex()}"
+    fd = open_fd(path, O_RDWR | O_CREAT | O_EXCL, 0o600)
+    unlink(path)
+    return open(fd, "r+b")
+
+
 def _execute_into(code: str, namespace: dict, capture_fd: int) -> str | None:
     """Run ``code`` with file descriptors 1 and 2 pointing at ``capture_fd``."""
-    os.dup2(capture_fd, 1)
-    os.dup2(capture_fd, 2)
+    dup2(capture_fd, 1)
+    dup2(capture_fd, 2)
     # New streams each time: earlier code may have closed or replaced them.
     streams = _text_stream(1), _text_stream(2)
     sys.stdout, sys.stderr = streams
     error = execute(code, namespace)
-    for stream in (sys.stdout, sys.stderr, *streams, sys.__stdout__, sys.__stderr__):
-        with contextlib.suppress(BaseException):
+    for stream in (sys.stdout, sys.stderr, *streams, *_original_streams):
+        with suppress(BaseException):
             if stream is not None:
                 stream.flush()
     return error
@@ -96,7 +130,7 @@ def _execute_into(code: str, namespace: dict, capture_fd: int) -> str | None:
 
 def serve(limit: int) -> None:
     """Answer ``{"code": str}`` requests until stdin closes."""
-    with contextlib.suppress(PermissionError):  # already a group leader
+    with suppress(PermissionError):  # already a group leader
         # pyrefly: ignore[missing-attribute]
         os.setsid()
     # Private copies carry the protocol; user code only sees fds 0, 1 and 2.
@@ -108,17 +142,18 @@ def serve(limit: int) -> None:
 
     sys.path[0] = ""  # import from the working directory, not this script's
     namespace: dict = {"__name__": "__main__"}
-    pid = os.getpid()
+    pid = getpid()
+    directory = gettempdir()  # fixed before user code can redirect it
     # pyrefly: ignore[missing-attribute]
     pgid = os.getpgrp()
     _send(replies, {"ready": True, "pgid": pgid})
     for line in requests:
-        with tempfile.NamedTemporaryFile(mode="a+b") as capture:
-            code = json.loads(line)["code"]
+        with _capture_file(directory) as capture:
+            code = loads(line)["code"]
             error = _execute_into(code, namespace, capture.fileno())
-            if os.getpid() != pid:  # a fork made by user code must not reply
-                os._exit(0)
-            output = read_capped(capture.name, limit)
+            if getpid() != pid:  # a fork made by user code must not reply
+                _exit(0)
+            output = read_capped(f"/proc/self/fd/{capture.fileno()}", limit)
         if error is not None:
             error = truncate(error, limit)
         _send(replies, {"output": output, "error": error})
@@ -126,7 +161,7 @@ def serve(limit: int) -> None:
 
 def shell(command: str, limit: int, timeout_s: float) -> None:
     """Run ``command`` with bash in a new process group and report the result."""
-    with tempfile.NamedTemporaryFile(mode="a+b") as capture:
+    with _capture_file(gettempdir()) as capture:
         process = subprocess.Popen(
             ["bash", "-c", command],
             stdin=subprocess.DEVNULL,
@@ -141,11 +176,11 @@ def shell(command: str, limit: int, timeout_s: float) -> None:
             exit_code = process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             timed_out = True
-            with contextlib.suppress(ProcessLookupError):
+            with suppress(ProcessLookupError):
                 # pyrefly: ignore[missing-attribute]
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-        output = read_capped(capture.name, limit)
+        output = read_capped(f"/proc/self/fd/{capture.fileno()}", limit)
     _send(
         sys.stdout,
         {"output": output, "exit_code": exit_code, "timed_out": timed_out},
