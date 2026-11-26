@@ -37,6 +37,19 @@ sih chat <folder>            (host: terminal, agent loop, model calls, API key)
 - `/reset`: new session, new container. `/exit`: stop and remove the container. Ctrl+C: stop the current turn.
 - A session trace (JSONL, secrets redacted) is saved outside the workspace.
 
+## When to use code
+The agent chooses per request. CodeAct is a capability, not a rule.
+
+| Request | Agent does |
+|---|---|
+| answerable from what it knows or has already seen (explain, discuss, advise) | replies in text, no code |
+| one simple look or action (list files, run the tests) | one `bash` call |
+| several steps, loops, filtering, data to reuse | CodeAct: `python`, keeping results in variables |
+
+- Claims about your files, or the result of running something, come from code it ran, never from guessing.
+- Nothing forces a tool call. `codeact_agent`'s "use code execution for EVERY task" rule is not copied.
+- This is the model's judgement, steered by the prompt and tool descriptions, so it is checked live, not guaranteed.
+
 ## Sandbox
 - Docker CLI. Image: Python 3.13, bash, git, pytest.
 - Network on, so the agent can install packages and read the web. `--no-network` turns it off.
@@ -83,6 +96,7 @@ self-improving-harness/
 
 ## Done when
 - `sih chat <folder>`: ask it to find and fix a small bug; it explores, edits, runs the tests, reports.
+- A question that needs no code is answered with no tool call; a question about the folder's contents is answered after looking.
 - A variable set in one `python` call is there in the next, also after your next message.
 - From inside the sandbox: no API key, no host files outside the workspace, `.git` not writable, no network under `--no-network`.
 - An endless loop is stopped and the session keeps working.

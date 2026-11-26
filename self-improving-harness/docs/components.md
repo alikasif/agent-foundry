@@ -11,7 +11,7 @@ Nothing in the restarted harness is built yet.
 |---|---|---|
 | Agent loop (reason, act, observe) | v1 | Google ADK, one session across turns |
 | Terminal chat, Claude Code style | v1 | |
-| Bash + code execution (CodeAct) | v1 | code is the main action |
+| Bash + code execution (CodeAct) | v1 | used when the task needs it; agent decides |
 | Sandbox execution (Docker) | v1 | model calls stay outside the container |
 | Filesystem workspace + git | v1 | one project folder mounted |
 | System prompt, tool descriptions | v1 | minimal |
