@@ -15,15 +15,24 @@ import pytest
 from google.adk.events import Event
 from google.genai import types
 
+from mcpx.agents import run as run_module
 from mcpx.agents.code import RUN_PYTHON
-from mcpx.agents.run import TRACE_ITEM_CHARS, TRACE_MAX_ITEMS, _Progress, _record
-from mcpx.bench.usage import CallUsage, RunRecord
+from mcpx.agents.run import (
+    TRACE_ITEM_CHARS,
+    TRACE_MAX_ITEMS,
+    _Progress,
+    _record,
+    _run_code,
+    describe_error,
+)
+from mcpx.bench.usage import CallUsage, RunRecord, UsageRecorder
 from mcpx.client.connection import Connection
 from mcpx.codegen.generator import generate_workspace
 from mcpx.codemode.protocol import EXECUTE_CODE_PARAM, EXECUTE_TOOL
+from mcpx.llm.models import ModelConfig
 from mcpx.sandbox.gateway import HostGateway
 from mcpx.sandbox.monty_runtime import MontyRuntime
-from mcpx.targets import get_target
+from mcpx.targets import get_target, get_tasks
 from tests.sandbox.monty_helpers import monty_workers
 
 pytestmark = pytest.mark.anyio
@@ -197,6 +206,82 @@ async def test_refused_and_over_budget_calls_are_not_counted_or_traced(
     traced = [item for item in progress.trace if item["kind"] == "mcp_call"]
     assert len(traced) == gateway.mcp_calls == 4
     assert {item["name"] for item in traced} == {"ticketdesk.count_tickets"}
+
+
+REFUSED_CALL = (
+    "try:\n"
+    "    _mcpx_rpc.call('ticketdesk', 'not_a_tool', {})"
+    "\n"
+    "except Exception:\n"
+    "    print('refused')\n"
+)
+WIRING_SCRIPT = "import _mcpx_rpc\n" + SCRIPT + REFUSED_CALL
+ONE_CALL_SCRIPT = (
+    "import _mcpx_rpc\n_mcpx_rpc.call('ticketdesk', 'count_tickets', {})\n"
+)
+
+
+def _patch_drive(
+    monkeypatch: pytest.MonkeyPatch, script: str, *, then_raise: bool = False
+) -> list[str]:
+    """Make ``_run_code`` hand the runtime to a fake ``_drive`` that runs ``script``."""
+    outputs: list[str] = []
+
+    async def fake_drive(
+        agent: MontyRuntime, task: object, max_llm_calls: int, progress: _Progress
+    ) -> None:
+        outputs.append((await agent.run(script)).render())
+        if then_raise:
+            raise RuntimeError("model blew up")
+
+    monkeypatch.setattr(
+        run_module, "build_code_agent", lambda runtime, *args, **kwargs: runtime
+    )
+    monkeypatch.setattr(run_module, "_drive", fake_drive)
+    return outputs
+
+
+async def test_run_code_wires_the_gateway_into_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outputs = _patch_drive(monkeypatch, WIRING_SCRIPT)
+    task = get_tasks("ticketdesk")[0]
+    progress = _Progress()
+    with anyio.fail_after(120):
+        await _run_code(
+            "ticketdesk", task, ModelConfig("x/y"), UsageRecorder(), 5, progress
+        )
+    assert outputs[0].split() == ["3000", "v1.2.0", "refused"]
+    assert progress.code_tool == RUN_PYTHON
+    # The unknown tool was refused: not counted and not traced.
+    assert progress.mcp_calls == 2
+    assert progress.trace == [
+        {"kind": "mcp_call", "name": "ticketdesk.count_tickets", "args": "{}"},
+        {
+            "kind": "mcp_call",
+            "name": "ticketdesk.get_latest_release",
+            "args": '{"project":"atlas"}',
+        },
+    ]
+    assert monty_workers() == []
+
+
+async def test_run_code_keeps_the_call_count_when_the_run_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_drive(monkeypatch, ONE_CALL_SCRIPT, then_raise=True)
+    task = get_tasks("ticketdesk")[0]
+    progress = _Progress()
+    with anyio.fail_after(120):
+        # The MCP client wraps the failure in exception groups; run_once unwraps.
+        with pytest.raises(BaseExceptionGroup) as raised:
+            await _run_code(
+                "ticketdesk", task, ModelConfig("x/y"), UsageRecorder(), 5, progress
+            )
+    assert describe_error(raised.value) == "RuntimeError: model blew up"
+    assert progress.mcp_calls == 1
+    assert [item["name"] for item in progress.trace] == ["ticketdesk.count_tickets"]
+    assert monty_workers() == []
 
 
 def test_a_traced_record_round_trips_through_json() -> None:

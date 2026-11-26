@@ -292,7 +292,7 @@ def fold_call_log(progress: _Progress, target_name: str, call_log: Path) -> None
     """Fold the proxy's call log into ``progress``: one backend call per line.
 
     Sets ``mcp_calls`` to the number of valid entries and traces each as the
-    the gateway's calls are traced. A missing, empty or half-written log gives the
+    gateway's calls are traced. A missing, empty or half-written log gives the
     entries that are readable (possibly none), never an error.
     """
     entries = read_call_log(call_log)
