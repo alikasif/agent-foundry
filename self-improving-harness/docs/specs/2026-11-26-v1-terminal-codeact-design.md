@@ -1,6 +1,7 @@
 # self-improving-harness v1: terminal CodeAct agent in a sandbox
 
 ## Intent
+- A **coding** harness: easy to test and benchmark (owner's choice).
 - First build a plain harness, simply. Self-improvement comes after it works.
 - Claude Code-like terminal now. On top of it, next: take a goal and complete it.
 - Component list and status: [../components.md](../components.md).
@@ -8,7 +9,8 @@
 
 ## Goals / non-goals
 - **Goals:** chat in a terminal; the agent works in your project folder by writing bash and Python; code runs only in a sandbox.
-- **Non-goals (v1):** goal mode, memory, search, context management, planning, subagents, self-improvement, grading, UI.
+- **Non-goals:** general-purpose tasks.
+- **Non-goals (v1):** goal mode, memory, search, context management, long-task planning, subagents, self-improvement, grading, UI.
 - **Anti-goals:** model-written code running on the host; the API key reachable from that code; machinery no v1 behaviour needs.
 
 ## Approaches
@@ -16,6 +18,7 @@
 |---|---|---|
 | How code is the action | code in a tool-call argument / fenced blocks parsed from reply text | **tool call**: fits ADK and LiteLLM |
 | Python state | fresh per call / persistent interpreter | **persistent**: CodeAct reuses variables; later parts become callable functions |
+| Understand and plan | prompt only / plan gate / separate planner stage | **plan gate**: enforced for all work, plain questions cost nothing |
 | Execution | ADK `ContainerCodeExecutor` / own tools on own container | **own**: ADK's mounts no folder, keeps no state, runs only Python |
 
 Reuse from `agent-foundry/codeact_agent`: persistent-namespace execution, head+tail output cut, REPL commands and panels, persistence guidance in the prompt. It runs code with `exec` in its own process; v1 adds the Docker sandbox. Code is copied; that project is not changed. Its subagents and context store wait for their turn in the component list.
@@ -25,6 +28,7 @@ Reuse from `agent-foundry/codeact_agent`: persistent-namespace execution, head+t
 sih chat <folder>            (host: terminal, agent loop, model calls, API key)
   you type
     -> ADK agent -> model
+         -> plan(understanding, steps, done)      (required before any code)
          -> bash(command) | python(code)
               -> session container   (/workspace = your folder)
          <- output
@@ -37,17 +41,29 @@ sih chat <folder>            (host: terminal, agent loop, model calls, API key)
 - `/reset`: new session, new container. `/exit`: stop and remove the container. Ctrl+C: stop the current turn.
 - A session trace (JSONL, secrets redacted) is saved outside the workspace.
 
+## How a request is handled
+```
+request -> understand -> unclear?          ask you
+                      -> answerable now?   reply in text
+                      -> needs work:       plan -> run steps -> check against the request -> report
+```
+- **Gate:** `bash` and `python` are refused until `plan` has been called for the current message. The refusal tells the model to plan first.
+- `plan(understanding, steps, done)`: what you asked, the steps, how many are finished. Calling it again revises the plan or marks progress.
+- The terminal shows the understanding and steps before any code runs, then the agent carries on without waiting (Ctrl+C stops it).
+- The gate resets with every message. Plain questions need no plan.
+- The gate forces a plan to exist, not a good one. Checking the result is asked for by the prompt; enforcing it comes with goal mode.
+
 ## When to use code
 The agent chooses per request. CodeAct is a capability, not a rule.
 
 | Request | Agent does |
 |---|---|
 | answerable from what it knows or has already seen (explain, discuss, advise) | replies in text, no code |
-| one simple look or action (list files, run the tests) | one `bash` call |
+| one simple look or action (list files, run the tests) | one-step plan, one `bash` call |
 | several steps, loops, filtering, data to reuse | CodeAct: `python`, keeping results in variables |
 
 - Claims about your files, or the result of running something, come from code it ran, never from guessing.
-- Nothing forces a tool call. `codeact_agent`'s "use code execution for EVERY task" rule is not copied.
+- Nothing forces a tool call; the gate only orders them. `codeact_agent`'s "use code execution for EVERY task" rule is not copied.
 - This is the model's judgement, steered by the prompt and tool descriptions, so it is checked live, not guaranteed.
 
 ## Sandbox
@@ -84,6 +100,7 @@ self-improving-harness/
     tools/               registry.py
       bash/              tool.py
       python/            tool.py
+      plan/              tool.py
     prompts/             load.py, system_prompt.md, tools.toml
     sandbox/             workspace.py, container.py, shell.py, interpreter.py
       guest/             runner.py        (mounted read-only, runs inside the container)
@@ -96,6 +113,7 @@ self-improving-harness/
 
 ## Done when
 - `sih chat <folder>`: ask it to find and fix a small bug; it explores, edits, runs the tests, reports.
+- Code never runs before a plan for that message is on screen.
 - A question that needs no code is answered with no tool call; a question about the folder's contents is answered after looking.
 - A variable set in one `python` call is there in the next, also after your next message.
 - From inside the sandbox: no API key, no host files outside the workspace, `.git` not writable, no network under `--no-network`.

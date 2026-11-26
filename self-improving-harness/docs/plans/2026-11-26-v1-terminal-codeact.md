@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** `sih chat <folder>` is a terminal agent that works in your folder by running bash and persistent Python inside a Docker container.
+**Goal:** `sih chat <folder>` is a terminal coding agent that understands each request, plans, and works in your folder by running bash and persistent Python inside a Docker container.
 
 **Architecture:** The terminal, the ADK agent loop, model calls and the API key stay on the host. One container per chat session runs the code. A stdlib-only script mounted into the container (`runner.py`) holds the Python namespace and talks JSON lines over `docker exec -i`.
 
@@ -16,6 +16,7 @@
 - Never read or print `.env`. Never commit `.env` or session traces.
 - Limits: 120 s per code call, 20,000 characters of output to the model (head and tail kept), 30 model calls per message, 2g memory, 2 CPUs, 256 processes.
 - Network on by default; `--no-network` turns it off.
+- A coding harness. `bash` and `python` are refused until `plan` has been called for the current message; the agent does not wait for approval.
 - Model `deepseek/deepseek-v4.1-flash-1017`, reasoning `medium`, provider `parasail`; env overrides `SIH_MODEL`, `SIH_REASONING`, `SIH_PROVIDER`.
 - Import LiteLLM only after `google.adk.models.lite_llm._ensure_litellm_imported()` (a plain import auto-loads a `.env`).
 - src layout, absolute imports, every package has `__init__.py`, entry points hold no logic, tests mirror source, no `utils`/`helpers` modules.
@@ -43,6 +44,7 @@ src/harness/
   tools/     __init__.py  registry.py  described.py
     bash/    __init__.py  tool.py
     python/  __init__.py  tool.py
+    plan/    __init__.py  tool.py
   prompts/   __init__.py  load.py  system_prompt.md  tools.toml
   sandbox/   __init__.py  workspace.py  container.py  shell.py  interpreter.py
     guest/   __init__.py  runner.py
@@ -133,19 +135,22 @@ Copy sources (read with `git show`): `main:codeact_agent/src/codeact_agent/{sand
 
 ### Task 4: Tools, prompts, model
 
-**Files:** Create `src/harness/tools/{__init__,registry,described}.py`, `tools/{bash,python}/{__init__,tool}.py`, `src/harness/prompts/{__init__,load}.py`, `system_prompt.md`, `tools.toml`, `src/harness/agent/{__init__,model}.py`; Test mirrors.
+**Files:** Create `src/harness/tools/{__init__,registry,described}.py`, `tools/{bash,python,plan}/{__init__,tool}.py`, `src/harness/prompts/{__init__,load}.py`, `system_prompt.md`, `tools.toml`, `src/harness/agent/{__init__,model}.py`; Test mirrors.
 
 **Interfaces — Consumes:** `run_bash`, `Interpreter`, `Container`, `ExecResult`. **Produces:**
 - `tools.bash.tool.make_bash(container) -> Callable` (async `bash(command: str) -> dict`)
 - `tools.python.tool.make_python(interpreter) -> Callable` (async `python(code: str) -> dict`)
 - Result dict: `output` always; `error`, `exit_code`, `timed_out`, `restarted` only when meaningful (non-null / True).
-- `tools.registry.build_tools(container, interpreter, descriptions: dict[str, str]) -> list[BaseTool]` (names `bash`, `python`)
+- `tools.plan.tool.PlanState()`: `planned: bool`, `reset()`, `record(understanding, steps, done)`
+- `tools.plan.tool.make_plan(state) -> Callable` (async `plan(understanding: str, steps: list[str], done: int = 0) -> dict`). Empty understanding, no steps or `done` outside `0..len(steps)` returns an `error` and records nothing. Success returns the numbered steps with finished ones marked.
+- `tools.plan.tool.check_gate(state, tool_name: str) -> dict | None`: for `bash`/`python` without a plan, `{"error": "Call plan first: say what you understood and list the steps."}`; else `None`
+- `tools.registry.build_tools(container, interpreter, plan_state, descriptions: dict[str, str]) -> list[BaseTool]` (names `plan`, `bash`, `python`)
 - `prompts.load.load_system_prompt() -> str`, `load_tool_descriptions() -> dict[str, str]`
 - `agent.model.ModelSettings(model_id: str, reasoning: str, provider: str)`, `model_settings(env: Mapping[str, str]) -> ModelSettings`, `build_llm(settings) -> LiteLlm` (model `openrouter/<id>`, `reasoning_effort`, `extra_body.provider = {"order": [provider], "allow_fallbacks": False}`, timeout 180, `num_retries=2`, temperature 0; empty provider means no pin).
 
-**System prompt must say:** decide first whether the request needs code: answer directly in text when you already can (explanations, discussion, advice); use one `bash` call for a simple look or action; write `python` when there are several steps, loops, filtering or results to reuse; never guess file contents or command results, look; do not run code just to show activity. The prompt and tool descriptions must not require code for every task (do not copy that rule from `codeact_agent`). `python` keeps variables, imports and functions across calls and messages until restarted; `bash` is a fresh shell in `/workspace` each time; work only in `/workspace`; inspect before editing; run the tests after changes; print only what you need, long output is cut; `.git` is read-only, do not try to commit; reply in plain text when done.
+**System prompt must say:** you are a coding agent. First understand the request; if it is unclear, ask in text and do nothing else. Before any code, call `plan` with what you understood and the steps (one step is fine for a simple action); call it again when findings change the steps or to mark progress, together with the next code call where possible. Before reporting, check the result against the request and say what was and was not verified. Then decide whether the request needs code: answer directly in text when you already can (explanations, discussion, advice); use one `bash` call for a simple look or action; write `python` when there are several steps, loops, filtering or results to reuse; never guess file contents or command results, look; do not run code just to show activity. The prompt and tool descriptions must not require code for every task (do not copy that rule from `codeact_agent`). `python` keeps variables, imports and functions across calls and messages until restarted; `bash` is a fresh shell in `/workspace` each time; work only in `/workspace`; inspect before editing; run the tests after changes; print only what you need, long output is cut; `.git` is read-only, do not try to commit; reply in plain text when done.
 
-- [ ] **Step 1: Write failing tests** (offline, fake container/interpreter): each tool returns the dict shape; both tool declarations carry the `tools.toml` description and one string parameter; `model_settings({})` returns the three defaults; overrides apply; `build_llm` passes the provider pin; prompt mentions `/workspace`.
+- [ ] **Step 1: Write failing tests** (offline, fake container/interpreter): each tool returns the dict shape; every tool declaration carries its `tools.toml` description (`bash` and `python` take one string; `plan` takes a string, a list of strings and an integer); `check_gate` blocks `bash` and `python` before a plan, allows them after, and blocks again after `reset()`; invalid plans leave it closed; `model_settings({})` returns the three defaults; overrides apply; `build_llm` passes the provider pin; prompt mentions `/workspace`.
 - [ ] **Step 2–4: Fail, implement, green**
 - [ ] **Step 5: Commit** `feat(sih): code tools, prompts and model settings`
 
@@ -154,14 +159,17 @@ Copy sources (read with `git show`): `main:codeact_agent/src/codeact_agent/{sand
 **Files:** Create `src/harness/agent/{build,session}.py`, `tests/fakes.py` (`ScriptedLlm(BaseLlm)` returning queued `LlmResponse`s and keeping each request); Test `tests/agent/{test_build,test_session}.py`.
 
 **Interfaces — Produces:**
-- `agent.build.build_agent(llm, tools, instruction: str) -> LlmAgent` (instruction passed as a callable so braces are not templated)
+- `agent.build.build_agent(llm, tools, instruction: str, plan_state: PlanState) -> LlmAgent` (instruction passed as a callable so braces are not templated; `check_gate` wired as `before_tool_callback`)
 - `agent.session.Step(kind: str, name: str, data: dict)`: kinds `text` (`{"text"}`), `tool_call` (the arguments), `tool_result` (the result dict), `error` (`{"message"}`)
-- `agent.session.ChatSession(agent, *, max_llm_calls: int = 30)`: `send(message: str) -> AsyncIterator[Step]`, `async close()`
+- `agent.session.ChatSession(agent, plan_state, *, max_llm_calls: int = 30)`: `send(message: str) -> AsyncIterator[Step]`, `async close()`
 - `agent.session.open_session(llm, workspace: Path, *, network: bool, image_dir: Path)` async context manager yielding a `ChatSession`; starts container and interpreter, stops both on exit, also on error.
 
-**Behaviour:** one ADK session for the life of the object. Model errors and the call limit become an `error` step; the session stays usable. Thought parts and partial events are skipped. After a cancelled turn ADK 2.15 drops unanswered tool calls from the next request; test it, do not re-implement it.
+**Behaviour:** `send` resets the plan state first. One ADK session for the life of the object. Model errors and the call limit become an `error` step; the session stays usable. Thought parts and partial events are skipped. After a cancelled turn ADK 2.15 drops unanswered tool calls from the next request; test it, do not re-implement it.
 
 - [ ] **Step 1: Write failing tests** (offline, `ScriptedLlm`, stub tools)
+  - `bash` before `plan` yields the gate error and the stub is not run; after `plan` it runs; in the next `send` it is refused again.
+  - `plan` and `bash` in one model response, in that order: `bash` runs.
+  - A text-only reply works with no plan.
   - A tool call then text yields `tool_call`, `tool_result`, `text` in order.
   - The second `send` request contains the first message.
   - A script that never stops calling tools with `max_llm_calls=3` ends in an `error` step; a following `send` works.
@@ -178,7 +186,7 @@ Copy sources (read with `git show`): `main:codeact_agent/src/codeact_agent/{sand
 **Interfaces — Consumes:** `open_session`, `Step`, `check_workspace`, `workspace_warnings`, `model_settings`, `build_llm`. **Produces:**
 - `trace.redact.env_secrets() -> list[str]`, `redact(text, secrets) -> str` (copied)
 - `trace.writer.TraceWriter(path: Path, secrets: Iterable[str])`: `write(kind: str, name: str = "", data: dict | None = None)`; one JSON object per line with a `time`; every string redacted, then cut to 20,000.
-- `chat.render.render_step(console: rich.console.Console, step: Step)`: code in a highlighted panel, output and errors in panels, reply as text; model text is never read as rich markup.
+- `chat.render.render_step(console: rich.console.Console, step: Step)`: a `plan` call as a panel with the understanding and numbered steps (finished ones marked), code in a highlighted panel, output and errors in panels, reply as text; model text is never read as rich markup.
 - `chat.terminal.run_chat(make_session, console, trace, read_line: Callable[[str], str] = input) -> None` where `make_session()` returns the async context manager.
 - `cli.main(argv: list[str] | None = None) -> int`: `sih chat <folder> [--no-network]`.
 
@@ -192,10 +200,10 @@ Copy sources (read with `git show`): `main:codeact_agent/src/codeact_agent/{sand
 
 **Files:** Create `tests/test_end_to_end.py`, `tests/test_dependencies.py`, `README.md`, `docs/notes/v1.md`; Modify `docs/components.md`.
 
-- [ ] **Step 1:** `docker` end-to-end test with `ScriptedLlm`: a temp git repo with a one-line bug and a failing test; scripted calls read the file with `python`, fix it, run `pytest` with `bash`; assert the host file is fixed and the last tool result has exit 0.
+- [ ] **Step 1:** `docker` end-to-end test with `ScriptedLlm`: a temp git repo with a one-line bug and a failing test; scripted calls `plan`, then read the file with `python`, fix it, run `pytest` with `bash`; assert the host file is fixed and the last tool result has exit 0.
 - [ ] **Step 2:** Test that imports obey the dependency rule in Global Constraints (parse with `ast`).
 - [ ] **Step 3:** Copy `.env` from `D:\GitHub\agent-foundry-sih\self-improving-harness\.env` into this project **without reading it**; confirm `git status` does not show it.
-- [ ] **Step 4:** `live` tests, real model: (a) same buggy repo, "the test fails, fix it" → the test passes afterwards; (b) "what is the difference between a list and a tuple in Python?" → no `tool_call` step; (c) "how many .py files are in this folder?" → at least one `tool_call` step and the right number. Run once each; record calls, time and which cases passed. A failure of (b) or (c) is a prompt problem: adjust the prompt, report both runs.
+- [ ] **Step 4:** `live` tests, real model: (a) same buggy repo, "the test fails, fix it" → a `plan` call comes before any code and the test passes afterwards; (b) "what is the difference between a list and a tuple in Python?" → no `tool_call` step; (c) "how many .py files are in this folder?" → at least one `tool_call` step and the right number. Run once each; record calls, time and which cases passed. A failure of (b) or (c) is a prompt problem: adjust the prompt, report both runs.
 - [ ] **Step 5:** README (install, run, commands, what the sandbox does and does not protect, `docker ps --filter label=sih=session` to find leftovers), `docs/notes/v1.md` (what one turn does, from a trace), set built rows in `components.md` to `done`.
 - [ ] **Step 6:** Full verification: `uv run pytest -m "not live"`, ruff, pyrefly.
 - [ ] **Step 7: Commit** `docs(sih): end-to-end tests, readme and v1 notes`
