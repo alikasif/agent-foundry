@@ -27,6 +27,7 @@ def check_workspace(path: Path, *, home: Path | None = None) -> Path:
     if any(p.exists() and p.samefile(folder) for p in (home, *home.parents)):
         raise WorkspaceError(f"{folder} is or contains your home folder")
     _refuse_contents(folder)
+    _refuse_gitlinks(folder)
     return folder
 
 
@@ -94,6 +95,39 @@ def _refuse_contents(folder: Path) -> None:
         except OSError as error:
             where = current.relative_to(folder).as_posix()
             raise WorkspaceError(f"cannot check {where}: {error.strerror}") from error
+
+
+def _refuse_gitlinks(folder: Path) -> None:
+    """Raise if the repository's index records another repository (mode 160000).
+
+    ``git status`` runs git inside such a folder, even one that is empty and has no
+    ``.gitmodules``, which the agent could then fill. A repository that cannot be
+    checked is refused.
+    """
+    git = folder / ".git"
+    if not os.path.lexists(git):
+        return
+    # Named outright: from a broken .git, git would move up to an enclosing one.
+    where = (f"--git-dir={git}", f"--work-tree={folder}")
+    try:
+        listed = _git(folder, *where, "ls-files", "--stage", "-z")
+    except FileNotFoundError as error:
+        raise WorkspaceError(
+            f"{folder} has a .git but git was not found, so its index cannot be checked"
+        ) from error
+    if listed.returncode != 0:
+        reason = " ".join(listed.stderr.decode(errors="replace").split())
+        raise WorkspaceError(
+            f"{folder} has a .git but git cannot read its index: {reason}"
+        )
+    for record in listed.stdout.split(b"\0"):
+        if record.startswith(b"160000 "):
+            path = record.partition(b"\t")[2].decode(errors="replace")
+            raise WorkspaceError(
+                f"{folder} records another repository at {path} (a gitlink); the "
+                "agent could fill it with git configuration and your own git would "
+                "run it"
+            )
 
 
 def workspace_warnings(path: Path) -> list[str]:

@@ -74,9 +74,9 @@ The agent chooses per request. CodeAct is a capability, not a rule.
 - A call over time kills the interpreter and restarts it; the model is told its variables are gone.
 - Output sent to the model is cut to 20,000 characters (head and tail kept).
 - Only the workspace is mounted. `.git` is mounted read-only: otherwise the agent could plant a hook or config that your own git later runs on the host.
-- Refused as workspace: a folder containing a `.env` file, a nested repository (a `.git` below the top folder) or submodules (`.gitmodules`), your home folder, a drive root.
+- Refused as workspace: a folder containing a `.env` file, a nested repository (a `.git` below the top folder) or submodules (`.gitmodules`, or a gitlink in the index), a repository whose index cannot be read, your home folder, a drive root.
 - Accepted risk (owner): with network on, the agent can send workspace contents anywhere and can reach services on your machine and LAN.
-- Not covered: Docker shares the host kernel; files the agent writes are untrusted if you run them yourself; a `.git` the agent creates in a subfolder or a non-git workspace is writable; no disk limit.
+- Not covered: Docker shares the host kernel; files the agent writes are untrusted if you run them yourself; a `.git` the agent creates in a subfolder or a non-git workspace is writable; a nested bare repository (`HEAD`, `config`, `objects`, no `.git`) is not detected; no disk limit.
 
 ## My calls (correct any)
 - No approval prompt before each command; the sandbox is the guard and the code is shown.

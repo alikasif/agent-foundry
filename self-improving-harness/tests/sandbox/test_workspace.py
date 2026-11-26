@@ -133,8 +133,10 @@ def test_accepts_a_folder_named_env_but_looks_inside(workspace: Path) -> None:
 
 @pytest.mark.parametrize("git_name", [".git", ".GIT"])
 def test_accepts_the_roots_own_git_without_looking_inside(
-    workspace: Path, git_name: str
+    workspace: Path, git_name: str, git: Callable[..., str]
 ) -> None:
+    git(workspace, "init", "-q")
+    (workspace / ".git").rename(workspace / git_name)
     put(workspace / git_name / ".env")
     put(workspace / git_name / "modules" / "dep" / ".git")
 
@@ -216,10 +218,98 @@ def test_accepts_other_git_files(workspace: Path) -> None:
     assert check(workspace) == workspace.resolve()
 
 
-def test_accepts_git_as_a_file(workspace: Path) -> None:
-    put(workspace / ".git", "gitdir: ../elsewhere\n")
+def test_accepts_git_as_a_file(workspace: Path, git: Callable[..., str]) -> None:
+    git(workspace, "init", "-q", "--separate-git-dir", str(workspace.parent / "real"))
+    assert (workspace / ".git").is_file()
 
     assert check(workspace) == workspace.resolve()
+
+
+def add_gitlink(repository: Path, git: Callable[..., str], path: str) -> None:
+    """Record ``path`` in the index as another repository, with an empty folder."""
+    entry = f"160000,{'1' * 40},{path}"
+    git(repository, "update-index", "--add", "--cacheinfo", entry)
+    (repository / path).mkdir(parents=True)
+
+
+def test_accepts_an_ordinary_repository(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    git(workspace, "init", "-q")
+    assert check(workspace) == workspace.resolve()  # nothing in the index yet
+
+    put(workspace / "src" / "main.py")
+    git(workspace, "add", ".")
+    git(workspace, "commit", "-qm", "a")
+
+    assert check(workspace) == workspace.resolve()
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_refuses_a_gitlink_without_gitmodules(
+    workspace: Path, git: Callable[..., str], committed: bool
+) -> None:
+    git(workspace, "init", "-q")
+    add_gitlink(workspace, git, "libs/my dep")
+    if committed:
+        git(workspace, "commit", "-qm", "link")
+
+    message = refusal(workspace)
+
+    assert "libs/my dep" in message
+    assert "gitlink" in message
+    assert "your own git would run it" in message
+
+
+@pytest.mark.parametrize("broken", ["empty folder", "dangling file"])
+def test_refuses_a_git_it_cannot_read(
+    workspace: Path, git: Callable[..., str], broken: str
+) -> None:
+    """Git would otherwise move up and answer for an enclosing repository."""
+    git(workspace.parent, "init", "-q")
+    if broken == "empty folder":
+        (workspace / ".git").mkdir()
+    else:
+        put(workspace / ".git", "gitdir: ../elsewhere\n")
+
+    assert "git cannot read its index" in refusal(workspace)
+
+
+def missing_program(*_: object, **__: object) -> None:
+    raise FileNotFoundError(2, "not found")
+
+
+def test_refuses_a_repository_when_git_is_missing(
+    workspace: Path, git: Callable[..., str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git(workspace, "init", "-q")
+    monkeypatch.setattr(subprocess, "run", missing_program)
+
+    assert "git was not found" in refusal(workspace)
+
+
+def test_needs_no_git_for_a_folder_without_one(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(subprocess, "run", missing_program)
+
+    assert check(workspace) == workspace.resolve()
+
+
+def test_checking_runs_no_command_named_by_the_repository(
+    workspace: Path, git: Callable[..., str]
+) -> None:
+    git(workspace, "init", "-q")
+    put(workspace / "a.txt")
+    git(workspace, "add", "a.txt")
+    marker = workspace.parent / "marker"
+    git(workspace, "config", "core.fsmonitor", f"echo ran >> '{marker.as_posix()}'")
+
+    assert check(workspace) == workspace.resolve()
+    assert not marker.exists()
+
+    git(workspace, "status")  # control: an unguarded git does run it
+    assert marker.exists()
 
 
 def test_does_not_follow_a_linked_folder(workspace: Path) -> None:
