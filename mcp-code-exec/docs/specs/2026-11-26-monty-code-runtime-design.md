@@ -1,6 +1,6 @@
 # Monty runtime for the code arm, and a fastmcp addendum: design
 
-Date: 2026-11-26. Status: draft for the owner's approval. Builds on the fastmcp arm
+Date: 2026-11-26. Status: approved, implemented. Builds on the fastmcp arm
 and lands on the same branch and PR (#10, `feat/fastmcp-code-mode-arm`, not yet
 merged), not a stacked branch.
 

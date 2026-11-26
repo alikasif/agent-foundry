@@ -1,7 +1,8 @@
-"""Live smoke tests: both arms answer task A through the real model.
+"""Live smoke tests: all three arms answer task A through the real model.
 
-Skipped unless ``OPENROUTER_API_KEY`` is set. The model id is
-``MCPX_LIVE_MODEL``, else ``MODEL``, else the default below.
+The ``code`` arm runs its scripts in Monty. Skipped unless ``OPENROUTER_API_KEY``
+is set. The model id is ``MCPX_LIVE_MODEL``, else ``MODEL``, else the default
+below.
 """
 
 import os
@@ -33,7 +34,7 @@ async def _run_task_a(arm: Arm) -> RunRecord:
         return await run_once(arm, "ticketdesk", TASKS_BY_ID["A"], LIVE_MODEL, 0)
 
 
-@pytest.mark.parametrize("arm", ["direct", "code"])
+@pytest.mark.parametrize("arm", ["direct", "code", "fastmcp"])
 async def test_task_a_is_answered_correctly(arm: Arm) -> None:
     rec = await _run_task_a(arm)
     assert rec.error is None, rec
