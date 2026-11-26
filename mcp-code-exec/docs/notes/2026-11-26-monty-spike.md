@@ -89,7 +89,9 @@ function that `time.sleep`s (sync pool, `feed_run`):
 So `request_timeout` is per turn (a turn is one stretch of sandboxed execution between
 host round trips) and, like the duration limits, ignores time spent in host calls. It
 backstops a runaway sandbox but can never bound a script that spends its time in host
-calls. Chosen mechanism, all ours:
+calls. The runtime therefore never sets `request_timeout`; the pool is created with
+`checkout_timeout=timeout_s` only, so a script waiting for a free worker cannot outlast
+its own limit. Chosen mechanism, all ours:
 
 1. The gateway refuses a call that starts after the deadline (`TimeoutError` inside the
    sandbox; `RunResult.timed_out` is set from the `TimeoutError`).
@@ -117,3 +119,27 @@ Other facts observed while building the runtime:
   uncatchable `RuntimeError: suspension limit 1000 exceeded`.
 - `MontyError.exception()` returns the original exception object (`TimeoutError`,
   `MemoryError`, ...), which is how the runtime tells a timeout from other failures.
+
+## What changed vs v4 for the code arm
+
+For reading v5 results next to v4:
+
+- Runtime: model code runs in Monty (a restricted interpreter in a worker process), not
+  in a CPython subprocess. Only part of the standard library exists, and there is no
+  network, process or environment access.
+- stdout and stderr are no longer separate streams: the error text (the traceback)
+  replaces stderr. Each is capped at 20,000 characters on its own; the error cap keeps
+  the end of the text.
+- A failing tool call now raises `RuntimeError` inside the script, not `ToolError`.
+- A fresh worker process is spawned per script (1-10 ms); that is inside the clock.
+- Call budget: 200 calls per script on the code arm (the fastmcp arm keeps its default
+  of 50 per `execute`). Neither limit is stated in a prompt.
+- `max_suspensions` is left at Monty's default of 1000. A script costs about two
+  suspensions per file read plus one per host call, so about 500 file reads would hit it;
+  the 200-call budget binds first in realistic runs.
+- Prompts: the code addendum adds one sentence about the restricted interpreter; the
+  fastmcp arm now has its own addendum, and both carry one parallel sentence advising to
+  process results in code (print / return only what is needed).
+- Trace: script and function-call items are capped at 200 and MCP-call items, counted
+  apart, at 600; a final `trace_truncated` item gives the number dropped.
+

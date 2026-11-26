@@ -83,8 +83,10 @@ uv run mcpx run --target ticketdesk --task B --arm direct
   with its arguments for the direct arm; each `run_python` script and each MCP
   call it made for the code arm; each `execute` script, the other meta-tool
   calls and the backend calls the proxy logged for the fastmcp arm; texts cut to
-  4000 characters, at most 200 items) and `mcp_calls`, the number of MCP tool
-  calls actually executed against the backend.
+  4000 characters; at most 200 script and function-call items and, counted
+  apart, 600 MCP-call items, with a final `trace_truncated` item giving the
+  number dropped if any were) and `mcp_calls`, the number of MCP tool calls
+  actually executed against the backend (exact whatever the trace dropped).
 - Models need an entry in `src/mcpx/llm/prices.toml` for cost figures; without
   one, costs show `n/a`.
 
@@ -160,9 +162,11 @@ point probed by a test in `tests/sandbox/test_monty_runtime.py` or
 - The only door out is `_mcpx_rpc.call`, the gateway's host function. It refuses
   servers and tools outside the target's allowlist and stops after 200 calls per
   script, and the script cannot reach the connection behind it.
-- Limits per script: 60 s wall clock (time spent in tool calls included; the
-  worker is killed at the deadline), 20,000 characters of output (the rest is
-  dropped and the result says so) and 256 MiB of memory.
+- Limits per script: 60 s wall clock (time spent in tool calls included: calls
+  are refused from the deadline, and a script still running 1 s later has its
+  worker killed), 20,000 characters of printed output and, separately, 20,000
+  characters of error text (the rest is dropped, the end of an error text is
+  kept, and the result says so) and 256 MiB of memory.
 
 What this does not give you:
 

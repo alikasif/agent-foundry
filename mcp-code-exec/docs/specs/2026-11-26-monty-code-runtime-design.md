@@ -25,7 +25,8 @@ importing them, versus `search` / `get_schema` / `execute` with `call_tool`.
 Goals
 - The code arm executes every `run_python` script in Monty; the subprocess runtime,
   TCP Bridge and RPC client are deleted.
-- The fastmcp arm gets an addendum that states mechanics only.
+- The fastmcp arm gets an addendum that explains mechanics, plus the one efficiency
+  sentence the code arm's addendum also has (see "Addenda").
 - One v5 batch: ticketdesk, tasks A-D, arms direct/code/fastmcp, 5 runs each, same
   model, reasoning and pinned provider as v4. Results documented next to v4.
 
@@ -78,11 +79,15 @@ if nothing else uses them. `pydantic-monty` becomes a declared dependency, pinne
   `feed_run` with: the workspace as a `MountDir(mode="read-only")` at `/work`,
   `cwd="/work"`, `external_modules={"_mcpx_rpc": ExternalModule({"call": ...})}`,
   and a `print_callback` collecting output.
-- Same limits as before: 60 s wall time per script (Monty `request_timeout`, since
-  host-callback time is not covered by sandbox limits; on expiry the worker is killed),
+- Same limits as before: 60 s wall time per script, enforced by our own watchdog
+  (Monty's `request_timeout` is never set: it ignores host-callback time; the
+  gateway refuses calls from the deadline and the worker is killed 1 s later),
   20,000-character output cap with the `[output truncated at N chars]` and
   `[timed out after N s]` notice lines unchanged, plus Monty memory limits.
 - A script that raises: the model sees the Monty traceback text after any output.
+  The error text has its own 20,000-character cap (stdout and error text are capped
+  separately, as v4 capped stdout and stderr); the end is kept, since the exception
+  line is last, and the cut sets `truncated`.
 - The wrappers stay synchronous (the model writes the same code as in v4), so the host
   function is synchronous: the sync `Monty` pool's `feed_run` runs in a worker thread
   and the host function reaches the async Connection with `anyio.from_thread.run`.
@@ -114,7 +119,7 @@ host calls arrive with the right arguments, host exceptions surface in the sandb
 Probes confirmed blocked: sockets, `subprocess`, `os.environ`, `__import__`, reading
 host files outside the mount, writing to the mount.
 
-### Addenda (mechanics only, parallel in structure)
+### Addenda (mechanics, parallel in structure, one efficiency sentence each)
 
 - `CODE_ADDENDUM`: same text, plus one sentence that the script runs in a restricted
   Python interpreter with only part of the standard library and no network access.
@@ -124,6 +129,10 @@ host files outside the mount, writing to the mount.
   `print()` output is discarded; variables do not persist between `execute` calls.
   Each sentence is verified against the proxy by a test or the spike notes before it
   ships; unverifiable ones are cut.
+  Final-review ruling: the fastmcp addendum also says "Process results in code and
+  return only what you need." (right after the sentence about print and the returned
+  value), added after the final review so both arms carry the same efficiency
+  sentence (the code addendum says "print only what you need").
 - Both arms keep `BASE_INSTRUCTION` unchanged.
 
 ### Settings and report
