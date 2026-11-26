@@ -263,3 +263,26 @@ async def test_cancelled_host_call_leaves_nothing_behind(tmp_path: Path) -> None
         assert caller.cancelled == 1 and caller.in_flight == 0
     assert monty_workers() == []
     shutil.rmtree(tmp_path)
+
+
+async def test_saturated_thread_limiter_is_a_timeout_result(tmp_path: Path) -> None:
+    # run() waits for a thread token before the script starts; if the deadline and
+    # the watchdog's grace pass first, the answer is a timed-out result, not an
+    # exception from an unset outcome.
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    original = limiter.total_tokens
+    started = time.monotonic()
+    async with fake_monty(tmp_path, timeout_s=0.3) as (rt, gateway, caller):
+        limiter.total_tokens = 1
+        holder = object()  # another borrower than this task, which run() needs
+        await limiter.acquire_on_behalf_of(holder)  # takes the only token
+        try:
+            result = await rt.run(CALL)
+        finally:
+            limiter.release_on_behalf_of(holder)
+            limiter.total_tokens = original
+        elapsed = time.monotonic() - started
+    assert result.timed_out and not result.ok
+    assert elapsed < 0.3 + 5
+    assert gateway.mcp_calls == 0 and caller.calls == []
+    assert monty_workers() == []

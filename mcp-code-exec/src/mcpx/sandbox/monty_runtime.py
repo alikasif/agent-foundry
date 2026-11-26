@@ -210,6 +210,11 @@ class MontyRuntime:
         collector = _Collector(self.max_output_chars)
         worker = _Worker()
         job = partial(self._execute, code, deadline, collector, worker)
+        # to_thread.run_sync waits for a thread token before its shield starts. If
+        # the watchdog cancels the scope while we still wait (every token held for
+        # longer than the deadline plus grace), the thread never ran and nothing
+        # below assigns ``outcome``: the script timed out without starting.
+        outcome = _Outcome(timed_out=True)
         async with anyio.create_task_group() as tg:
             tg.start_soon(_watch, worker, deadline + _KILL_GRACE_S, tg.cancel_scope)
             # abandon_on_cancel=False on purpose: the thread owns a Monty session
