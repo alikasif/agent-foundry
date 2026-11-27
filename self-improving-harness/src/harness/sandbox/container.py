@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Self
 
 _GUEST = Path(__file__).parent / "guest"
+# For every docker process. A console Ctrl+C reaches all processes attached to the
+# console, and would kill the interpreter's client; a group of its own is spared.
+SPAWN_FLAGS: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # Windows only
 
 
 class SandboxError(Exception):
@@ -84,7 +87,12 @@ def _reason(stderr: bytes) -> str:
 
 def _docker_now(*args: str) -> subprocess.CompletedProcess[bytes]:
     try:
-        return subprocess.run(["docker", *args], capture_output=True, check=False)
+        return subprocess.run(
+            ["docker", *args],
+            capture_output=True,
+            check=False,
+            creationflags=SPAWN_FLAGS,
+        )
     except FileNotFoundError as error:
         raise SandboxError("docker was not found on PATH") from error
 
@@ -108,6 +116,7 @@ async def _run(args: list[str]) -> tuple[int | None, bytes]:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            creationflags=SPAWN_FLAGS,
         )
     except FileNotFoundError as error:
         raise SandboxError("docker was not found on PATH") from error

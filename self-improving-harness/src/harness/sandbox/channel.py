@@ -6,7 +6,7 @@ from collections.abc import Awaitable
 from contextlib import suppress
 from typing import Self
 
-from harness.sandbox.container import Container, SandboxError
+from harness.sandbox.container import SPAWN_FLAGS, Container, SandboxError
 
 _LINE_LIMIT = 2**20  # a reply line can exceed asyncio's 64 KiB default
 _START_TIMEOUT_S = 30.0
@@ -87,6 +87,7 @@ class Channel:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=_LINE_LIMIT,
+                creationflags=SPAWN_FLAGS,
             )
         except FileNotFoundError as error:
             raise SandboxError("docker was not found on PATH") from error
