@@ -66,3 +66,34 @@ def test_an_invalid_plan_records_nothing(
     assert list(reply) == ["error"]
     assert state.planned is False
     assert check_gate(state, "bash") == REFUSAL
+
+
+@pytest.mark.parametrize(
+    ("understanding", "steps", "done"),
+    [
+        (None, ["a"], 0),
+        (3, ["a"], 0),
+        ("u", '["read", "fix"]', 0),
+        ("u", None, 0),
+        ("u", ("a",), 0),
+        ("u", {"a": 1}, 0),
+        ("u", ["a", 2], 0),
+        ("u", ["a", None], 0),
+        ("u", ["a", ""], 0),
+        ("u", ["  "], 0),
+        ("u", ["a"], "1"),
+        ("u", ["a"], 1.0),
+        ("u", ["a"], None),
+        ("u", ["a"], True),
+    ],
+)
+def test_a_wrongly_typed_plan_records_nothing(
+    understanding: object, steps: object, done: object
+) -> None:
+    state = PlanState()
+
+    reply = asyncio.run(make_plan(state)(understanding, steps, done))
+
+    assert list(reply) == ["error"]
+    assert state.planned is False
+    assert state.steps == []

@@ -39,3 +39,12 @@ def test_the_texts_are_ascii() -> None:
     texts = [load_system_prompt(), *load_tool_descriptions().values()]
 
     assert all(text.isascii() for text in texts)
+
+
+def test_the_step_that_allows_no_code_says_files_must_be_looked_at() -> None:
+    lines = load_system_prompt().splitlines()
+    step = next(line for line in lines if line.startswith("2. "))
+
+    assert "user's files" in step
+    assert "what a command prints" in step
+    assert "until you have looked at it in this chat" in step

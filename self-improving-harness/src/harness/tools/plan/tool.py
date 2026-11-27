@@ -33,13 +33,20 @@ def check_gate(state: PlanState, tool_name: str) -> dict | None:
     return None
 
 
-def _problem(understanding: str, steps: list[str], done: int) -> str | None:
-    if not understanding.strip():
-        return "understanding is empty: say what was asked."
-    if not steps:
-        return "steps is empty: list at least one."
-    if not 0 <= done <= len(steps):
-        return f"done must be from 0 to {len(steps)}, the number of steps."
+def _is_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _problem(understanding: object, steps: object, done: object) -> str | None:
+    """Why the arguments are no plan. ADK passes on whatever the model sent."""
+    if not _is_text(understanding):
+        return "understanding must be text that says what was asked."
+    if not isinstance(steps, list) or not steps or not all(map(_is_text, steps)):
+        return "steps must be a list of at least one step, each a non-empty string."
+    # A bool is an int to Python, but not a count of steps.
+    whole = isinstance(done, int) and not isinstance(done, bool)
+    if not whole or not 0 <= done <= len(steps):
+        return f"done must be a whole number from 0 to {len(steps)}."
     return None
 
 
