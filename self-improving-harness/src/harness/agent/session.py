@@ -104,6 +104,7 @@ class ChatSession:
         self._container = container
         self._copy = copy
         self._turn: asyncio.Task | None = None
+        self._pause_failed = False
 
     @property
     def copy(self) -> SessionCopy:
@@ -111,6 +112,11 @@ class ChatSession:
         if self._copy is None:
             raise ValueError("this session was made without a copy")
         return self._copy
+
+    @property
+    def pause_failed(self) -> bool:
+        """Whether the sandbox ever failed to freeze: code may still run there."""
+        return self._pause_failed
 
     async def send(self, message: str) -> AsyncGenerator[Step]:
         """Run one turn. A failure is an ``error`` step, and the chat goes on.
@@ -169,7 +175,12 @@ class ChatSession:
 
     async def _pause(self) -> None:
         if self._container is not None:
-            await self._container.pause()
+            try:
+                await self._container.pause()
+            except BaseException:
+                # Noted here: a cancel waiting meanwhile would hide the error.
+                self._pause_failed = True
+                raise
 
     async def _unpause(self) -> None:
         if self._container is not None:

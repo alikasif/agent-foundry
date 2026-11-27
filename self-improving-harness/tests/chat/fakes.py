@@ -22,6 +22,7 @@ class FakeChat:
         self.copy = copy
         self.sent: list[str] = []
         self._turn = turn
+        self.pause_failed = False
 
     async def send(self, message: str) -> AsyncGenerator[Step]:
         self.sent.append(message)

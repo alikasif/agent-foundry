@@ -16,6 +16,7 @@ from rich.console import Console
 
 from harness.agent.session import ChatSession, SandboxError
 from harness.chat.render import (
+    MARK,
     render_applied,
     render_changes,
     render_diff,
@@ -232,7 +233,7 @@ class _Chat:
 
     def _ask(self, question: str) -> bool:
         try:
-            answer = self._read_line(f"{question} [y/N] ")
+            answer = self._read_line(f"{MARK}{question} [y/N] ")
         except (EOFError, KeyboardInterrupt):
             return False
         return answer.strip().lower() in ("y", "yes")
@@ -245,6 +246,12 @@ class _Chat:
             self._say("no changes")
 
     def _apply(self, session: ChatSession) -> None:
+        if session.pause_failed:
+            self._say(
+                "cannot apply: the sandbox could not be paused, so code still running"
+                " there could change a file after you saw it - /reset starts a clean one"
+            )
+            return
         # Found once: what is listed here is exactly what is applied.
         changes = self._changes(session)
         if not changes:

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from harness.chat import terminal
+from harness.chat.render import MARK
 from harness.sandbox.container import SandboxError
 from harness.workspace.source import WorkspaceError
 from tests.chat.fakes import FakeChat, FakeSessions, Turn, chat_with
@@ -447,3 +448,36 @@ def test_library_logs_are_silenced(source: Path, folder: Path) -> None:
         "LiteLLM Proxy",
     ):
         assert not logging.getLogger(name).isEnabledFor(logging.CRITICAL), name
+
+
+def test_apply_is_refused_after_a_failed_pause_until_a_reset(
+    source: Path, folder: Path
+) -> None:
+    async def turn(chat: FakeChat, message: str) -> None:
+        (chat.copy.work / "a.txt").write_bytes(b"two\n")
+        chat.pause_failed = message == "unfrozen"
+
+    sessions = FakeSessions(source, folder, turn)
+
+    out, script = chat_with(
+        sessions, "unfrozen", "/apply", "/reset", "y", "frozen", "/apply", "y"
+    )
+
+    refused = script.seen[2][len(script.seen[1]) :]
+    assert "cannot apply" in refused
+    assert "could not be paused" in refused
+    assert "/reset" in refused
+    # No question followed the refused /apply: the next prompt was an ordinary one.
+    assert script.prompts[2] == "> "
+    assert "written: a.txt" in out  # in the new session
+    assert out.count("written:") == 1
+
+
+def test_the_harness_questions_carry_its_mark(source: Path, folder: Path) -> None:
+    sessions = FakeSessions(source, folder, writes("a.txt"))
+
+    _, script = chat_with(sessions, "change it", "/apply", "n", "/reset", "n")
+
+    asked = [prompt for prompt in script.prompts if "[y/N]" in prompt]
+    assert len(asked) == 2
+    assert all(prompt.startswith(MARK) for prompt in asked)

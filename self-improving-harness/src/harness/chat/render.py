@@ -2,6 +2,10 @@
 
 Text from the agent or the folder is escaped with ``visible`` and handed to rich
 as ``Text`` or code, never as ``str``: rich would read that as markup.
+
+Only the harness's own lines start with ``MARK``. Whatever the agent wrote is
+printed inside a box, so that every line of it, wrapped ones too, starts with the
+box's side, with or without colour.
 """
 
 from rich.console import Console
@@ -16,6 +20,8 @@ from harness.workspace.changes import Change, visible
 _LANGUAGES = {"bash": ("command", "bash"), "python": ("code", "python")}
 _RESULT_KEYS = {"output", "error", "exit_code", "timed_out", "restarted"}
 _THEME = "monokai"
+MARK = "sih: "  # starts every line the harness says
+_SAID = "bold magenta"
 
 
 def _literal(text: object) -> Text:
@@ -36,13 +42,13 @@ def _code(code: object, language: str, *, numbered: bool = True) -> Syntax:
 
 def say(console: Console, message: str) -> None:
     """One line, whatever it holds."""
-    console.print(Text(visible(message)), soft_wrap=True)
+    console.print(Text(MARK + visible(message), style=_SAID), soft_wrap=True)
 
 
 def render_step(console: Console, step: Step) -> None:
     data = step.data
     if step.kind == "text":
-        console.print(_literal(data.get("text", "")))
+        _panel(console, data.get("text", ""), "reply")
     elif step.kind == "error":
         _panel(console, data.get("message", ""), "error", "red")
     elif step.kind == "tool_call":
@@ -108,7 +114,8 @@ def _result(console: Console, name: str, data: dict) -> None:
 
 def render_diff(console: Console, diff: str) -> None:
     """``diff`` as ``diff_text`` made it, which has escaped it already."""
-    console.print(Syntax(diff, "diff", theme=_THEME, word_wrap=True))
+    shown = Syntax(diff, "diff", theme=_THEME, word_wrap=True)
+    console.print(Panel(shown, title=Text("diff")))
 
 
 def render_changes(console: Console, changes: list[Change]) -> None:

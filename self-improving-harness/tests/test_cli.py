@@ -204,7 +204,7 @@ def test_ctrl_c_during_setup_is_no_traceback(
 
     assert cli.main(["chat", str(folder)]) == 130
 
-    assert lines(capsys)[-1] == "interrupted"
+    assert lines(capsys)[-1] == "sih: interrupted"
 
 
 def test_the_module_runs_the_command_line(monkeypatch: pytest.MonkeyPatch) -> None:

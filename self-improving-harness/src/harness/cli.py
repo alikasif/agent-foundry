@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         # The project's own file only: never one in the folder or where you are.
         load_dotenv(PROJECT / ".env")
         if not os.environ.get("OPENROUTER_API_KEY"):
-            say(console, f"sih: set OPENROUTER_API_KEY, e.g. in {PROJECT / '.env'}")
+            say(console, f"set OPENROUTER_API_KEY, e.g. in {PROJECT / '.env'}")
             return 2
         say(console, "building the sandbox image if it is missing...")
         image_dir = PROJECT / "image"
@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
 
         run_chat(make_session, console, trace)
     except (WorkspaceError, SandboxError, OSError) as error:
-        say(console, "sih: " + " ".join(str(error).split()))
+        say(console, " ".join(str(error).split()))
         return 2
     except KeyboardInterrupt:
         say(console, "interrupted")

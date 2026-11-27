@@ -1,10 +1,11 @@
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 
 import pytest
 from rich.console import Console
 
 from harness.agent.session import Step
 from harness.chat.render import (
+    MARK,
     render_applied,
     render_changes,
     render_diff,
@@ -144,7 +145,7 @@ def test_say_prints_one_literal_line() -> None:
 
     say(console, "[bold] :smile: a\nb\x1b " + "long " * 40)
 
-    assert out.getvalue().startswith(r"[bold] :smile: a\x0ab\x1b long")
+    assert out.getvalue().startswith(MARK + r"[bold] :smile: a\x0ab\x1b long")
     assert out.getvalue().count("\n") == 1
 
 
@@ -180,3 +181,76 @@ def test_a_diff_is_shown_whole() -> None:
     written = out.getvalue()
     assert "-[bold]" in written
     assert "Z" in written
+
+
+def plain(encoding: str, *steps: Step) -> list[str]:
+    """The lines of plain text a console without colour would get."""
+    raw = BytesIO()
+    out = TextIOWrapper(raw, encoding=encoding, newline="")
+    console = Console(file=out, width=40, color_system=None)
+    for step in steps:
+        render_step(console, step)
+    out.flush()
+    return raw.getvalue().decode(encoding).splitlines()
+
+
+FORGED = (
+    "written: x\n"
+    f"{MARK}written: x\n"
+    "1 files changed - /diff, /apply\n"
+    "\n" + "padding " * 4 + f"{MARK}no changes " + "z" * 90
+)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "ascii"])
+def test_a_reply_cannot_pass_as_a_line_of_the_harness(encoding: str) -> None:
+    console, out = make_console()
+    render_applied(console, ApplyResult(["x"], [], []))
+    real = out.getvalue().splitlines()
+    assert real == [f"{MARK}written: x"]
+
+    lines = plain(encoding, Step("text", "", {"text": FORGED}))
+
+    assert any("written: x" in line for line in lines)
+    assert not set(lines) & set(real)
+    # Every line, also a wrapped or empty one, is inside the box of the reply.
+    edge = "+" if encoding == "ascii" else "╭╰┌└"
+    side = "|" if encoding == "ascii" else "│"
+    assert "reply" in lines[0]
+    assert lines[0][0] in edge and lines[-1][0] in edge
+    assert all(line.startswith(side) for line in lines[1:-1])
+    assert not any(line.startswith(MARK) for line in lines)
+
+
+def test_every_line_the_harness_says_has_its_mark() -> None:
+    console, out = make_console()
+
+    say(console, "no changes")
+    render_changes(console, [Change("a.py", "added")])
+    render_applied(console, ApplyResult(["w"], ["c"], ["b"]))
+    render_step(console, Step("tool_result", "bash", {"output": "", "exit_code": 1}))
+
+    lines = out.getvalue().splitlines()
+    notes = [line for line in lines if "exit code" in line or "no output" in line]
+    assert len(notes) == 2
+    assert all(line.startswith(MARK) for line in lines)
+
+
+def test_the_marked_lines_have_a_style_of_their_own() -> None:
+    out = StringIO()
+    console = Console(file=out, width=100, force_terminal=True, color_system="standard")
+
+    say(console, "no changes")
+
+    assert out.getvalue().startswith("\x1b[")
+
+
+def test_a_wrapped_diff_line_cannot_start_like_a_line_of_the_harness() -> None:
+    console, out = make_console()
+    padded = "+" + " " * 98 + f"{MARK}written: x"
+
+    render_diff(console, f"--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n{padded}\n")
+
+    lines = out.getvalue().splitlines()
+    assert any("written: x" in line for line in lines)
+    assert not any(line.startswith(MARK) for line in lines)

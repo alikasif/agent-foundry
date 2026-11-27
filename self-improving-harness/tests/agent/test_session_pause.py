@@ -106,3 +106,54 @@ def test_a_failed_resume_is_an_error_step_and_the_model_is_not_asked() -> None:
     assert "could not unpause" in found[0].data["message"]
     assert llm.requests == []
     assert container.done == ["unpause", "pause"]
+
+
+@pytest.mark.parametrize("broken", ["", "unpause"])
+def test_a_sandbox_that_froze_is_not_marked(broken: str) -> None:
+    chat, _ = make(Recorded(broken), reply(text("ok")))
+
+    asyncio.run(steps(chat))
+
+    assert not chat.pause_failed
+
+
+def test_a_failed_pause_is_remembered_even_if_a_later_one_works() -> None:
+    class Once(Recorded):
+        async def pause(self) -> None:
+            self.done.append("pause")
+            if self.done.count("pause") == 1:
+                raise SandboxError("could not pause")
+
+    chat, _ = make(Once(), reply(text("one")), reply(text("two")))
+
+    async def twice() -> None:
+        await steps(chat)
+        await steps(chat)
+
+    assert not chat.pause_failed
+    asyncio.run(twice())
+
+    # What was left running then may still be running.
+    assert chat.pause_failed
+
+
+def test_a_failed_pause_is_remembered_when_a_cancel_hides_its_error() -> None:
+    class CancelledMeanwhile(Recorded):
+        async def pause(self) -> None:
+            assert turn is not None
+            turn.cancel()  # arrives while the turn waits for the pause
+            await asyncio.sleep(0)
+            raise SandboxError("could not pause")
+
+    turn: asyncio.Task | None = None
+    chat, _ = make(CancelledMeanwhile(), reply(text("ok")))
+
+    async def run() -> None:
+        nonlocal turn
+        turn = asyncio.create_task(steps(chat))
+        await turn
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run())
+
+    assert chat.pause_failed
