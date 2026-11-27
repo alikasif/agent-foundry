@@ -188,19 +188,21 @@ async def _commit_baseline(container: Container) -> None:
 async def _release(
     container: Container, interpreter: Interpreter, copy: SessionCopy
 ) -> None:
-    """Stop what ran, and remove the copy if nothing in it is left to apply."""
+    """Stop what ran, and remove the copy if nothing in it is left to apply.
+
+    If the container would not stop, this raises and the copy stays: what still
+    runs there may yet write to it.
+    """
     # Neither matters if it fails: removing the container ends everything in it.
     with suppress(Exception):
         await container.unpause()  # a frozen container takes no signals
     with suppress(Exception):
         # It waits for a running call, hence the limit.
         await asyncio.wait_for(interpreter.close(), _CLOSE_LIMIT_S)
-    try:
-        await container.stop()
-    finally:
-        # If the changes cannot be found, this raises and the copy stays.
-        if not find_changes(copy):
-            remove_copy(copy)
+    await container.stop()
+    # If the changes cannot be found, this raises and the copy stays.
+    if not find_changes(copy):
+        remove_copy(copy)
 
 
 @asynccontextmanager
