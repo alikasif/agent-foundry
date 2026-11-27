@@ -2,13 +2,16 @@
 
 import asyncio
 
+import pytest
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.function_tool import FunctionTool
 
+from harness.agent import session as session_module
 from harness.agent.build import build_agent
 from harness.agent.session import ChatSession, Step
+from harness.sandbox.container import ExecResult
 from harness.tools.plan.tool import PlanState, make_plan
 from tests.fakes import ScriptedLlm, call, planned, reply, text
 
@@ -244,3 +247,17 @@ def test_closing_cancels_the_running_turn() -> None:
         return turn.cancelled()
 
     assert asyncio.run(chat())
+
+
+def test_the_baseline_commit_gets_ten_minutes(monkeypatch: pytest.MonkeyPatch) -> None:
+    given: list[dict] = []
+
+    async def fake(container: object, command: str, **options: object) -> ExecResult:
+        given.append(options)
+        return ExecResult("", exit_code=0)
+
+    monkeypatch.setattr(session_module, "run_bash", fake)
+
+    asyncio.run(session_module._commit_baseline(object()))  # pyrefly: ignore
+
+    assert given == [{"timeout_s": 600}]

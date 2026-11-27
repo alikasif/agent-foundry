@@ -40,6 +40,8 @@ _BASELINE = (
     "git -c user.name=sih -c user.email=sih@localhost "
     "commit -q --allow-empty -m baseline"
 )
+# Far over a code call's limit: a copy may hold 20,000 files and 500 MB.
+_BASELINE_TIMEOUT_S = 600
 
 
 @dataclass(frozen=True)
@@ -190,7 +192,7 @@ class ChatSession:
 
 async def _commit_baseline(container: Container) -> None:
     """A repository for the agent, made in the container: never on the host."""
-    result = await run_bash(container, _BASELINE)
+    result = await run_bash(container, _BASELINE, timeout_s=_BASELINE_TIMEOUT_S)
     if result.exit_code != 0:
         reason = result.output.strip() or result.error
         raise SandboxError(f"the baseline commit failed: {reason}")
