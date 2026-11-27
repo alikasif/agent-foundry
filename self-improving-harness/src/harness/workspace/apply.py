@@ -51,7 +51,11 @@ class _Plan:
 
 
 def apply_changes(copy: SessionCopy, changes: list[Change]) -> ApplyResult:
-    """Make ``changes`` in the user's folder, all of them or, on conflict, none."""
+    """Make ``changes`` in the user's folder.
+
+    On a conflict nothing is written. Otherwise blocked or unwritable paths are
+    skipped and returned in ``blocked``, and the rest are written.
+    """
     if not copy.source.is_dir():
         raise WorkspaceError(f"{copy.source} is not a folder any more")
     source = long_path(Path(os.path.realpath(copy.source)))

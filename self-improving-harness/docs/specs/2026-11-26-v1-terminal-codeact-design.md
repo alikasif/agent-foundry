@@ -95,7 +95,7 @@ The agent chooses per request. CodeAct is a capability, not a rule.
 
 ## My calls (correct any)
 - No approval prompt before each command; the sandbox is the guard and the code is shown.
-- `/apply` is all or nothing; no per-file choice.
+- `/apply` has no per-file choice. On a conflict nothing is written; otherwise blocked or unwritable paths are skipped and named, and the rest are written.
 - Ignored files (local config, generated data) are not copied, so the agent may need to recreate them.
 - At most 30 model calls per message.
 - Model as before: `deepseek/deepseek-v4.1-flash-1017`, reasoning `medium`, provider `parasail`.
@@ -129,7 +129,7 @@ self-improving-harness/
 
 ## Done when
 - `sih chat <folder>`: ask it to find and fix a small bug; it explores, edits, runs the tests, reports.
-- Your folder is unchanged until `/apply`, and then holds exactly the shown changes.
+- Your folder is unchanged until `/apply`, and then holds the shown changes, except any blocked or unwritable path, which is named.
 - Code never runs before a plan for that message is on screen.
 - A question that needs no code is answered with no tool call; a question about the folder's contents is answered after looking.
 - A variable set in one `python` call is there in the next, also after your next message.

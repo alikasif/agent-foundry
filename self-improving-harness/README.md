@@ -73,9 +73,11 @@ at the typing prompt (there it should leave the chat).
 ## /diff and /apply
 - Changes are found by comparing the copy with its pristine twin, on the host. New files
   your `.gitignore` ignores, `.git`, caches and dependency folders are left out.
-- `/apply` is all or nothing, and applies exactly the list it showed you.
-- If you edited one of those files since the copy was made, **nothing** is written and
-  the files are named.
+- `/apply` takes exactly the list it showed you; there is no per-file choice.
+- On a conflict (you edited one of those files since the copy was made), **nothing** is
+  written and the files are named.
+- Otherwise a blocked or unwritable path is skipped and named, and **the rest are
+  written**.
 - Never written: anything named like `.git` (any spelling), `.env` files, links, paths
   that lead outside your folder, and anything under what was skipped.
 - A file that used CRLF line endings keeps them.
