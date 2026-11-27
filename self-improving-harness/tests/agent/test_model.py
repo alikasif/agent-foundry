@@ -1,3 +1,9 @@
+import os
+import subprocess
+import sys
+
+import pytest
+
 from harness.agent.model import ModelSettings, build_llm, model_settings
 
 DEFAULTS = ModelSettings("deepseek/deepseek-v4.1-flash-1017", "medium", "parasail")
@@ -37,3 +43,25 @@ def test_build_llm() -> None:
             "provider": {"order": ["parasail"], "allow_fallbacks": False},
         },
     }
+
+
+@pytest.mark.parametrize(("given", "expected"), [(None, "True"), ("False", "False")])
+def test_litellm_does_not_fetch_prices_at_import(
+    given: str | None, expected: str
+) -> None:
+    """In a fresh process, since this one has imported LiteLLM already."""
+    name = "LITELLM_LOCAL_MODEL_COST_MAP"
+    env = {key: value for key, value in os.environ.items() if key != name}
+    if given is not None:
+        env[name] = given
+    script = f"import os, harness.agent.model; print(os.environ['{name}'])"
+    found = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+
+    assert found.stdout.split() == [expected]

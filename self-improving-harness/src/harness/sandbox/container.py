@@ -157,6 +157,20 @@ class Container:
         if code != 0 and not any(text in stderr for text in gone):
             raise SandboxError(f"container {self._name} stays: {_reason(stderr)}")
 
+    async def pause(self) -> None:
+        """Freeze every process in the container. Harmless if already frozen."""
+        await self._freezer("pause", b"is already paused")
+
+    async def unpause(self) -> None:
+        """Let a frozen container run again. Harmless if it is not frozen."""
+        await self._freezer("unpause", b"is not paused")
+
+    async def _freezer(self, action: str, already_done: bytes) -> None:
+        code, stderr = await _run(["docker", action, self._name])
+        if code != 0 and already_done not in stderr:
+            reason = _reason(stderr)
+            raise SandboxError(f"could not {action} {self._name}: {reason}")
+
     async def __aenter__(self) -> Self:
         await self.start()
         return self

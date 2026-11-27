@@ -1,5 +1,6 @@
 """The model the agent talks to, and the one safe way to import LiteLLM."""
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -9,6 +10,8 @@ from google.adk.models.lite_llm import LiteLlm
 # In its default DEV mode LiteLLM loads a .env file when imported, which could be one
 # in the current folder. ADK's loader switches that off, so this must be the first
 # import of LiteLLM: never write a plain ``import litellm`` that can run before it.
+# The price list that comes with it, instead of one fetched from the net at import.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 lite_llm._ensure_litellm_imported()
 # Otherwise it prints help text to stdout when a call fails.
 lite_llm.litellm.suppress_debug_info = True
