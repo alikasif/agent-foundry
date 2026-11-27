@@ -1,4 +1,4 @@
-"""Fixtures shared by the sandbox tests."""
+"""Fixtures shared by the sandbox tests, and the opt-in for paid tests."""
 
 import asyncio
 import os
@@ -11,6 +11,25 @@ import pytest
 from harness.sandbox.container import Container, ContainerSpec, ensure_image
 
 PROJECT = Path(__file__).parents[1]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--live", action="store_true", help="run the live tests: PAID model calls"
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip ``live`` tests without ``--live``, whatever ``-m`` or ``-k`` selects."""
+    # The default: this file can be loaded too late for the option to be parsed.
+    if config.getoption("live", default=False):
+        return
+    skip = pytest.mark.skip(reason="paid model calls: pass --live")
+    for item in items:
+        if item.get_closest_marker("live"):
+            item.add_marker(skip)
 
 
 @pytest.fixture(scope="session")

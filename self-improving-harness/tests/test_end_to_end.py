@@ -1,7 +1,8 @@
 """A whole chat over a real container: a scripted model, and live checks.
 
-The live tests make paid calls. What they print and assert holds no provider text:
-an error step is shown as the name of its exception only.
+The live tests make paid calls and are skipped without ``--live``. What they print
+and assert holds no provider text: an error step is shown as the name of its
+exception only.
 """
 
 import asyncio
@@ -107,7 +108,7 @@ def test_a_bug_is_fixed_in_the_copy_and_reaches_the_folder_on_apply(
     assert list(sessions.iterdir()) == []  # nothing left to apply: no copy kept
 
 
-# Live checks: the real model, run on request only.
+# Live checks: the real model, run only with ``--live``.
 
 # Raised inside pydantic about LiteLLM's own types, at the first model call.
 _LITELLM_NOISE = pytest.mark.filterwarnings("ignore:Items? .*ReadOnly:UserWarning")

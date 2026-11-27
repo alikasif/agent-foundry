@@ -28,7 +28,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "."]
 markers = [
     "docker: needs the Docker engine",
-    "live: makes a paid OpenRouter call",
+    "live: makes a paid OpenRouter call; skipped without --live",
 ]
 
 [tool.ruff]

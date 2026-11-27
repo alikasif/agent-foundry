@@ -123,11 +123,11 @@ too: remove only what is not in use.
 ```sh
 uv run pytest -m "not live and not docker"   # offline
 uv run pytest -m "not live"                  # adds the Docker tests
-uv run pytest -m live -s                     # real model: PAID calls
+uv run pytest -m live --live -s              # real model: PAID calls
 uv run ruff check . && uv run ruff format --check . && uv run pyrefly check
 ```
 
-A bare `uv run pytest` includes the paid live tests when `.env` has a key.
+The live tests are skipped unless you pass `--live`, whatever `-m` selects.
 
 Layout and allowed imports are in the
 [design](docs/specs/2026-11-26-v1-terminal-codeact-design.md); how a turn works and
