@@ -7,5 +7,5 @@ Run a bash command in the sandbox. Each call is a fresh shell that starts in /wo
 """
 
 python = """
-Run Python code in a persistent interpreter in the sandbox, started in /workspace. Variables, imports and functions are kept across calls and messages until the interpreter is restarted. Use it for several steps, loops, filtering and results to reuse. The value of a final bare expression is printed. Long output is cut. Replacing a builtin (such as `print` or `open`) lasts only for the call that did it. A call over 120 seconds restarts the interpreter. Refused until `plan` has been called for the current message.
+Run Python code in a persistent interpreter in the sandbox, started in /workspace. Variables, imports, functions and the working directory are kept across calls and messages until the interpreter is restarted. Use it for several steps, loops, filtering and results to reuse. The value of a final bare expression is printed. Long output is cut. Replacing a builtin (such as `print` or `open`) lasts only for the call that did it. A call over 120 seconds restarts the interpreter. Refused until `plan` has been called for the current message.
 """
