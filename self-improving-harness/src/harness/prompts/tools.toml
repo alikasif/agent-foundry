@@ -1,0 +1,11 @@
+plan = """
+Record what you understood and the steps you will take; the user sees them. Needed before the first `bash` or `python` call of each message that needs code, not for a reply in text. Call it again when the steps change or to mark progress. `done` is how many steps are finished, counted from the first. It runs nothing and does not wait for approval.
+"""
+
+bash = """
+Run a bash command in the sandbox. Each call is a fresh shell that starts in /workspace: `cd`, variables and exports do not carry over. Use it for a simple look or action, such as listing files or running the tests. Returns stdout and stderr together as `output`, and the exit code. Long output is cut. A command is stopped after 120 seconds. Refused until `plan` has been called for the current message.
+"""
+
+python = """
+Run Python code in a persistent interpreter in the sandbox, started in /workspace. Variables, imports, functions and the working directory are kept across calls and messages until the interpreter is restarted. Use it for several steps, loops, filtering and results to reuse. The value of a final bare expression is printed. Long output is cut. Replacing a builtin (such as `print` or `open`) lasts only for the call that did it. A call over 120 seconds restarts the interpreter. Refused until `plan` has been called for the current message.
+"""
